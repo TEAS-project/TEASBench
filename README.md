@@ -4,6 +4,13 @@ Uniting Models, Algorithms, and System Innovators with Top-Down Evolutionary Ben
 
 🌐 **Website:** [www.teasbench.com](https://www.teasbench.com)
 
+## Benchmark Categories
+
+| Category | Description |
+|----------|-------------|
+| **MoE-Benchmark** | Benchmarks for Mixture-of-Experts models |
+| **TTS-Benchmark** | Benchmarks for Test-Time Scaling methods |
+
 > **Note:** Currently tested on Kubernetes clusters with NVIDIA GPU support.
 
 ## Prerequisites
