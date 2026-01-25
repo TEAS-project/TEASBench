@@ -1,0 +1,285 @@
+id,problem,answer,Category,Subcategory,Source
+imo-bench-algebra-001,"For a given positive integer $N$, Henry writes the quotient of $ab$ divided by $N+1$ on the board for each integer pair $(a,b)$ where $1\le a,b\le N$. Find all $N$ such that the sum of the $N^2$ numbers Henry wrote on the board is $\frac{N^3-N^2+2}{4}$.
+",3,Algebra,Operation,IMO Shortlist 2021
+imo-bench-algebra-005,"$p, q, r, s$ are positive real numbers satisfying $(p+s)(r+q) = ps + qr$. Find the smallest possible value of
+
+\[
+\frac{p}{q} + \frac{r}{p} + \frac{s}{r} + \frac{q}{s}.
+\]
+",8,Algebra,Inequality,IMO Shortlist 2020
+imo-bench-algebra-007,"Let $a_1, a_2, \ldots, a_{2026}$ satisfy $3^i < a_i < 3^{i+1}$ for each $i$. For each $1\le i\le 2025$, define
+\[
+A_i = \sum_{1\leqslant x\leqslant i+1}\prod_{y\neq x}\frac{a_{x}a_{y}-1}{a_{x}-a_{y}}.
+\]
+Find all possible values of $\sum_{i=1}^{2025} A_i^2$
+",1012,Algebra,Equation,IMO Shortlist 2020
+imo-bench-algebra-015,"Suppose that $g:\mathbb{Z}\to O$, where $O$ is the set of odd integers, satisfies
+$$g(a + g(a) + b)-g(a+b) =  g(a-b)-g(a-g(a)-b)$$
+for all integers $a,b$. Furthermore, we have $g(0)=9, g(1)=27, g(2)=3$, and $g(10)=63$. Find all possible values of $g(2025)$.",8109,Algebra,Functional Equation,IMO Shortlist 2015
+imo-bench-algebra-022,"Let $a_{1},\ldots,a_{2024}$ be nonnegative real numbers such that $a_{x}+a_{x+1}+a_{x+2}\leq2$ for all $x=1,\ldots,2024$ (we put $a_{2025}=a_{1},a_{2026}=a_{2}$ ). Find the maximal possible value of the sum
+
+\[
+\sum_{x=1}^{2024}a_{x}a_{x+2}
+\]
+",1012,Algebra,Inequality,IMO Shortlist 2010
+imo-bench-algebra-023,"Find the minimum value of an integer $N$ that satisfies the following condition:
+
+Given 2025 non-degenerate triangles, each triangle has one side colored green, one side colored purple, and one side colored orange. Let the lengths of the green sides be $g_1 \ge g_2 \ge \cdots \ge g_{2025}$, the lengths of the purple sides be $p_1 \ge p_2 \ge \cdots \ge p_{2025}$, and the lengths of the orange sides be $o_1 \ge o_2 \ge \cdots \ge o_{2025}$. Then, the number of $1 \le a \le 2025$ such that $g_a, p_a, o_a$ do not form the sides of a triangle is always less than or equal to $N$.
+",2024,Algebra,Sequence,IMO Shortlist 2010
+imo-bench-algebra-026,"Suppose that a function $f:\mathbb{Q}\rightarrow\mathbb{F}_2$ satisfies $f(r)+f(r')=1$ for all distinct rational numbers $r, r'$ satisfying either $r+r'=0$ or $r+r'=1$ or $rr'=1$. Suppose further that $f(11/3)=1$. Evaluate
+$f(7/3)+f(11/4)+f(2024/5)+f(109/11)+f(3/71)+f(5/204)$",1,Algebra,Other,IMO Shortlist 2005
+imo-bench-algebra-032,"We call $g: \mathbb{R} \rightarrow \mathbb{R}$ a good function if $g$ satisfies all the following conditions:
+
+(1) For any two distinct real numbers $a, b$, if $g(ab) = 0$, then $g(a) = 0$ or $g(b) = 0$.
+(2) For any two distinct real numbers $a, b$, if $g(ab) \neq 0$, then $$\frac{g(a)-g(b)}{a-b}=\frac{g(a)g(b)}{g(ab)}.$$
+(3) $g(1)=1$
+\\
+Let $S=\{2^a 3^b 5^c 7^d : a,b,c,d\in \mathbb{Z}\}$ and we call $h:S\rightarrow \mathbb{R}$ an essential function if there exists a good function $g$ such that $h(x)=g(x)$ for all $x\in S$. Find the number of essential functions. ",16,Algebra,Functional Equation,IMO Shortlist 2001
+imo-bench-algebra-039,"Let $p, q, r, s$ be constants such that the equation $py^3 + qy^2 + ry + s = 0$ has three distinct real roots. Find all possible values for the number of distinct real roots of the equation
+$$\left(pz^{3}+qz^{2}+rz+s\right)(6pz+2q)=\left(3pz^{2}+2qz+r\right)^{2}.$$
+",2,Algebra,Equation,Ukraine 1997
+imo-bench-algebra-050,"Let $r$ be the unique positive root of $x^3+x^2+x-10=0$. Suppose that for non-negative integers $k_0, k_1, k_2, \ldots , k_{100}$, we have $$\sum_{i=0}^{101}k_i r^i=2025.$$ Find the minimum possible value of $\sum_{i=0}^{101}k_i$.
+",44,Algebra,Polynomial,Vietnam 2015
+imo-bench-algebra-052,"Find the minimal $d$ satisfying the following property:
+
+For any sequence of integers $x_1, x_2, \ldots, x_n$ satisfying
+\[
+    0 \le x_i \le 100, \quad \sum_{i=1}^n x_i \ge 1810
+\]
+for all $i = 1, 2, \ldots, n$, there exists a subset $I$ of $\{1,2, \ldots, n\}$ such that
+\[
+    \left| \sum_{i \in I} x_i - 1810 \right| \le d.
+\]",48,Algebra,Sequence,Argentina 2017
+imo-bench-algebra-054,"Let $a_0, a_1, a_2, \ldots$ be an infinite sequence of integers that is not eventually periodic, which means there does not exist integers $N, d > 0$ such that $a_{n + d} = a_n$ for all integers $n \ge N$.
+
+Let $S$ be the set of $2025$-tuples containing $(a_{n + 1}, \ldots, a_{n + 2025})$ for $n = 0, 1, \ldots$. Find the minimum number of elements of $S$.",2026,Algebra,Sequence,Italia 2018
+imo-bench-algebra-055,"Consider a sequence of positive integers $x_1, x_2, \ldots$ satisfying the following condition:
+\[
+    (x_{2n + d} - x_{n + d} - n)(x_{2n + d} - x_n - n - d) = 0
+\]
+for all integers $n \ge 32$ and $d \ge 1024$. Find the value of the largest possible positive integer $n$ for which $x_{n + 1} - x_n \neq 1$.",2079,Algebra,Sequence,Japan 2018
+imo-bench-algebra-056,"Find the smallest positive integer $k$ such that there exist two polynomials $f(x),g(x)$ with integer coefficients, both of degree at least 2025 and leading coefficients at least 1000, such that
+\[
+    f(g(x)) - 3g(f(x)) = k
+\]
+for infinitely many real numbers $x$. ",1,Algebra,Polynomial,Korea 2018
+imo-bench-algebra-059,"Compute the integral part of the number
+\[
+    \sum_{n=1}^{2024}\frac{2025^n}{\left(1+2025\right)\cdots\left(n+2025\right)}-\sum_{n=1}^{2024}\left(1-\frac{1}{2025}\right)\cdots\left(1-\frac{n}{2025}\right).
+\]",0,Algebra,Inequality,Romania 2018
+imo-bench-algebra-061,"Call a polynomial $P(x, y, z)$ with integer coefficients \emph{good} if for any real numbers $x, y, z$, $P(x, y, z) = 0$ if and only if $x = y = z$.
+
+Find the maximal integer $n$ such that for all \emph{good} polynomials $P$ and integers $a, b, c$ satisfying $b - a = c -b\ne 0$, $P(a, b, c)$ is divisible by $(b - a)^n$.",2,Algebra,Polynomial,Singapore 2018
+imo-bench-algebra-062,"Let $x_0, x_1, \ldots, x_{2024}$ and $y_1, y_2, \ldots, y_{2024}$ be two real sequences such that for all $n = 0, 1, \ldots, 2023$,
+\[
+    x_{n+1} = 4x_n^2, \quad y_{n+1} = x_n \quad \text{ or } \quad x_{n+1} = \frac{x_n}{2}, \quad y_{n+1} = \frac{1}{4} - x_n
+\]
+holds, and $x_{2024} \le x_0$. Find the maximal value of $y_1 + \cdots + y_{2024}$.
+",506,Algebra,Sequence,Turkey 2018
+imo-bench-algebra-063,"Let $a, b, c$ be lengths of the sides of some triangle of positive area, satisfying
+\[
+    a^2b^2 = 2(a + b - c)(b + c - a)(c + a - b).
+\]
+Find the maximum value for $a + b + c$.
+",8,Algebra,Inequality,Austria 2017
+imo-bench-algebra-068,"Find all positive integers $n$ satisfying the following condition.
+
+[Condition] For any positive integer $d \le n$ and a polynomial $Q(x)$ with integer coefficients and of degree less than $d$, there exists a positive integer $k \le n$, and $k + 1$ distinct integers $a_1, \ldots, a_{k+1}$ such that
+\[
+    Q(a_{k+1}) - \sum_{i=1}^k Q(a_i) = a_{k+1}^d - \sum_{i=1}^k a_i^d.
+\]
+",2,Algebra,Polynomial,RMM 2017
+imo-bench-algebra-073,"Let $x, y, z$ be nonnegative real numbers with
+\[
+    (x^3 - 3x^2 + 3x) + (y^3 - 3y^2 + 3y) + (z^3 - 3z^2 + 3z) = 4.
+\]
+Find the maximal value of
+\[
+    x^2 + y^2 + z^2 - x - y - z.
+\]
+",4,Algebra,Inequality,Austria 2016 (modified)
+imo-bench-algebra-075,"Find the largest possible positive integer $n$ such that there exist $n$ distinct positive real numbers $a_1, a_2, \dots, a_n$ satisfying
+\[
+3(a_i^2 + a_j^2) + 15a_i^2 a_j^2 \ge (4a_ia_j + 1)^2
+\]
+for any $1 \le i, j \le n$.
+",3,Algebra,Inequality,Hong Kong TST 2015
+imo-bench-algebra-076,"Find the smallest positive integer $n$ such that there exist real numbers $\theta_1, \ldots, \theta_n$ satisfying
+\[
+    \sum_{i=1}^n \sin\theta_i = 0, \quad \sum_{i=1}^n \cos^2 \theta_i = n - 2025.
+\]
+",2026,Algebra,Inequality,Hong Kong 2015
+imo-bench-algebra-078,"Let $x_1, \ldots, x_{2024}$ be positive real numbers such that $x_{i+1} \ge 2x_i$ for $i = 1,\ldots, 2023$. Find the maximal possible value of
+\[
+    \sum_{i=1}^{2023} \frac{x_{i} - x_{i-1}}{x_{i+1} - x_i}
+\]
+where $x_0 = 0$.
+",1012,Algebra,Inequality,Romania 2016 (modified)
+imo-bench-algebra-080,"Suppose that the polynomials $f(x)$ and $g(x)$ with integer coefficients satisfy the following conditions:
+
+[Condition 1] Define integer sequences $(a_n)_{n \ge 1}$ and $(b_n)_{n \ge 1}$ by $a_1 = 2024$ and
+\[
+    b_n = f(a_n), \quad a_{n+1} = g(b_n)
+\]
+for $n \ge 1$. Then for any positive integer $k$, there exists some non-zero term of $(a_n)$ or $(b_n)$ that is divisible by $k$.
+
+[Condition 2] $2025\le f(0), g(0) \le 10000$.
+
+Find the maximum possible value of $f(0)-g(0)$",3988,Algebra,Polynomial,Vietnam TST 2014
+imo-bench-algebra-083,"Show that there exists a sequence of positive integers $\{a_n\}_{n \ge 1}$ satisfying the following, and find the value of $a_{4096}$.
+\[
+    a_n = \begin{cases}
+        1 & n = 1, 2, \\
+        a_{a_{n-1}} + a_{n - a_{n-1}} & \text{otherwise.}
+    \end{cases}
+\]
+",2048,Algebra,Sequence,China MO 2014
+imo-bench-algebra-092,"Find the smallest positive integer $n$ such that there exist real numbers $x_1, \ldots, x_n$ between $-1$ and 1 satisfying
+\[
+    \sum_{i=1}^n x_i^2 + \left(\sum_{i=1}^n x_i\right)^2 = 20, \quad |x_1 + \ldots + x_n| < 1.
+\]
+",21,Algebra,Inequality,Iran 2012
+imo-bench-algebra-093,"Find the maximum positive integer $n$ such that there exist distinct real numbers $a_1, \ldots, a_n$ between 0 and 1 satisfying
+\[
+    a_i^{[1 / a_j]} = a_j^{[1 / a_i]}
+\]
+for all $1 \le i, j\le n$, where $[x]$ is the greatest integer not exceeding $x$.
+",4,Algebra,Sequence,Iran 2018
+imo-bench-algebra-094,"A polynomial $P$ with integer coefficients is called a geometric polynomial if its degree is at least 2 and the set $\{P(k): k \in \mathbb{Z}\}$ contains an infinite geometric progression. Suppose that the leading coefficient and constant term of a geometric polynomial $Q$ are $64$ and $-486$, respectively. Find $Q(5)$.",33614,Algebra,Polynomial,Iran 2014
+imo-bench-algebra-095,"Let $\{a_n\}_{n \ge 1}$ be the sequence of integers satisfying $a_1 = 0$ and
+\[
+    a_n = \max_{1 \le i \le n - 1} \left\{a_i + a_{n - i} + \min(i, n - i) \right\}
+\]
+for all $n \ge 2$. Determine $a_{2025}$.
+",11059,Algebra,Sequence,Taiwan 2000
+imo-bench-algebra-100,"Find number of triples $(x,y,z)$ of real numbers satisfying
+\[
+x^2 + y^2 + z^2 = xy^3 + yz^3 + zx^3 = 3.
+\]
+",8,Algebra,Inequality,Variation of Vasc's inequality
+imo-bench-number_theory-001,"Find all positive integers $m > 1$ such that there exists a permutation $(a_1, a_2, \dots, a_n)$ of the all divisors of $m$ for which $a_1 + \dots + a_i$ is a perfect square for all $1 \leq i \leq n$.
+",3,Number theory,Perfect power,IMO Shortlist 2021
+imo-bench-number_theory-002,"Find the number of all positive integers $2\leq m \leq 2000$ that satisfy the following condition: For any $m$ distinct positive integers $(n_1, \ldots, n_m)$, at least one of the following two conditions holds: $n_1 + \ldots + n_m$ is a multiple of $m$, or there exists a permutation $(k_1, \ldots, k_m)$ such that $k_1 + 2k_2 + \ldots + mk_m$ is a multiple of $m$.
+",1009,Number theory,Divisibility,IMO Shortlist 2021
+imo-bench-number_theory-003,"Suppose that the function $g:\mathbb{N}\rightarrow \mathbb{N}$ satisfies following four conditions.
+
+(1) There exists a natural number $n$ such that $g(n) \neq 1$.
+
+(2) For any natural numbers $x$ and $y$, $g(xy) = g(x) + g(y) - 1$.
+
+(3) There are infinitely many $n$ such that $g(k) = g(n-k)$ for any $k < n$.
+
+(4) $g(39455)=11$ and $g(94175)=21$.
+
+Find $g(41000)$.",31,Number theory,Functional Equation,IMO Shortlist 2020
+imo-bench-number_theory-008,"Does there exist a positive integer $n$ satisfying the following condition? If so, find the smallest such $n$.
+
+(Condition) There exist infinitely many ordered $n$-tuples of positive rational numbers $(x_1, \dots, x_n)$ such that both $\sum_{i=1}^n i \cdot x_i$ and $\frac{1}{x_1 + \dots + x_n} + \frac{1}{x_2 + \dots + x_n} + \dots + \frac{1}{x_n}$ are positive integers.
+",3,Number theory,Divisibility,IMO Shortlist 2017
+imo-bench-number_theory-017,"$\alpha$ is a real number that is not rational, and $k$ is a positive integer. A pair of positive integers $(m, n)$ is called ""pretty"" if $m\lceil n\alpha \rceil - n \lfloor m\alpha \rfloor =k$. A pretty pair $(m, n)$ is called ""cool"" if neither $(m-n, n)$ nor $(m, n-m)$ are pretty pairs. Find the number of cool pairs when $k=2310$.
+",6912,Number theory,Other,IMO Shortlist 2013
+imo-bench-number_theory-018,"Let a set of integers $X$ be called a \textit{good set} if it satisfies the following condition:
+(Condition) For any $a, b \in X$ (where $a$ and $b$ can be equal) and any $i \in \mathbb{Z}$, $a^2 + i \cdot a \cdot b + b^2 \in X$.
+An ordered pair $(x, y)$ of two different positive integers is called a \textit{complex pair} if there are at least two good sets containing both $x$ and $y$. A non-negative integer $m$ is called a \textit{good number} if there exists a complex pair $(x,y)$ such that $m=x^2 + y^2$. Find $20$th smallest good number.
+",208,Number theory,Set,IMO Shortlist 2012
+imo-bench-number_theory-020,"Find the number of positive integers $n\ge 2$ less than 200 that are relatively prime to 6 such that for any positive integer $a$ satisfying the condition that the quotient when $n$ is divided by $a$ is 2, the binomial coefficient $\binom{a-1}{n-2a-1}$ is a multiple of $n-2a$.
+",44,Number theory,Divisibility,IMO Shortlist 2012
+imo-bench-number_theory-021,"For a positive integer $n$, we call $g:\mathbb{Z}\rightarrow \mathbb{Z}$ a \textif{$n$-good function} if $g(1)=1$ and for any two distinct integers $a$ and $b$, $g(a)-g(b)$ divides $a^n -b^n$. We call a positive integer $n$ an \textit{exotic integer} if the number of $n$-good functions is twice of an odd integer. Find $132$th exotic integer.
+
+",69169,Number theory,Functional Equation,IMO Shortlist 2011
+imo-bench-number_theory-023,"Find the smallest positive integer $m$ that satisfies the following condition:
+(Condition) There exist $m$ distinct positive integers $a_1, \dots, a_m$ such that $(1-\frac{1}{a_1})\cdots (1-\frac{1}{a_m}) = \frac{42}{2010}$.
+",48,Number theory,Diophantine Equation,IMO Shortlist 2010
+imo-bench-number_theory-024,"Denote by $(a_1, b_1), \ldots, (a_k, b_k)$ all the ordered pairs of positive integers $(a,b)$ that satisfy
+$a^2 + 2\cdot 3^b = a(2^{b+1}-1)$. Evaluate $\sum_{i=1}^k (a_i + b_i)$.
+",94,Number theory,Diophantine Equation,IMO Shortlist 2010
+imo-bench-number_theory-025,"Find the smallest positive integer $n$ for which there exist integer-coefficient polynomials $P_1, \dots, P_n$ such that $\frac{{P_1(x)}^2 + \cdots + {P_n(x)}^2}{x^2 + 7}$ is a perfect square of an positive integer.
+",5,Number theory,Polynomial,IMO Shortlist 2010
+imo-bench-number_theory-027,"Find the largest $n$ for which there exist positive integers $x_1, \dots, x_n$ satisfying the following condition:
+(Condition) For any $2 \leq i \leq n-1$, $x_{i+1}x_{i-1} + x_{i+1} + x_{i-1} = x_i^2$.
+",4,Number theory,Diophantine Equation,IMO Shortlist 2009
+imo-bench-number_theory-028,"Given a positive integer $n$, there exists an integer $a$ such that the sequence $\{a_k\}$ defined by $a_0 = a$ and $a_k = \frac{a_{k-1}}{k} + k^{n-1}$ consists only of integers. Find the possible values of the remainder when $n$ is divided by 3.
+",2,Number theory,Sequence,IMO Shortlist 2009
+imo-bench-number_theory-032,"For the integer sequence $(a_n)$ defined by $a_1=10$ and $a_{n+1}=6a_n - 2^{n+2} - 3^{n+1} +5$, find all positive numbers that are relatively prime to every number in $(a_n)$.
+",1,Number theory,Divisibility,IMO Shortlist 2005
+imo-bench-number_theory-039,"Find the smallest positive integer $n$ such that there exists infinitely many triple $(a,b,c)$ of distinct positive integers such that $\frac{(a+b+c)(ab+bc+ca)+a+b+c}{4abc} = n$.",3,Number theory,Diophantine Equation,IMO Shortlist 2002
+imo-bench-number_theory-040,"Consider ordered quadruples of positive integers $(a,b,c,d)$ satisfying the following two conditions:
+(1) $a+b=c+d$
+(2) $ab=2cd$
+
+Find the maximum value of $k$ such that $\frac{c^2 +d^2}{cd} \geq k$ holds for all such quadruples.
+",6,Number theory,Diophantine Equation,IMO Shortlist 2001
+imo-bench-number_theory-043,"We call an ordered triple $(x,y,z)$ of positive integers a \textit{good triple} if $\frac{(x+1)^y}{x^z +1}$ is a positive integer. Find the number of good triples (x,y,z) such that $0<x,y,z<100$.
+",19601,Number theory,Diophantine Equation,IMO Shortlist 2000
+imo-bench-number_theory-044,"Find the number of positive integers $m$ less than or equal to 100 such that there exist two non-empty subsets $X, Y$ of $\{1, 2, \dots, m\}$ satisfying $X \cap Y = \emptyset$ and the sum of the elements in $X$ and the sum of the elements in $Y$ are each equal to $\frac{m(m+1)}{6}$.
+",64,Number theory,Set,Iran 2001
+imo-bench-number_theory-045,"A positive integer $n$ is called a cool integer if there exists a permutation $(x_1, \dots, x_n)$ of $(1, \dots, n)$ such that for any $i$, $x_1 + \dots + x_i$ is not a perfect square. Find the 2025th smallest cool integer.
+",2030,Number theory,Sequence,Iran 2002
+imo-bench-number_theory-049,"Find the maximum value of $m$ such that for any partition of $\{1, 2, \dots, 40\}$ into $m$ sets, there exists a set containing three elements $x, y, z$ (possibly with repetition) such that $x + y - z = 0$.
+",3,Number theory,Set,Belarus 2000
+imo-bench-number_theory-056,Let $P$ be a polynomial of degree $n>1$ such that all its non-zero coefficients are 1 or -1. Suppose that $P(k)$ is a multiple of $n$ for any positive integer $k$. Find the minimum possible number of non-zero coefficients in $P$.,2,Number theory,Polynomial,Estonia TST 2018
+imo-bench-number_theory-057,"Let $b_m b_{m-1}\cdots b_0$ be the base-7 representation of a positive integer $n$ for some positive integer $m$. Let $a_i$ be the number obtained by removing the digit $b_i$ from the base-7 representation of $m$ (read in base 7). Find the number of $n$ that satisfy $n=\sum_{i=0}^{m-1}a_i$.
+",42,Number theory,Base and Digit,Japan 2018
+imo-bench-number_theory-064,"Let $d(n)$ be the number of positive divisors of $n$ other than 1 and itself. Find the least nonnegative integer $a$ for which there exists a positive integer $n$ such that
+\[
+    d(n) = d(n + 735) = a.
+\]
+",2,Number theory,Divisor,Estonian Math Competition 16/17
+imo-bench-number_theory-067,"Find all primes $q$ such that
+\[
+    \sqrt[3]{\frac{q^3 + 1}{q + 1}}
+\]
+is a prime number different from $q$.
+",19,Number theory,Diophantine Equation,Belarus 2016
+imo-bench-number_theory-070,"We call a triple $(x, y, z)$ of (not necessarily positive) integers a \textit{good triple} if $y^x z^y x^z$ is a positive prime number. We enumerate good triples as $(x_1, y_1, z_1), (x_2, y_2, z_2), \dots$ in a way that $x_k^2 + y_k^2 + z_k^2 \le x_{k+1}^2 + y_{k+1}^2 + z_{k+1}^2$ holds for all positive integer $k$. Evaluate $x_{200}^2 + y_{200}^2 + z_{200}^2$",18771,Number theory,Other,Estonia 2015/2016
+imo-bench-number_theory-071,"Find the number of triples $(a, b, c)$ of positive integers such that
+\[
+    \sqrt{\frac{1001}{abc}}(\sqrt{ab} + \sqrt{bc} + \sqrt{ca})
+\]
+is a positive integer.
+",14,Number theory,Divisibility,Hong Kong 2015
+imo-bench-number_theory-076,"(a) Show that there exists a degree 3 monic polynomial $P(x)$ with integer coefficients such that for an integer $n$, $P(n)$ is a square of an integer if and only if $n = 2024$ or $2025$.
+
+(b) For such a polynomial $P(x)$ in (a), find all possible values for $P(2024)P(2025)$.
+",0,Number theory,Polynomial,RMM 2016
+imo-bench-number_theory-077,"Given a positive integer n, perform the following operation:
+
+(i) Remove the last digit of n.
+
+(ii) Add 3 times the removed digit to the remaining number.
+
+For example, if $n = 1013$, the operation yields $101 + 9 = 110$. If $n = 2$, the operation yields $0 + 6 = 6$.
+
+Starting with $260^{135}$, repeatedly apply this operation $2025$ times. What is the final resulting number?
+",8,Number theory,Operation,Japan 2015
+imo-bench-number_theory-082,"Find the number of integer-coefficient polynomials $P$ that satisfy all of the following conditions:
+
+(1) $\deg P \le 3$, and all coefficients of $P$ are between $0$ and $2012$, inclusive.
+(2) $P(x) + P(-x)$ is a multiple of $2013$ for all positive integers $x$ less than or equal to $100$.
+(3) The remainders when $P(0), P(1), \dots, P(2012)$ are divided by $2013$ are all distinct.
+",7200,Number theory,Polynomial,China Girl's MO 2014
+imo-bench-number_theory-085,"For which integer $x$ from $1$ to $1717$ maximizes the number of positive integers $y$ for which $\frac{1}{x} + \frac{1}{y}$ is a unit fraction?
+",1680,Number theory,Diophantine Equation,Hong Kong 2014
+imo-bench-number_theory-086,"Positive integers $M$ and $N$ satisfy the following conditions:
+
+(1) $M$ is a 1000-digit number, and none of its digits are 0.
+(2) The decimal expansion of $\left \lfloor \frac{M}{N} \right\rfloor$ contains the digit 0 exactly $A$ times. (The leading digit of the decimal expansion is not 0.)
+
+Find the maximum possible value of $A$.
+",939,Number theory,Base and Digit,Japan 2014
+imo-bench-number_theory-087,"Let a number that can be expressed as $n^a + 1$ (where $a$ is a positive integer) for a positive integer $n$ be called an $n$-near number. Denote by $(B_1, T_1, S_1), \ldots, (B_k, T_k, S_k)$ all ordered triples $(B, T, S)$ such that $B + T = S$, where $B$ is a 2-near number, $T$ is a 3-near number, and $S$ is a 6-near number. Evaluate $\sum_{i=1}^k (B_i + T_i + S_i)$
+",162,Number theory,Representation,Japan TST 2014
+imo-bench-number_theory-088,"For a positive integer $n$, find the sum of all $n$ such that the number of ordered pairs of positive integers $(a,b)$ where the greatest common divisor of $a$ and $b$ is $2023$ and the least common multiple of $a$ and $b$ is $n!$ does not exceed 4000.
+",820,Number theory,Divisor,Hungary 1998
+imo-bench-number_theory-089,"The incircle of a triangle with side lengths that are three consecutive integers is a unit circle. Find all possible values for the perimeter of the triangle.
+",12,Number theory,Diophantine Equation,Russia 1998
+imo-bench-number_theory-091,"A finite set $U$ of positive integers such that $|U|\ge 3$ is called a \textit{good set} if the greatest common divisor of any three distinct elements of $U$ is $1$, and for any two distinct elements of $U$, there exists another element that is a divisor of their product. A positive integer $m$ is called a \textit{good number} if there exists a good set $U$ such that $m$ is the product of elements of $U$. Find the $20$th smallest good number.",1600,Number theory,Set,Iran 2011
+imo-bench-number_theory-092,"Given distinct primes $p<q<r$, suppose that $p+q-r, q+r-p, r+p-q, p+q+r$ are all primes. If one of $p+q, q+r, r+p$ is $800$, find the maximum possible value of $r$.
+",797,Number theory,Diophantine Equation,China 2001
+imo-bench-number_theory-093,"Non-negative integers $a<b<c$ satisfy $c\le a+b$, and $3^a, 3^b, 3^c$ all have the same remainder when divided by $10000$. Find the minimum possible value of $a+b+c$.
+",3000,Number theory,Divisibility,China 2003
+imo-bench-number_theory-098,"You have entered a quiz competition. A positive integer $F \ge 2$ is given, and the competition starts with a number $S$ provided by the organizers. In each turn, you look at the number most recently provided by the organizers and choose a divisor or multiple other than 1 to submit. The organizers will then add or subtract 1 from the number you submitted and present it back to you. You win if you reach $F$ within $50$ turns. Find the $50th$ smallest value of $F$ for which you can succeed regardless of the initial number $S$.",93,Number theory,Other,Italy 2000
+imo-bench-number_theory-099,"How many integer triples $(a, b, N)$ such that $2^a5^b+625=N^2$?
+",4,Number theory,Diophantine Equation,Austrian-Polish Mathematics Competition 2000
+imo-bench-number_theory-100,"Let $m$ and $n$ be positive integers, and let $p$ be a prime. Suppose that $\log_p (m^2+n)$ and $\log_p(m+n^2)$ are both positive integers greater than 1. Denote by $(m_1, n_1, p_1), \ldots, (m_k, n_k, p_k)$ all possible triples $(m,n,p)$. Evaluate $\sum_{i=1}^k (m_i + n_i + p_i)$.
+",20,Number theory,Diophantine Equation,St. Petersburg City MO (Russia) 2000

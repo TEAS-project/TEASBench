@@ -1,0 +1,137 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: sglang-tirsc-7-
+  namespace: eidf230ns
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      name: sglang-tirsc-7-pod
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 2000
+
+      # Uncomment if GHCR package is private:
+      # imagePullSecrets:
+      #   - name: ghcr-pull
+
+      containers:
+        - name: runner
+          image: ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312
+          imagePullPolicy: Always
+
+          env:
+            - name: HF_HOME
+              value: /workspace/hf_cache
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /workspace/hf_cache/hub
+            - name: TRANSFORMERS_CACHE
+              value: /workspace/hf_cache/transformers
+            - name: HF_DATASETS_CACHE
+              value: /workspace/hf_cache/datasets
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: yufan-github-pat
+                  key: GITHUB_TOKEN
+
+          command: ["/bin/bash","-lc"]
+          args:
+            - |-
+              set -euo pipefail
+
+              # PVC-backed caches
+              mkdir -p /workspace/hf_cache/hub \
+                       /workspace/hf_cache/transformers \
+                       /workspace/hf_cache/datasets \
+                       /workspace/pip_cache
+
+              cd /workspace
+
+              BRANCH="yufan"
+              REPO_URL="https://yufan196884:${GITHUB_TOKEN}@github.com/yufan196884/aimo_3.git"
+
+              if [ -d "aimo_3/.git" ]; then
+                  echo "aimo_3 exists. Updating to origin/${BRANCH}..."
+                  cd /workspace/aimo_3
+                  git remote set-url origin "$REPO_URL"
+                  git fetch --all --prune
+                  git checkout -B "$BRANCH" "origin/$BRANCH"
+                  git reset --hard "origin/$BRANCH"
+              else
+                  echo "Cloning aimo_3 branch ${BRANCH}..."
+                  git clone --branch "$BRANCH" --single-branch "$REPO_URL" aimo_3
+                  cd /workspace/aimo_3
+              fi
+
+              # Optional sanity check (fast)
+              python - << 'PY'
+              import sys
+              print("python", sys.version)
+              import torch
+              print("torch", torch.__version__, "cuda", torch.version.cuda, "available", torch.cuda.is_available())
+              import sglang
+              print("sglang", getattr(sglang, "__version__", "unknown"))
+              PY
+
+              export PYTHONPATH="/workspace/aimo_3:${PYTHONPATH:-}"
+
+              python -u "./inference_systems/eval_aimo_tirsc_7.py" \
+                --model_path "unsloth/gpt-oss-120b" \
+                --host "0.0.0.0" \
+                --port 5000 \
+                --log_level "warning" \
+                --served_model_name "sglang_model" \
+                --mem_fraction_static 0.90 \
+                --tp_size 1 \
+                --dp_size 1 \
+                --tool_call_parser "gpt-oss" \
+                --reasoning_parser "gpt-oss" \
+                --reasoning_effort high \
+                --temperature 1.0 \
+                --random_seed 2026011209 \
+                --top_p 1.0 \
+                --max_new_tokens 8192 \
+                --max_workers 4 \
+                --majority_threshold 4 \
+                --dataset_name imo_answerbench_algnt \
+                --output_folder ./eval_aimo3/tirsc_7/gpt-oss-120b/ \
+                --k 4 \
+                --population 8 \
+                --loops 3 \
+                --reasoning_budget 65536 \
+                --python_tool_timeout 5.0
+
+          resources:
+            requests:
+              cpu: "2"
+              memory: "64Gi"
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "2"
+              memory: "64Gi"
+              nvidia.com/gpu: 1
+
+          volumeMounts:
+            - name: llm-cache
+              mountPath: /workspace
+
+      volumes:
+        - name: llm-cache
+          persistentVolumeClaim:
+            claimName: llm-cache-pvc
+
+      nodeSelector:
+        # nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-80GB'
+        # nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-40GB'
+        # nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-40GB-MIG-3g.20gb'
+        # nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-40GB-MIG-1g.5gb'
+        nvidia.com/gpu.product: 'NVIDIA-H100-80GB-HBM3'
+        # nvidia.com/gpu.product: 'NVIDIA-H200'
