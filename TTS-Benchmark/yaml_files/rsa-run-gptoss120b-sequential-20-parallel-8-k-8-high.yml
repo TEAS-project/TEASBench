@@ -1,0 +1,144 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: rsa-run-gptoss120b-
+  namespace: eidf230ns
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      name: rsa-run-pod
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 2000
+      containers:
+        - name: runner
+          image: pytorch/pytorch:2.9.1-cuda13.0-cudnn9-devel
+          # imagePullPolicy: IfNotPresent # Always Never
+          env:
+            - name: HF_HOME
+              value: /workspace/hf_cache
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /workspace/hf_cache/hub
+            - name: TRANSFORMERS_CACHE
+              value: /workspace/hf_cache/transformers
+            - name: HF_DATASETS_CACHE
+              value: /workspace/hf_cache/datasets
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: PIP_CACHE_DIR
+              value: /workspace/pip_cache
+            # >>> fixes for crash <<<
+            - name: PYTORCH_NVML_BASED_MEMORY_STATS
+              value: "0"
+            - name: VLLM_DISABLE_TORCH_COMPILE
+              value: "1"
+            - name: TORCH_COMPILE_DISABLE
+              value: "1"
+            # >>> GitHub PAT from Kubernetes Secret <<<
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: yufan-github-pat
+                  key: GITHUB_TOKEN
+          command: ["/bin/bash","-lc"]
+          args:
+            - |-
+              set -euo pipefail
+
+              # install git so we can sync the repo into the PVC
+              apt-get update
+              apt-get install -y git
+              rm -rf /var/lib/apt/lists/*
+
+              # make sure cache dirs exist on the mounted volume
+              mkdir -p /workspace/hf_cache/hub \
+                       /workspace/hf_cache/transformers \
+                       /workspace/hf_cache/datasets \
+                       /workspace/pip_cache
+
+              # ------------------------------------------------------------------
+              # Sync latest code into /workspace/RSA from GitHub
+              # ------------------------------------------------------------------
+              cd /workspace
+
+              REPO_URL="https://yufan196884:${GITHUB_TOKEN}@github.com/yufan196884/RSA.git"
+
+              # If RSA directory already exists, just pull the latest changes
+              if [ -d "RSA/.git" ]; then
+                  echo "RSA directory exists. Pulling latest changes..."
+                  cd RSA
+                  git fetch --all
+                  git reset --hard origin/main     # Ensures your repo syncs exactly with GitHub main
+              else
+                  echo "RSA directory does not exist. Cloning fresh..."
+                  git clone "$REPO_URL" RSA
+                  cd RSA
+              fi
+
+              # At this point, /workspace/RSA contains the latest code
+
+              # upgrade pip and install your deps (no torch mucking about)
+              python -m pip install --upgrade pip --root-user-action=ignore
+              pip install -r requirements_loop.txt
+              pip install hf_transfer
+              pip install loguru
+              pip install vllm[flashinfer]
+
+              # tiny sanity check
+              python - << 'PY'
+              import torch, os
+              print("torch", torch.__version__, "cuda", torch.version.cuda, "available", torch.cuda.is_available())
+              print("PYTORCH_NVML_BASED_MEMORY_STATS =", os.getenv("PYTORCH_NVML_BASED_MEMORY_STATS"))
+              PY
+
+              # run your eval
+              python eval_loop.py \
+                --model openai/gpt-oss-120b \
+                --dataset data/aime25/test.parquet \
+                --seed 2025112505 \
+                --output ./eval/aime25 \
+                --loops 20 \
+                --tp-size 1 \
+                --gpu_memory_utilization 0.95 \
+                --max_model_len 131072 \
+                --dtype bfloat16 \
+                --k 8 \
+                --population 8 \
+                --reasoning high
+
+              # model list:
+              # Remember to chang nodeSelector below
+
+              # Qwen/Qwen3-30B-A3B-Instruct-2507
+              # Qwen/Qwen2.5-1.5B-Instruct
+              # Qwen/Qwen3-4B-Instruct-2507
+              # openai/gpt-oss-20b
+              # openai/gpt-oss-120b
+
+          resources:
+            requests:
+              cpu: "2"
+              memory: "32Gi"
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "2"
+              memory: "32Gi"
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: llm-cache
+              mountPath: /workspace
+      volumes:
+        - name: llm-cache
+          persistentVolumeClaim:
+            claimName: llm-cache-pvc
+      nodeSelector:
+        # nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-80GB'
+        # nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-40GB'
+        # nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-40GB-MIG-3g.20gb'
+        # nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-40GB-MIG-1g.5gb'
+        nvidia.com/gpu.product: 'NVIDIA-H100-80GB-HBM3'
+        # nvidia.com/gpu.product: 'NVIDIA-H200'
