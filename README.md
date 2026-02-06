@@ -4,6 +4,15 @@ Uniting Models, Algorithms, and System Innovators with Top-Down Evolutionary Ben
 
 🌐 **Website:** [www.teasbench.com](https://www.teasbench.com)
 
+## Core Components
+
+Most of our benchmarking code is developed in the following projects:
+
+| Component | Repository | Description |
+|-----------|------------|-------------|
+| **MoE-CAP** | [GitHub](https://github.com/Auto-CAP/MoE-CAP.git) | MoE benchmarking framework (~4K LoC, Python) |
+| **ServerlessLLM + Pylet** | [GitHub](https://github.com/ServerlessLLM/ServerlessLLM/tree/v1-beta) | Benchmark platform (~103K LoC, Python + C++) |
+
 ## Benchmark Categories
 
 | Category | Description |

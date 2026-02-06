@@ -1,0 +1,130 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: sglang-gpqadiamond-
+  namespace: eidf230ns
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      name: sglang-gpqadiamond-pod
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 2000
+
+      # Uncomment if GHCR package is private:
+      # imagePullSecrets:
+      #   - name: ghcr-pull
+
+      containers:
+        - name: runner
+          image: ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312
+          imagePullPolicy: Always
+
+          env:
+            - name: HF_HOME
+              value: /workspace/hf_cache
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /workspace/hf_cache/hub
+            - name: TRANSFORMERS_CACHE
+              value: /workspace/hf_cache/transformers
+            - name: HF_DATASETS_CACHE
+              value: /workspace/hf_cache/datasets
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: yufan-github-pat
+                  key: GITHUB_TOKEN
+
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |-
+              set -euo pipefail
+
+              # PVC-backed caches
+              mkdir -p /workspace/hf_cache/hub \
+                       /workspace/hf_cache/transformers \
+                       /workspace/hf_cache/datasets \
+                       /workspace/pip_cache
+
+              cd /workspace
+
+              # --- repo settings ---
+              REPO_DIR="ARIA_TTS"
+              # If your default branch isn't main, change this:
+              BRANCH="main"
+              REPO_URL="https://yufan196884:${GITHUB_TOKEN}@github.com/yufan196884/ARIA_TTS.git"
+
+              if [ -d "${REPO_DIR}/.git" ]; then
+                  echo "${REPO_DIR} exists. Updating to origin/${BRANCH}..."
+                  cd "/workspace/${REPO_DIR}"
+                  git remote set-url origin "$REPO_URL"
+                  git fetch --all --prune
+                  git checkout -B "$BRANCH" "origin/$BRANCH"
+                  git reset --hard "origin/$BRANCH"
+              else
+                  echo "Cloning ${REPO_DIR} branch ${BRANCH}..."
+                  git clone --branch "$BRANCH" --single-branch "$REPO_URL" "$REPO_DIR"
+                  cd "/workspace/${REPO_DIR}"
+              fi
+
+              # Optional sanity check (fast)
+              python - << 'PY'
+              import sys
+              print("python", sys.version)
+              import torch
+              print("torch", torch.__version__, "cuda", torch.version.cuda, "available", torch.cuda.is_available())
+              import sglang
+              print("sglang", getattr(sglang, "__version__", "unknown"))
+              PY
+
+              export PYTHONPATH="/workspace/${REPO_DIR}:${PYTHONPATH:-}"
+
+              # --- run eval ---
+              python -u "./inference_scripts/eval_gpqadiamond.py" \
+                --model_path "Qwen/Qwen3-30B-A3B-Instruct-2507" \
+                --host "0.0.0.0" \
+                --port 5000 \
+                --log_level "warning" \
+                --served_model_name "sglang_model" \
+                --mem_fraction_static 0.90 \
+                --tp_size 1 \
+                --dp_size 1 \
+                --temperature 1.0 \
+                --random_seed 2026013101 \
+                --top_p 1.0 \
+                --max_new_tokens 8192 \
+                --dataset_name "gpqadiamond" \
+                --task "gpqadiamond" \
+                --output_folder "./eval/rsa_no_tools/" \
+                --k 1 \
+                --parallel 1 \
+                --sequential 16
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "64Gi"
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "4"
+              memory: "64Gi"
+              nvidia.com/gpu: 1
+
+          volumeMounts:
+            - name: llm-cache
+              mountPath: /workspace
+
+      volumes:
+        - name: llm-cache
+          persistentVolumeClaim:
+            claimName: llm-cache-pvc
+
+      nodeSelector:
+        nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
