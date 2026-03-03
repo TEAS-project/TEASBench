@@ -102,9 +102,9 @@ spec:
             
             echo "Server stopped. Copying files to pvc..."
             
-            mkdir -p /mnt/ceph/tmp/MoE-CAP-outputs
-            cp -R /dev/shm/{run_name} /mnt/ceph/tmp/MoE-CAP-outputs/num_samples_256/
-            cp /dev/shm/{run_name}_{timestamp}* /mnt/ceph/tmp/MoE-CAP-outputs/num_samples_256/
+            mkdir -p /mnt/ceph/tmp/MoE-CAP-outputs/{timestamp}
+            cp -R /dev/shm/{run_name} /mnt/ceph/tmp/MoE-CAP-outputs/{timestamp}/
+            cp /dev/shm/{run_name}_{timestamp}* /mnt/ceph/tmp/MoE-CAP-outputs/{timestamp}/
             
             echo "Files copied, exiting container"
         ports:
