@@ -3,7 +3,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   generateName: sglang-moe-cap-
-  #generateName: sglang-moe-cap-qwen3-235b-a22b-nvidia-h100-80gb-hbm3x8-1000-8000-bs1-arena-hard-
+  #generateName: sglang-moe-cap-qwen3-235b-a22b-nvidia-h100-80gb-hbm3x4-4000-1000-bs128-gsm8k-
   labels:
     kueue.x-k8s.io/queue-name:  eidf230ns-user-queue
 spec:
@@ -13,7 +13,7 @@ spec:
   template:
     metadata:
       name: job-sglang-moe-cap
-      #name: job-sglang-moe-cap-qwen3-235b-a22b-nvidia-h100-80gb-hbm3x8-1000-8000-bs1-arena-hard
+      #name: job-sglang-moe-cap-qwen3-235b-a22b-nvidia-h100-80gb-hbm3x4-4000-1000-bs128-gsm8k
     spec:
       containers:
       - name: sglang-server
@@ -37,8 +37,8 @@ spec:
               --model-path Qwen/Qwen3-235B-A22B \
               --port 30000 \
               --expert-distribution-recorder-mode stat \
-              --tp-size 8 \
-              &> /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x8_1000_8000_bs1_arena-hard_20260303-1427.server_log &
+              --tp-size 4 \
+              &> /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x4_4000_1000_bs128_gsm8k_20260303-1445.server_log &
             SERVER_PID=$!
 
             # Wait until the /health endpoint returns HTTP 200
@@ -52,20 +52,20 @@ spec:
             echo "SGLang server is ready!"
             echo "Starting to serve bench (sending http requests)..."
             
-            mkdir -p /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x8_1000_8000_bs1_arena-hard
+            mkdir -p /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x4_4000_1000_bs128_gsm8k
             python -m moe_cap.runner.openai_api_profile \
               --model_name Qwen/Qwen3-235B-A22B \
-              --datasets arena-hard \
-              --input-tokens 1000 \
-              --output-tokens 8000 \
-              --num-samples 100 \
+              --datasets gsm8k \
+              --input-tokens 4000 \
+              --output-tokens 1000 \
+              --num-samples 256 \
               --config-file configs/stub.yaml \
               --api-url http://localhost:30000/v1/completions \
               --backend sglang \
               --ignore-eos \
-              --server-batch-size 1 \
-              --output_dir /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x8_1000_8000_bs1_arena-hard \
-              &> /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x8_1000_8000_bs1_arena-hard_20260303-1427.client_log
+              --server-batch-size 128 \
+              --output_dir /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x4_4000_1000_bs128_gsm8k \
+              &> /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x4_4000_1000_bs128_gsm8k_20260303-1445.client_log
 
             echo "Starting to serve bench (sending http requests)... done!"
             echo "Benchmark finished, shutting down server..."
@@ -75,9 +75,9 @@ spec:
             
             echo "Server stopped. Copying files to pvc..."
             
-            mkdir -p /mnt/ceph/tmp/MoE-CAP-outputs/20260303-1427
-            cp -R /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x8_1000_8000_bs1_arena-hard /mnt/ceph/tmp/MoE-CAP-outputs/20260303-1427/
-            cp /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x8_1000_8000_bs1_arena-hard_20260303-1427* /mnt/ceph/tmp/MoE-CAP-outputs/20260303-1427/
+            mkdir -p /mnt/ceph/tmp/MoE-CAP-outputs/20260303-1445
+            cp -R /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x4_4000_1000_bs128_gsm8k /mnt/ceph/tmp/MoE-CAP-outputs/20260303-1445/
+            cp /dev/shm/Qwen3-235B-A22B_NVIDIA-H100-80GB-HBM3x4_4000_1000_bs128_gsm8k_20260303-1445* /mnt/ceph/tmp/MoE-CAP-outputs/20260303-1445/
             
             echo "Files copied, exiting container"
         ports:
@@ -89,7 +89,7 @@ spec:
           limits:
             cpu: 10
             memory: '100Gi'
-            nvidia.com/gpu: 8
+            nvidia.com/gpu: 4
         volumeMounts:
           - mountPath: /mnt/ceph
             name: volume
