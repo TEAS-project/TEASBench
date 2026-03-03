@@ -38,7 +38,7 @@ spec:
               --port 30000 \
               --expert-distribution-recorder-mode stat \
               --tp-size 8 \
-              &> /dev/shm/Mixtral-8x22B-Instruct-v0-1_NVIDIA-A100-SXM4-80GBx8_4000_1000_bs1_gsm8k_20260206-0915.server_log &
+              &> /dev/shm/Mixtral-8x22B-Instruct-v0-1_NVIDIA-A100-SXM4-80GBx8_4000_1000_bs1_gsm8k_20260303-1420.server_log &
             SERVER_PID=$!
 
             # Wait until the /health endpoint returns HTTP 200
@@ -65,7 +65,7 @@ spec:
               --ignore-eos \
               --server-batch-size 1 \
               --output_dir /dev/shm/Mixtral-8x22B-Instruct-v0-1_NVIDIA-A100-SXM4-80GBx8_4000_1000_bs1_gsm8k \
-              &> /dev/shm/Mixtral-8x22B-Instruct-v0-1_NVIDIA-A100-SXM4-80GBx8_4000_1000_bs1_gsm8k_20260206-0915.client_log
+              &> /dev/shm/Mixtral-8x22B-Instruct-v0-1_NVIDIA-A100-SXM4-80GBx8_4000_1000_bs1_gsm8k_20260303-1420.client_log
 
             echo "Starting to serve bench (sending http requests)... done!"
             echo "Benchmark finished, shutting down server..."
@@ -75,9 +75,9 @@ spec:
             
             echo "Server stopped. Copying files to pvc..."
             
-            mkdir -p /mnt/ceph/tmp/MoE-CAP-outputs
-            cp -R /dev/shm/Mixtral-8x22B-Instruct-v0-1_NVIDIA-A100-SXM4-80GBx8_4000_1000_bs1_gsm8k /mnt/ceph/tmp/MoE-CAP-outputs/num_samples_256/
-            cp /dev/shm/Mixtral-8x22B-Instruct-v0-1_NVIDIA-A100-SXM4-80GBx8_4000_1000_bs1_gsm8k_20260206-0915* /mnt/ceph/tmp/MoE-CAP-outputs/num_samples_256/
+            mkdir -p /mnt/ceph/tmp/MoE-CAP-outputs/20260303-1420
+            cp -R /dev/shm/Mixtral-8x22B-Instruct-v0-1_NVIDIA-A100-SXM4-80GBx8_4000_1000_bs1_gsm8k /mnt/ceph/tmp/MoE-CAP-outputs/20260303-1420/
+            cp /dev/shm/Mixtral-8x22B-Instruct-v0-1_NVIDIA-A100-SXM4-80GBx8_4000_1000_bs1_gsm8k_20260303-1420* /mnt/ceph/tmp/MoE-CAP-outputs/20260303-1420/
             
             echo "Files copied, exiting container"
         ports:
