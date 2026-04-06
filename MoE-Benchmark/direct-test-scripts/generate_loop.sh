@@ -4,7 +4,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install pandas
 
-python3 generate.py \
+python3 generate_loop.py \
     --csv_file=data/experiments.csv \
-    --target_dir=configs \
+    --target_dir=configs_loop \
     --inference_engine=$1

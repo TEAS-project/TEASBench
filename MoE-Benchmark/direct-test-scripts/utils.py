@@ -22,7 +22,8 @@ TOKEN_LENGTH_MAP={
     "13K": 13000
 }
 
-def get_run_name(model_name, gpu, num_gpu, target_input_tokens, target_output_tokens, batch_size, dataset, token_abbrev=True):
+def get_run_name(inference_engine, model_name, gpu, num_gpu, target_input_tokens, target_output_tokens, batch_size, dataset, token_abbrev=True):
+    
     model_name_clean=model_name.split("/")[1].replace(".", "-")
 
     if token_abbrev: # 4K
@@ -32,5 +33,5 @@ def get_run_name(model_name, gpu, num_gpu, target_input_tokens, target_output_to
         token_in = TOKEN_LENGTH_MAP[target_input_tokens]
         token_out = TOKEN_LENGTH_MAP[target_output_tokens]
 
-    run_name=f"{model_name_clean}_{gpu}x{num_gpu}_{token_in}_{token_out}_bs{batch_size}_{dataset}"
+    run_name=f"{inference_engine}_{model_name_clean}_{gpu}x{num_gpu}_{token_in}_{token_out}_bs{batch_size}_{dataset}"
     return run_name

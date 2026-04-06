@@ -3,11 +3,12 @@
 import argparse
 import pathlib
 import pandas as pd
-from template import Template as yaml_template
+# from template import Template as yaml_template
 from utils import get_run_name, GPU_MAP, TOKEN_LENGTH_MAP
 
 def write_yaml_files(target_dir, \
     file_content, \
+    inference_engine, \
     model_name, \
     gpu, \
     num_gpu, \
@@ -16,13 +17,25 @@ def write_yaml_files(target_dir, \
     batch_size, \
     dataset):
 
-    run_name = get_run_name(model_name, gpu, num_gpu, target_input_tokens, target_output_tokens, batch_size, dataset)
-    file_name = f"{model_name.split("/")[1]}_{gpu}x{num_gpu}_{target_input_tokens}_{target_output_tokens}_bs{batch_size}_{dataset}.yaml"
+    run_name = get_run_name(inference_engine, model_name, gpu, num_gpu, target_input_tokens, target_output_tokens, batch_size, dataset, token_abbrev=True)
+
+    print(model_name.split("/")[1])
+    file_name = f"{inference_engine}_{model_name.split("/")[1]}_{gpu}x{num_gpu}_{target_input_tokens}_{target_output_tokens}_bs{batch_size}_{dataset}.yaml"
 
     with open(f"{target_dir}/{file_name}", "w") as f:
         f.write(file_content)
 
-def main(experiments_csv, yaml_target_dir):
+def main(experiments_csv, yaml_target_dir, inference_engine):
+
+    if inference_engine=="sglang":
+        from template_sglang import Template as yaml_template
+    elif inference_engine=="vllm":
+        from template_vllm import Template as yaml_template
+    else:
+        print("Inference engine: '", inference_engine, "' not supported")
+        raise SystemExit(1)
+
+
     pathlib.Path(yaml_target_dir).mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(experiments_csv)
@@ -35,9 +48,10 @@ def main(experiments_csv, yaml_target_dir):
                                 batch_size=row.batch_size, \
                                 num_gpu=row.num_gpu, \
                                 gpu_product=GPU_MAP[row.gpu]), axis=1)
-    
+   
     df.apply(lambda row: write_yaml_files(target_dir=yaml_target_dir, \
                                             file_content=row.yaml, \
+                                            inference_engine=inference_engine, \
                                             model_name=row.model_name, \
                                             gpu=row.gpu, \
                                             num_gpu=row.num_gpu, \
@@ -50,6 +64,7 @@ if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv_file", type=str, required=True, help="Path to experiments CSV file")
     parser.add_argument("--target_dir", type=str, required=True, help="Target directory to save generated YAML files")
+    parser.add_argument("--inference_engine", type=str, required=True, help="inference engine")
     args = parser.parse_args()
 
-    main(args.csv_file, args.target_dir)
+    main(args.csv_file, args.target_dir, args.inference_engine)
