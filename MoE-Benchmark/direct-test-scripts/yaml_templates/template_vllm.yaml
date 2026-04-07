@@ -98,13 +98,13 @@ spec:
 
             git clone https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/TEAS_development_Results_Private.git
 
-            RUN_OUTPUT_DIR=$TEAS_OUPUT_DIR/TEAS_development_Results_Private/SGLANG/
+            RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/TEAS_development_Results_Private/SGLANG/
 
             # Move output data to output directory
 
             mkdir -p $RUN_OUTPUT_DIR
-            cp -R /dev/shm/@run_name@ $RUN_OUPUT_DIR/
-            cp /dev/shm/@run_name@_$timestamp* $RUN_OUPUT_DIR/
+            cp -R /dev/shm/@run_name@ $RUN_OUTPUT_DIR/
+            cp /dev/shm/@run_name@_$timestamp* $RUN_OUTPUT_DIR/
 
             echo "Files copied to pvc at $RUN_OUTPUT_DIR"
 
