@@ -47,11 +47,11 @@ spec:
             timestamp=$( date +%Y%m%d-%H%M )
 
             # Start server
-            python -m moe_cap.systems.sglang \\
-              --model-path @model_name@ \\
-              --port 30000 \\
-              --expert-distribution-recorder-mode stat \\
-              --tp-size @tensor_parallel_size@ \\
+            python -m moe_cap.systems.sglang \
+              --model-path @model_name@ \
+              --port 30000 \
+              --expert-distribution-recorder-mode stat \
+              --tp-size @tensor_parallel_size@ \
               &> /dev/shm/@run_name@_$timestamp.server_log &
             SERVER_PID=$!
 
@@ -67,17 +67,17 @@ spec:
             echo "Starting to serve bench (sending http requests)..."
             
             mkdir -p /dev/shm/@run_name@
-            python -m moe_cap.runner.openai_api_profile \\
-              --model_name @model_name@ \\
-              --datasets @dataset@ \\
-              --target-input-tokens @target_input_tokens@ \\
-              --target-output-tokens @target_output_tokens@ \\
-              --num-samples @num_samples@ \\
-              --api-url http://localhost:30000/v1/completions \\
-              --backend sglang \\
-              --ignore-eos \\
-              --server-batch-size @batch_size@ \\
-              --output_dir /dev/shm/@run_name@ \\
+            python -m moe_cap.runner.openai_api_profile \
+              --model_name @model_name@ \
+              --datasets @dataset@ \
+              --target-input-tokens @target_input_tokens@ \
+              --target-output-tokens @target_output_tokens@ \
+              --num-samples @num_samples@ \
+              --api-url http://localhost:30000/v1/completions \
+              --backend sglang \
+              --ignore-eos \
+              --server-batch-size @batch_size@ \
+              --output_dir /dev/shm/@run_name@ \
               &> /dev/shm/@run_name@_$timestamp.client_log
 
             echo "Starting to serve bench (sending http requests)... done!"

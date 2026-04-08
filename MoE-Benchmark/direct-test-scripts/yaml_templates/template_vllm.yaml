@@ -45,14 +45,14 @@ spec:
             timestamp=$( date +%Y%m%d-%H%M )
 
             # Start server
-            python -m moe_cap.systems.vllm \\
-              --model-path @model_name@ \\
-              --port 30000 \\
-              --host 0.0.0.0 \\
-              --tensor-parallel-size @tensor_parallel_size@ \\
-              --reasoning-parser deepseek_r1 \\ ### ??? model specific: yes
-              --enable-expert-distribution-metrics \\
-              --max-num-batched-tokens 131072 \\ ### unstable suggestion by vllm developers leave for now
+            python -m moe_cap.systems.vllm \
+              --model-path @model_name@ \
+              --port 30000 \
+              --host 0.0.0.0 \
+              --tensor-parallel-size @tensor_parallel_size@ \
+              --reasoning-parser deepseek_r1 \### ??? model specific: yes
+              --enable-expert-distribution-metrics \
+              --max-num-batched-tokens 131072 \### unstable suggestion by vllm developers leave for now
               &> /dev/shm/@run_name@_$timestamp.server_log &
             SERVER_PID=$!
 
@@ -68,18 +68,18 @@ spec:
             echo "Starting to serve bench (sending http requests)..."
             
             mkdir -p /dev/shm/@run_name@
-            python -m moe_cap.runner.openai_api_profile \\
-              --model_name @model_name@ \\
-              --datasets @dataset@ \\
-              --input-tokens @target_input_tokens@ \\
-              --output-tokens @target_output_tokens@ \\
-              --num-samples @num_samples@ \\
-              --config-file configs/stub.yaml \\
-              --api-url http://localhost:30000/v1/completions \\
-              --backend vllm \\
-              --ignore-eos \\
-              --server-batch-size @batch_size@ \\
-              --output_dir /dev/shm/@run_name@ \\
+            python -m moe_cap.runner.openai_api_profile \
+              --model_name @model_name@ \
+              --datasets @dataset@ \
+              --input-tokens @target_input_tokens@ \
+              --output-tokens @target_output_tokens@ \
+              --num-samples @num_samples@ \
+              --config-file configs/stub.yaml \
+              --api-url http://localhost:30000/v1/completions \
+              --backend vllm \
+              --ignore-eos \
+              --server-batch-size @batch_size@ \
+              --output_dir /dev/shm/@run_name@ \
               &> /dev/shm/@run_name@_$timestamp.client_log
 
             echo "Starting to serve bench (sending http requests)... done!"
