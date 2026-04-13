@@ -64,7 +64,7 @@ class Template:
             extra_server_flags += f"\\\n{server_set_batch_size}"
             extra_client_flags += f"\\\n{client_notify_batch_size}"
 
-        timestamp = datetime.now().strftime('%y%m%d-%H%M')
+        timestamp = datetime.now().strftime('%Y%m%d-%H%M')
         output_repo_dir = results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size)
             
         # Inject experiment parameters 
