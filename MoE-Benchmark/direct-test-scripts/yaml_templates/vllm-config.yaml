@@ -4,7 +4,7 @@ extra_container_env: |
   - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
     value: "/dev/shm/sglang_expert_distribution_recorder"
 server_start_command: |
-            python -m moe_cap.systems.vllm \
+            python3 -m moe_cap.systems.vllm \
               --model-path @hf_model_path@ \
               --port 30000 \
               --host 0.0.0.0 \
@@ -13,7 +13,7 @@ server_start_command: |
               --enable-expert-distribution-metrics \
               --max-num-batched-tokens 131072 @extra_server_flags@
 client_run_command: |
-            python -m moe_cap.runner.openai_api_profile \
+            python3 -m moe_cap.runner.openai_api_profile \
               --model_name @hf_model_path@ \
               --datasets @dataset@ \
               --num-samples @num_samples@ \
