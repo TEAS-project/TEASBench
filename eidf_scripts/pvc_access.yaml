@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: pvc-access-helper-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+spec:
+  completions: 1
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 1800
+  template:
+    metadata:
+      name: pvc-helper-pod
+    spec:
+      containers:
+      - name: cudasample
+        image: python:3.10-slim
+        args: ["sleep", "infinity"]
+        resources:
+          requests:
+            cpu: 2
+            memory: '1Gi'
+          limits:
+            cpu: 2
+            memory: '4Gi'
+        volumeMounts:
+          - mountPath: /mnt/input
+            name: inputs
+          - mountPath: /mnt/develop
+            name: develop
+          - mountPath: /mnt/results
+            name: results
+      restartPolicy: Never
+      volumes:
+        - name: inputs
+          persistentVolumeClaim:
+            claimName: inputs-pvc
+        - name: develop
+          persistentVolumeClaim:
+            claimName: develop-pvc
+        - name: results
+          persistentVolumeClaim:
+            claimName: results-pvc
+        - name: client-ceph-pvc
+          persistentVolumeClaim:
+            claimName: client-ceph-pvc
+
+

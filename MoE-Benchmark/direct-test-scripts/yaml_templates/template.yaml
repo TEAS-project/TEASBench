@@ -1,0 +1,146 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: @name_k8s@-
+  labels:
+    kueue.x-k8s.io/queue-name:  eidf230ns-user-queue
+spec:
+  completions: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 1800
+  template:
+    spec:
+      containers:
+      - name: {{ inference_engine }}-server
+        image: {{ image_name }}
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: HF_HOME
+            value: /mnt/input/hf_cache
+          - name: HUGGINGFACE_HUB_CACHE
+            value: /mnt/input/hf_cache/hub
+          - name: TRANSFORMERS_CACHE
+            value: /mnt/input/hf_cache/transformers
+          - name: HF_DATASETS_CACHE
+            value: /mnt/input/hf_cache/datasets
+          - name: TEAS_OUTPUT_DIR
+            value: /mnt/develop/outputs
+          - name: GIT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: teas-develop-results-private-ap
+                key: token
+          {{ extra_container_env }}
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+
+            RUN_DIR=/dev/shm/@timestamp@
+            mkdir -p $RUN_DIR
+
+            exec &> $RUN_DIR/stdout_stderr.log
+
+            apt-get update
+            apt-get -y install git
+            git clone  https://github.com/Auto-CAP/MoE-CAP.git /dev/shm/MoE-CAP
+            cd /dev/shm/MoE-CAP
+            echo "MoE-CAP commit: " `git rev-parse HEAD`
+            pip install -e .
+            pip install gputil
+
+            # Start server
+            echo "Initialising server"
+            {{ server_start_command }} &> $RUN_DIR/server.log &
+            SERVER_PID=$!
+            
+            # Wait until the /health endpoint returns HTTP 200
+            echo "Waiting for server to be ready..." 
+
+            until curl -s -f http://localhost:30000/health > /dev/null; do
+              echo -n "."
+              sleep 2
+            done
+
+            echo "Server is ready!"
+            echo "Starting to run benchmark (sending http requests)..."
+
+            # Start client
+            {{ client_run_command }} &> $RUN_DIR/client.log
+
+            echo "Benchmark run finished, shutting down server..." 
+
+            kill $SERVER_PID
+            wait $SERVER_PID
+
+
+
+            ##################
+            # Saving results #
+            ##################
+
+            # Tidy up - gather MoE-CAP generated results from subdir
+            cd $RUN_DIR
+            cp @hf_model_path@/* .
+            rm -r `dirname @hf_model_path@`
+                        
+            echo "Server stopped. Copying files to pvc..."
+
+            # Copy first before any git commands so we have the data in case of any error
+            RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/@timestamp@
+            mkdir -p $RUN_OUTPUT_DIR
+            cp -R $RUN_DIR/* $RUN_OUTPUT_DIR/
+
+            # We've also moved our log so change where we are writing
+            exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
+
+            echo "Files copied to pvc at $RUN_OUTPUT_DIR"
+
+            # Move to root of output directory 
+            cd $TEAS_OUTPUT_DIR/
+
+            # Pull to refresh before committing and pushing
+            cd $RUN_OUTPUT_DIR
+            GIT_TOKEN="${GIT_TOKEN%$'\n'}"   # remove trailing newline that causes issues
+            git pull "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+            
+            # Commit data to results repository
+            git config user.email "autopush@eidf"
+            git config user.name "Pipeline Autopush"
+            
+            git add metrics*.json metadata*.json *.yaml
+            git commit -m "auto: @name_k8s@"
+            git push "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+
+            echo "Finalising container"
+
+        ports:
+          - containerPort: 30000 
+        resources:
+          requests:
+            cpu: 10
+            memory: '100Gi'
+          limits:
+            cpu: 10
+            memory: '100Gi'
+            nvidia.com/gpu: @num_gpu@
+        volumeMounts:
+          - mountPath: /mnt/develop
+            name: develop
+          - mountPath: /mnt/input
+            name: inputs
+          - mountPath: /dev/shm
+            name: dshm
+      restartPolicy: Never
+      volumes:
+        - name: inputs
+          persistentVolumeClaim:
+            claimName: inputs-pvc
+        - name: develop
+          persistentVolumeClaim:
+            claimName: develop-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      nodeSelector:
+        nvidia.com/gpu.product: @gpu_product@ 

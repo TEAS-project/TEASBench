@@ -9,29 +9,36 @@ Supported GPU products on EIDF:
     nvidia.com/gpu.product: 'NVIDIA-H100-80GB-HBM3'
     nvidia.com/gpu.product: 'NVIDIA-H200'
 """
-GPU_MAP={
+
+HF_MODEL_MAP={
+    "gpt-oss-20b": "unsloth/gpt-oss-20b",
+    "gpt-oss-120b": "unsloth/gpt-oss-120b",
+    "Qwen3-235B-A22B": "Qwen/Qwen3-235B-A22B",
+    "DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
+    "Kimi-K2.5": "moonshotai/Kimi-K2.5"
+}
+
+
+EIDF_GPU_MAP={
     "A100":"NVIDIA-A100-SXM4-80GB",
     "H100":"NVIDIA-H100-80GB-HBM3",
-    "H200":"NVIDIA-H200",
+    "H200":"NVIDIA-H200"
 }
 
-TOKEN_LENGTH_MAP={
-    "1K": 1000,
-    "4K": 4000,
-    "8K": 8000,
-    "13K": 13000
-}
 
-def get_run_name(inference_engine, model_name, gpu, num_gpu, target_input_tokens, target_output_tokens, batch_size, dataset, token_abbrev=True):
-    
-    model_name_clean=model_name.split("/")[1].replace(".", "-")
+def get_run_name(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
+    name = f"{inference_engine}_{model}_{dataset}_ns{num_samples}_{gpu}x{num_gpu}"
+    if batch_size != "default":
+        name += f"_bs{batch_size}"
+    return name
 
-    if token_abbrev: # 4K
-        token_in = target_input_tokens
-        token_out = target_output_tokens
-    else: # 4000
-        token_in = TOKEN_LENGTH_MAP[target_input_tokens]
-        token_out = TOKEN_LENGTH_MAP[target_output_tokens]
+def k8s_friendlify(unfriendly_string):
+    return unfriendly_string.replace("_", "-").lower()
 
-    run_name=f"{inference_engine}_{model_name_clean}_{gpu}x{num_gpu}_{token_in}_{token_out}_bs{batch_size}_{dataset}"
-    return run_name
+def results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
+    dir = f"moe/eidf/{inference_engine}/{model}/{dataset}_{num_samples}samples/{gpu}x{num_gpu}"
+    if batch_size != "default":
+        dir += f"_batchsize{batch_size}"
+    return dir
+
+
