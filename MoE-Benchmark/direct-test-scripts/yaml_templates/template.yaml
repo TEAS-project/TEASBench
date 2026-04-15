@@ -17,12 +17,6 @@ spec:
         env:
           - name: HF_HOME
             value: /mnt/input/hf_cache
-          - name: HUGGINGFACE_HUB_CACHE
-            value: /mnt/input/hf_cache/hub
-          - name: TRANSFORMERS_CACHE
-            value: /mnt/input/hf_cache/transformers
-          - name: HF_DATASETS_CACHE
-            value: /mnt/input/hf_cache/datasets
           - name: TEAS_OUTPUT_DIR
             value: /mnt/develop/outputs
           - name: GIT_TOKEN
