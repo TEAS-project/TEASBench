@@ -7,5 +7,5 @@ pip install pandas pyyaml re
 python3 generate.py \
     --csv_file=data/smoke_test.csv \
     --target_dir=./ \
-    --inference_engine=$1
+
 
