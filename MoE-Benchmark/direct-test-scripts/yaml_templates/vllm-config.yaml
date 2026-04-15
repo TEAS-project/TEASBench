@@ -1,23 +1,18 @@
 inference_engine: "vllm"
-image_name: "vllm/vllm-openai:v0.18.0-cu130"
-extra_container_env: |
-  - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
-    value: "/dev/shm/sglang_expert_distribution_recorder"
+image_name: "vllm/vllm-openai:v0.16.0"  # -cu13 for H100, H200
+extra_container_env: ""
 server_start_command: |
             python3 -m moe_cap.systems.vllm \
-              --model-path @hf_model_path@ \
+              --model @hf_model_path@ \
               --port 30000 \
               --host 0.0.0.0 \
               --tensor-parallel-size @tensor_parallel_size@ \
-              --reasoning-parser deepseek_r1 \
-              --enable-expert-distribution-metrics \
-              --max-num-batched-tokens 131072 @extra_server_flags@
+              --enable-expert-distribution-metrics @extra_server_flags@
 client_run_command: |
             python3 -m moe_cap.runner.openai_api_profile \
               --model_name @hf_model_path@ \
               --datasets @dataset@ \
               --num-samples @num_samples@ \
-              --config-file configs/stub.yaml \
               --api-url http://localhost:30000/v1/completions \
               --backend vllm \
               --ignore-eos \
@@ -25,4 +20,4 @@ client_run_command: |
 conditional_flags: 
   server_set_batch_size: "--max-running-requests @batch_size@"
   client_notify_batch_size: "--server-batch-size @batch_size@"
-  
+  reasoning_parser: "--reasoning_parser @reasoning_parser@"

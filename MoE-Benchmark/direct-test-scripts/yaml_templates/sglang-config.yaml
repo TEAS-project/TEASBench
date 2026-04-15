@@ -1,5 +1,5 @@
 inference_engine: "sglang"
-image_name: "lmsysorg/sglang:latest"
+image_name: "lmsysorg/sglang:v0.5.9" # -cu130 for H100, H200
 extra_container_env: |
   - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
     value: "/dev/shm/sglang_expert_distribution_recorder"

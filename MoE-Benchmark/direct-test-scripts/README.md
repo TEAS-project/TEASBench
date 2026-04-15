@@ -24,7 +24,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install pandas pyyaml re
 
-python3 generate.py --csv_file=data/experiments.csv --target_dir=configs --inference-engine=sglang --results_repo=
+python3 generate.py --csv_file=data/experiments.csv --target_dir=configs 
 ```
 
 

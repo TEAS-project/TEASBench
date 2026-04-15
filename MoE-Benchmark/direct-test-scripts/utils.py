@@ -18,6 +18,14 @@ HF_MODEL_MAP={
     "Kimi-K2.5": "moonshotai/Kimi-K2.5"
 }
 
+VLLM_REASONING_PARSER_MAP={
+    "gpt-oss-20b": False,
+    "gpt-oss-120b": False,
+    "Qwen3-235B-A22B": False,
+    "DeepSeek-R1": "deepseek_r1",
+    "Kimi-K2.5": "kimi_k2"
+}
+
 
 EIDF_GPU_MAP={
     "A100":"NVIDIA-A100-SXM4-80GB",
@@ -28,8 +36,7 @@ EIDF_GPU_MAP={
 
 def get_run_name(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
     name = f"{inference_engine}_{model}_{dataset}_ns{num_samples}_{gpu}x{num_gpu}"
-    if batch_size != "default":
-        name += f"_bs{batch_size}"
+    name += f"_bs{batch_size}"
     return name
 
 def k8s_friendlify(unfriendly_string):
@@ -37,8 +44,10 @@ def k8s_friendlify(unfriendly_string):
 
 def results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
     dir = f"moe/eidf/{inference_engine}/{model}/{dataset}_{num_samples}samples/{gpu}x{num_gpu}"
-    if batch_size != "default":
-        dir += f"_batchsize{batch_size}"
+    if batch_size == "default":
+        dir += f"/batch-size-default"
+    else:
+        dir += f"/batch-size-{batch_size}"
     return dir
 
 

@@ -12,14 +12,14 @@ def write_yaml_files(target_dir, file_name, file_content):
         f.write(file_content)
 
 
-def main(experiments_csv, yaml_target_dir, inference_engine, results_repo):
+def main(experiments_csv, yaml_target_dir, results_repo):
 
     pathlib.Path(yaml_target_dir).mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(experiments_csv)
 
     # Generate K8s config(s) using templates based on experiment parameters from CSV file
-    df["yaml"] = df.apply(lambda row: yaml_template().get(inference_engine=inference_engine.lower(),
+    df["yaml"] = df.apply(lambda row: yaml_template().get(inference_engine=row.inference_engine,
                                                           model=row.model,
                                                           hf_model_path=HF_MODEL_MAP[row.model],
                                                           dataset=row.dataset,
@@ -34,7 +34,7 @@ def main(experiments_csv, yaml_target_dir, inference_engine, results_repo):
     
     # Write K8s config(s) to yaml file
     df.apply(lambda row: write_yaml_files(target_dir=yaml_target_dir,
-                                          file_name=k8s_friendlify(get_run_name(inference_engine,
+                                          file_name=k8s_friendlify(get_run_name(row.inference_engine,
                                                                                 row.model,
                                                                                 row.dataset,
                                                                                 row.num_samples,
@@ -49,8 +49,7 @@ if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv_file", type=str, required=True, help="Path to experiments CSV file")
     parser.add_argument("--target_dir", type=str, default="./", required=False, help="Target directory to save generated YAML files - defaults to current directory")
-    parser.add_argument("--inference_engine", type=str, default="sglang", required=False, help="inference engine")
     parser.add_argument("--results_repo", type=str, default="TEAS_Development_Results_Private", required=False, help="Name of results repository (not the URL) - defaults to TEAS_Development_Results_Private")
     args = parser.parse_args()
 
-    main(args.csv_file, args.target_dir, args.inference_engine, args.results_repo)
+    main(args.csv_file, args.target_dir, args.results_repo)
