@@ -16,7 +16,6 @@ client_run_command: |
                         --num-samples @num_samples@ \
                         --api-url http://localhost:30000/v1/completions \
                         --backend sglang \
-                        --ignore-eos \
                         --output_dir $RUN_DIR @extra_client_flags@
 conditional_flags: 
   server_set_batch_size: "--max-running-requests @batch_size@"
