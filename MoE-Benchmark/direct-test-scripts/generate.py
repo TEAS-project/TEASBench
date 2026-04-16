@@ -24,7 +24,7 @@ def main(experiments_csv, yaml_target_dir, results_repo):
                                                           hf_model_path=HF_MODEL_MAP[row.model],
                                                           dataset=row.dataset,
                                                           num_samples=row.num_samples,
-                                                          gpu=row.gpu.lower(),
+                                                          gpu=row.gpu,
                                                           gpu_product=EIDF_GPU_MAP[row.gpu],
                                                           num_gpu=row.num_gpu,
                                                           tensor_parallel_size=row.num_gpu,

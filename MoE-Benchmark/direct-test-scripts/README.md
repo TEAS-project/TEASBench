@@ -15,7 +15,8 @@ The list of experiments with parameters to be found in [data/experiments.csv](da
 
 ## Generate k8s configs
 
-Run [generate.sh](generate.sh) or generate.py directly to generate k8s config files. Yaml configurations will be written to `--target_dir`:
+Run [generate.sh](generate.sh) or generate.py directly to generate k8s config files.
+Yaml configurations will be written to current working directory by default, can specify different using `--target_dir`:
 
 ```
 #!/bin/bash
@@ -24,7 +25,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install pandas pyyaml re
 
-python3 generate.py --csv_file=data/experiments.csv --target_dir=configs 
+python3 generate.py --csv_file=data/smoke_tests.csv
 ```
 
 

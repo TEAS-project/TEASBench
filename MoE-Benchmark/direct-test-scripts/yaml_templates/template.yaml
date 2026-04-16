@@ -11,8 +11,8 @@ spec:
   template:
     spec:
       containers:
-      - name: {{ inference_engine }}-server
-        image: {{ image_name }}
+      - name: @inference_engine@-server
+        image: @image_name@
         imagePullPolicy: IfNotPresent
         env:
           - name: HF_HOME

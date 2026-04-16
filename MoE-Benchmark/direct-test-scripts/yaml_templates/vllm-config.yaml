@@ -1,6 +1,17 @@
-inference_engine: "vllm"
-image_name: "vllm/vllm-openai:v0.16.0"  # -cu13 for H100, H200
+inference_engine_version: 0.16.0
+
+image:
+  base: "vllm/vllm-openai"
+  cuda_variant:
+    EIDF:
+      A100: ""
+      H100: "-cu13"
+      H200: "-cu13"
+
 extra_container_env: ""
+
+
+
 server_start_command: |
             python3 -m moe_cap.systems.vllm \
               --model @hf_model_path@ \
@@ -8,6 +19,7 @@ server_start_command: |
               --host 0.0.0.0 \
               --tensor-parallel-size @tensor_parallel_size@ \
               --enable-expert-distribution-metrics @extra_server_flags@
+
 client_run_command: |
             python3 -m moe_cap.runner.openai_api_profile \
               --model_name @hf_model_path@ \
@@ -15,7 +27,21 @@ client_run_command: |
               --num-samples @num_samples@ \
               --api-url http://localhost:30000/v1/completions \
               --backend vllm \
-              --output_dir $RUN_DIR @extra_client_flags@a
+              --output_dir $RUN_DIR @extra_client_flags@
+
+client_run_command_arena-hard: |
+            python3 -m moe_cap.runner.openai_api_profile \
+                        --model_name @hf_model_path@ \
+                        --datasets arena-hard \
+                        --num-samples @num_samples@ \
+                        --api-url http://localhost:30000/v1/completions \
+                        --backend vllm \
+                        --output_dir $RUN_DIR \
+                        --judge-api-url https://openrouter.ai/api/v1/chat/completions \
+                        --judge-model google/gemini-3.1-flash-lite-preview \
+                        --judge-api-key $OPENROUTER_API_KEY \
+                        --baseline-answers-path /path/to/baseline.jsonl
+
 conditional_flags: 
   server_set_batch_size: "--max-running-requests @batch_size@"
   client_notify_batch_size: "--server-batch-size @batch_size@"

@@ -26,20 +26,45 @@ class Template:
         name = get_run_name(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size)
         name_k8s = k8s_friendlify(name)
 
-        # Load the inference-engine-specific template config
-        config_path = os.path.join("yaml_templates", f"{inference_engine}-config.yaml")
-        with open(config_path, "r") as f:
-            inference_engine_config = yaml.safe_load(f)
-
         # Load the generic (inference-engine-agnostic) template
         template_path = os.path.join("yaml_templates/template.yaml")
         with open(template_path, "r") as f:
             template = f.read()
+        
+        # Load the inference-engine-specific template config
+        config_path = os.path.join("yaml_templates", f"{inference_engine}-config.yaml")
+        with open(config_path, "r") as f:
+            engine_config = yaml.safe_load(f)
 
-        # Inject inference-engine-specific config into template 
-        # Replaces {{ key }} in template with the value from the inference engine config file
+        # Combine any information from config to make up replacements
+        image = engine_config.pop('image')
+        image_name = image['base'] + ":v" \
+            + engine_config['inference_engine_version'] \
+            + image['cuda_variant']['EIDF'][gpu]
+        
+        
+        conditional_flags = engine_config['conditional_flags']
+        extra_server_flags=""
+        extra_client_flags=""
+
+        # Batch size
+        if batch_size != "default":
+            server_set_batch_size = conditional_flags['server_set_batch_size'].replace("@batch_size@", str(batch_size))
+            client_notify_batch_size = conditional_flags['client_notify_batch_size'].replace("@batch_size@", str(batch_size))
+            extra_server_flags += f"\\\n{server_set_batch_size}"
+            extra_client_flags += f"\\\n{client_notify_batch_size}"
+
+        # MoE-CAP Reasoning parser
+        if inference_engine == "vllm" and VLLM_REASONING_PARSER_MAP[model] != False:
+            reasoning_parser = conditional_flags['reasoning_parser'].replace("@reasoning_parser@", str(VLLM_REASONING_PARSER_MAP[model]))
+            extra_server_flags += f"\\\n{reasoning_parser}"
+            
+        # Inject config into template 
         config = template
-        for key, value in inference_engine_config.items():
+        if dataset == "arena-hard":
+            engine_config['client_run_command'] = engine_config['client_run_command_arena-hard']
+            
+        for key, value in engine_config.items():
             placeholder = "{{ " + key + " }}"
             replacement = str(value).rstrip('\n') if value is not None else ""
 
@@ -53,32 +78,19 @@ class Template:
             config = config.replace(placeholder, replacement)
 
             
-        # Extract definitions of any conditional flags and decide whether/how to include these based on experiment parameters
-        conditional_flags = inference_engine_config.get("conditional_flags", {})
-        extra_server_flags=""
-        extra_client_flags=""
-
-        if batch_size != "default":
-            server_set_batch_size = conditional_flags.get('server_set_batch_size').replace("@batch_size@", str(batch_size))
-            client_notify_batch_size = conditional_flags.get('client_notify_batch_size').replace("@batch_size@", str(batch_size))
-            extra_server_flags += f"\\\n{server_set_batch_size}"
-            extra_client_flags += f"\\\n{client_notify_batch_size}"
-
-        if inference_engine == "vllm" and VLLM_REASONING_PARSER_MAP[model] != False:
-            reasoning_parser = conditional_flags.get('reasoning_parser').replace("@reasoning_parser@", str(VLLM_REASONING_PARSER_MAP[model]))
-            extra_server_flags += f"\\\n{reasoning_parser}"
-            
 
         timestamp = datetime.now().strftime('%Y%m%d-%H%M')
         output_repo_dir = results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size)
             
         # Inject experiment parameters 
         replacements = {
+            "@inference_engine@": str(inference_engine),
+            "@image_name@": str(image_name),
             "@hf_model_path@": str(hf_model_path),
             "@model@": str(model),
             "@dataset@": str(dataset),
             "@num_samples@": str(num_samples),
-            "@gpu@": str(gpu),
+            "@gpu@": str(gpu.lower()),
             "@gpu_product@": str(gpu_product),
             "@num_gpu@": str(num_gpu),
             "@tensor_parallel_size@": str(tensor_parallel_size),
