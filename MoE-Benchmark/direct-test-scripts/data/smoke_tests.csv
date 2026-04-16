@@ -3,11 +3,11 @@ sglang,gpt-oss-20b,gsm8k,1,A100,1,1
 sglang,gpt-oss-20b,gsm8k,1,A100,1,default
 sglang,gpt-oss-20b,arena-hard,1,A100,1,1
 sglang,gpt-oss-20b,arena-hard,1,A100,1,default
-sglang,gpt-oss-20b,longbench_v2,1,A100,1,1
-sglang,gpt-oss-20b,longbench_v2,1,A100,1,default
+sglang,gpt-oss-20b,longbench_v1,1,A100,1,1
+sglang,gpt-oss-20b,longbench_v1,1,A100,1,default
 vllm,gpt-oss-20b,gsm8k,1,A100,1,1
 vllm,gpt-oss-20b,gsm8k,1,A100,1,default
 vllm,gpt-oss-20b,arena-hard,1,A100,1,1
 vllm,gpt-oss-20b,arena-hard,1,A100,1,default
-vllm,gpt-oss-20b,longbench_v2,1,A100,1,1
-vllm,gpt-oss-20b,longbench_v2,1,A100,1,default
+vllm,gpt-oss-20b,longbench_v1,1,A100,1,1
+vllm,gpt-oss-20b,longbench_v1,1,A100,1,default
