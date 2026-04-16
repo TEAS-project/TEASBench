@@ -43,6 +43,6 @@ client_run_command_arena-hard: |
                         --baseline-answers-path /path/to/baseline.jsonl
 
 conditional_flags: 
-  server_set_batch_size: "--max-running-requests @batch_size@"
+  server_set_batch_size: "--max_num_seqs @batch_size@"
   client_notify_batch_size: "--server-batch-size @batch_size@"
   reasoning_parser: "--reasoning_parser @reasoning_parser@"
