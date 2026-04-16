@@ -10,6 +10,15 @@ Supported GPU products on EIDF:
     nvidia.com/gpu.product: 'NVIDIA-H200'
 """
 
+MODEL_SHORT_NAME_MAP={
+    "gpt-oss-20b": "gpt-oss-20b",
+    "gpt-oss-120b": "gpt-oss-120b",
+    "Qwen3-235B-A22B-Instruct-2507": "qwen3-235b",
+    "DeepSeek-R1": "deepseek-r1",
+    "Kimi-K2.5": "kimi-k2.5"
+
+}
+
 HF_MODEL_MAP={
     "gpt-oss-20b": "unsloth/gpt-oss-20b",
     "gpt-oss-120b": "unsloth/gpt-oss-120b",
@@ -35,7 +44,7 @@ EIDF_GPU_MAP={
 
 
 def get_run_name(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
-    name = f"{inference_engine}_{model}_{dataset}_ns{num_samples}_{gpu}x{num_gpu}"
+    name = f"{inference_engine}_{MODEL_SHORT_NAME_MAP[model]}_{dataset}_ns{num_samples}_{gpu}x{num_gpu}"
     name += f"_bs{batch_size}"
     return name
 
