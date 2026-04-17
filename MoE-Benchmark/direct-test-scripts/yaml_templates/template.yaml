@@ -31,9 +31,11 @@ spec:
 
             RUN_DIR=/dev/shm/@timestamp@
             mkdir -p $RUN_DIR
-
+            
             exec &> $RUN_DIR/stdout_stderr.log
 
+            @configmap_copy_job_yaml@
+            
             apt-get update
             apt-get -y install git
             git clone  https://github.com/Auto-CAP/MoE-CAP.git /dev/shm/MoE-CAP
@@ -124,6 +126,7 @@ spec:
             name: inputs
           - mountPath: /dev/shm
             name: dshm
+          @configmap_volumeMounts@
       restartPolicy: Never
       volumes:
         - name: inputs
@@ -136,5 +139,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 16Gi
+        @configmap_volumes@
       nodeSelector:
         nvidia.com/gpu.product: @gpu_product@ 

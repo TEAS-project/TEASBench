@@ -80,8 +80,9 @@ class Template:
             
 
         timestamp = datetime.now().strftime('%Y%m%d-%H%M')
+
         output_repo_dir = results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size)
-            
+        
         # Inject experiment parameters 
         replacements = {
             "@inference_engine@": str(inference_engine),
@@ -115,6 +116,46 @@ class Template:
 
             config = config.replace(placeholder, actual_value)
 
-        return config
+        # Indent the entire job Yaml by 4 spaces so it will match indentation of the ConfigMap block
+        indented_job_yaml = "\n".join(["    " + line for line in config.splitlines()])
 
-    
+        # Define the ConfigMap header using the dynamically generated k8s name
+        configmap_wrapper = f"""---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {name_k8s}-config
+  namespace: eidf230ns
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+data:
+  job-config.yaml: |
+{indented_job_yaml}
+---
+"""
+
+        configmap_copy_job_yaml = "echo 'Copying job execution YAML to run directory...'\n" \
+            + 16*" " + "cp /mnt/config/job-config.yaml $RUN_DIR/" + str(name_k8s) + ".yaml"
+
+        configmap_volumeMounts = "- mountPath: /mnt/config\n" \
+            + 12*" " + "name: config-volume\n" \
+            + 12*" " + "readOnly: true"
+
+        configmap_volumes = "- name: config-volume\n" \
+            + 10*" " + "configMap:\n" \
+            + 12*" " + "name: " + str(name_k8s) + "-config"
+                
+        configmap_wrapper = configmap_wrapper.replace("@configmap_copy_job_yaml@", "")
+        configmap_wrapper = configmap_wrapper.replace("@configmap_volumeMounts@", "")
+        configmap_wrapper = configmap_wrapper.replace("@configmap_volumes@", "")
+
+        config = config.replace("@configmap_copy_job_yaml@", str(configmap_copy_job_yaml))
+        config = config.replace("@configmap_volumeMounts@", str(configmap_volumeMounts))
+        config = config.replace("@configmap_volumes@", str(configmap_volumes))
+        
+        # Concatenate the ConfigMap wrapper and the original job Yaml
+        final_single_file_yaml = configmap_wrapper + config
+
+        return final_single_file_yaml
+
+            

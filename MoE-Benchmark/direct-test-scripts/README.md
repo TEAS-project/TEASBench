@@ -31,15 +31,11 @@ python3 generate.py --csv_file=data/smoke_tests.csv
 
 ## Create k8s jobs on EIDF
 
-Before submitting an experiment job, make sure a pvc-access-helper job is running.
-We need this to save the yaml file generated for the job alongside results for future
-reference in the relevant PVC. 
+Create a single experiment job using e.g.: `kubectl -n eidf230ns create -f sglang-gpt-oss-20b-gsm8k-ns1-a100x1-bs1.yaml`
 
-To check if any pvc-access-helper job is running, run `kubectl -n eidf230ns get jobs | grep pvc-access-helper`.
+To delete both the job itself and the associated configmap (used to save the job yaml in outputs):  `kubectl -n eidf230ns delete -f sglang-gpt-oss-20b-gsm8k-ns1-a100x1-bs1.yaml`
 
-If there is none, create it using `kubectl -n eidf230ns create -f ../../eidf_scripts/pvc_access.yaml`
 
-Create a single experiment job using e.g.: `./submit_job.sh sglang-gpt-oss-20b-gsm8k-ns1-a100x1.yaml pvc-access-helper-qt7w
 
 
 
