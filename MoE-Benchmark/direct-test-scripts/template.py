@@ -77,9 +77,6 @@ class Template:
 
             config = config.replace(placeholder, replacement)
 
-            
-
-        timestamp = datetime.now().strftime('%Y%m%d-%H%M')
 
         output_repo_dir = results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size)
         
@@ -100,7 +97,6 @@ class Template:
             "@extra_server_flags@": str(extra_server_flags),
             "@extra_client_flags@": str(extra_client_flags),
             "@output_repo_dir@": str(output_repo_dir),
-            "@timestamp@": str(timestamp),
             "@results_repo@": str(results_repo),
         }
 

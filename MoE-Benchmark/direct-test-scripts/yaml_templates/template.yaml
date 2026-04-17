@@ -29,7 +29,8 @@ spec:
         args:
           - |
 
-            RUN_DIR=/dev/shm/@timestamp@
+            timestamp=$( date +%Y-%m-%d_%H%M )
+            RUN_DIR=/dev/shm/$timestamp
             mkdir -p $RUN_DIR
             
             exec &> $RUN_DIR/stdout_stderr.log
@@ -82,7 +83,7 @@ spec:
             echo "Server stopped. Copying files to pvc..."
 
             # Copy first before any git commands so we have the data in case of any error
-            RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/@timestamp@
+            RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/$timestamp
             mkdir -p $RUN_OUTPUT_DIR
             cp -R $RUN_DIR/* $RUN_OUTPUT_DIR/
 
