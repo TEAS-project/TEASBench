@@ -21,7 +21,7 @@ class Template:
             num_gpu: int,
             tensor_parallel_size: int,
             batch_size: str,
-            results_repo: str): # batch size str to accommodate "default"
+            results_repo: str): 
         
         name = get_run_name(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size)
         name_k8s = k8s_friendlify(name)

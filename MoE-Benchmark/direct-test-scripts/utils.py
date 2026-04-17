@@ -20,7 +20,7 @@ MODEL_SHORT_NAME_MAP={
 
 DATASET_SHORT_NAME_MAP={
     "gsm8k": "gsm8k",
-    "arena-hard":, "arena-hard",
+    "arena-hard": "arena-hard",
     "longbench_v1": "longbench"
     }
 
@@ -49,7 +49,7 @@ EIDF_GPU_MAP={
 
 
 def get_run_name(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
-    name = f"{inference_engine}_{MODEL_SHORT_NAME_MAP[model]}_{DATASET_SHORT_NAME[dataset]}_ns{num_samples}_{gpu}x{num_gpu}"
+    name = f"{inference_engine}_{MODEL_SHORT_NAME_MAP[model]}_{DATASET_SHORT_NAME_MAP[dataset]}_ns{num_samples}_{gpu}x{num_gpu}"
     name += f"_bs{batch_size}"
     return name
 
