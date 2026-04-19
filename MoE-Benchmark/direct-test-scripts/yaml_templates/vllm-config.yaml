@@ -48,7 +48,7 @@ client_run_command_arena-hard: |
 reasoning_parser:  # see https://docs.vllm.ai/en/latest/features/reasoning_outputs/#supported-models
   gpt-oss-20b: "openai_gptoss"
   gpt-oss-120b: "openai_gptoss"
-  
+  Qwen3-235B-A22B-Instruct-2507: "qwen3"
 
 conditional_flags: 
   server_set_batch_size: "--max_num_seqs @batch_size@"

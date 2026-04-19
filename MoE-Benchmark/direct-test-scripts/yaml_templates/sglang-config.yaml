@@ -46,6 +46,7 @@ client_run_command_arena-hard: |
 reasoning_parser:  # see https://docs.sglang.io/advanced_features/separate_reasoning.html
   gpt-oss-20b: "gpt-oss"
   gpt-oss-120b: "gpt-oss"
+  Qwen3-235B-A22B-Instruct-2507: "qwen3"
 
 conditional_flags: 
   server_set_batch_size: "--max-running-requests @batch_size@"
