@@ -17,12 +17,12 @@ sglang,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,A100,8,default
 sglang,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,A100,8,1
 sglang,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,A100,8,default
 sglang,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,A100,8,1
-sglang,Qwen3-235B-A22B-Instruct-2507,gsm8k,256,H100,4,default
-sglang,Qwen3-235B-A22B-Instruct-2507,gsm8k,256,H100,4,1
-sglang,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,H100,4,default
-sglang,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,H100,4,1
-sglang,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,H100,4,default
-sglang,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,H100,4,1
+sglang,Qwen3-235B-A22B-Instruct-2507,gsm8k,256,H100,8,default
+sglang,Qwen3-235B-A22B-Instruct-2507,gsm8k,256,H100,8,1
+sglang,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,H100,8,default
+sglang,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,H100,8,1
+sglang,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,H100,8,default
+sglang,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,H100,8,1
 vllm,gpt-oss-120b,gsm8k,256,A100,1,default
 vllm,gpt-oss-120b,gsm8k,256,A100,1,1
 vllm,gpt-oss-120b,arena-hard,256,A100,1,default
@@ -41,10 +41,10 @@ vllm,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,A100,8,default
 vllm,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,A100,8,1
 vllm,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,A100,8,default
 vllm,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,A100,8,1
-vllm,Qwen3-235B-A22B-Instruct-2507,gsm8k,256,H100,4,default
-vllm,Qwen3-235B-A22B-Instruct-2507,gsm8k,256,H100,4,1
-vllm,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,H100,4,default
-vllm,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,H100,4,1
-vllm,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,H100,4,default
-vllm,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,H100,4,1
+vllm,Qwen3-235B-A22B-Instruct-2507,gsm8k,256,H100,8,default
+vllm,Qwen3-235B-A22B-Instruct-2507,gsm8k,256,H100,8,1
+vllm,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,H100,8,default
+vllm,Qwen3-235B-A22B-Instruct-2507,arena-hard,256,H100,8,1
+vllm,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,H100,8,default
+vllm,Qwen3-235B-A22B-Instruct-2507,longbench_v1,256,H100,8,1
 
