@@ -98,6 +98,7 @@ class Template:
             "@extra_client_flags@": str(extra_client_flags),
             "@output_repo_dir@": str(output_repo_dir),
             "@results_repo@": str(results_repo),
+            "@reasoning_parser@": str(engine_config.pop('reasoning_parser')[model])
         }
 
         

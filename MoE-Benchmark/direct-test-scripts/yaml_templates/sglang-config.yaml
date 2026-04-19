@@ -17,7 +17,8 @@ server_start_command: |
                         --model-path @hf_model_path@ \
                         --port 30000 \
                         --expert-distribution-recorder-mode stat \
-                        --tp-size @tensor_parallel_size@ @extra_server_flags@
+                        --tp-size @tensor_parallel_size@ \
+                        --reasoning-parser @reasoning_parser@ @extra_server_flags@
 client_run_command: |
             python3 -m moe_cap.runner.openai_api_profile \
                         --model_name @hf_model_path@ \
@@ -25,6 +26,7 @@ client_run_command: |
                         --num-samples @num_samples@ \
                         --api-url http://localhost:30000/v1/completions \
                         --backend sglang \
+                        --use-chat-api \
                         --output_dir $RUN_DIR @extra_client_flags@
 
 client_run_command_arena-hard: |
@@ -34,12 +36,16 @@ client_run_command_arena-hard: |
                         --num-samples @num_samples@ \
                         --api-url http://localhost:30000/v1/completions \
                         --backend sglang \
+                        --use-chat-api \
                         --output_dir $RUN_DIR \
                         --judge-api-url https://openrouter.ai/api/v1/chat/completions \
                         --judge-model google/gemini-3.1-flash-lite-preview \
                         --judge-api-key $OPENROUTER_API_KEY \
                         --baseline-answers-path /path/to/baseline.jsonl
 
+reasoning_parser:  # see https://docs.sglang.io/advanced_features/separate_reasoning.html
+  gpt-oss-20b: "gpt-oss"
+  gpt-oss-120b: "gpt-oss"
 
 conditional_flags: 
   server_set_batch_size: "--max-running-requests @batch_size@"
