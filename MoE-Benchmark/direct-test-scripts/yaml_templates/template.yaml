@@ -36,7 +36,9 @@ spec:
             exec &> $RUN_DIR/stdout_stderr.log
 
             @configmap_copy_job_yaml@
-            
+
+            job_start_time$(date +%s)
+            env_start_time=$(date +%s)
             apt-get update
             apt-get -y install git
             git clone  https://github.com/Auto-CAP/MoE-CAP.git /dev/shm/MoE-CAP
@@ -44,7 +46,11 @@ spec:
             echo "MoE-CAP commit: " `git rev-parse HEAD`
             pip install -e .
             pip install gputil
+            env_end_time=$(date +%s)
+            env_duration=$((env_end_time - env_start_time))
+            echo "Environment setup took $env_duration seconds" > timings.log
 
+            server_init_start_time=$(date +%s)
             # Start server
             echo "Initialising server"
             {{ server_start_command }} &> $RUN_DIR/server.log &
@@ -54,21 +60,42 @@ spec:
             echo "Waiting for server to be ready..." 
 
             until curl -s -f http://localhost:30000/health > /dev/null; do
-              echo -n "."
-              sleep 2
+                # Check if the server has crashed (if so the health check will never succeed)
+                if ! kill -0 "$SERVER_PID" 2> /dev/null; then
+                    echo -e "\n[ERROR] Server proces died before becoming ready to use."
+                    SERVER_STATUS="dead"
+                    break
+                fi
+
+                echo -n "."
+                sleep 2
             done
 
-            echo "Server is ready!"
-            echo "Starting to run benchmark (sending http requests)..."
+            if [ "$SERVER_STATUS" != "dead" ]; then
+                server_init_end_time=$(date +%s)
+                server_init_duration=$((server_init_end_time - server_init_start_time))
+                echo "Server is ready!"
+                echo "Server initialisation took $server_init_duration seconds" >> timings.log
+                echo "Starting to run benchmark (sending http requests)..."
 
-            # Start client
-            {{ client_run_command }} &> $RUN_DIR/client.log
-
-            echo "Benchmark run finished, shutting down server..." 
-
-            kill $SERVER_PID
-            wait $SERVER_PID
-
+                # Start client
+                client_start_time=$(date +%s)
+                {{ client_run_command }} &> $RUN_DIR/client.log
+                CLIENT_SUCCESS=$?  # not 100% robust, could be failed redirection
+                if [ "$CLIENT_SUCCESS" == 0 ]; then
+                    echo "Benchmark run finished"
+                    client_end_time=$(date +%s)
+                    client_duration=$((client_end_time - client_start_time))
+                    echo "Client took $client_duration seconds" >> timings.log
+                else
+                    echo "Client crashed"
+                fi
+                echo "Shutting down server..."  # regardless of client success
+                kill $SERVER_PID
+                wait $SERVER_PID
+            else
+                echo "Not starting client because server is not available"
+            fi            
 
 
             ##################
@@ -79,10 +106,14 @@ spec:
             cd $RUN_DIR
             cp @hf_model_path@/* .
             rm -r `dirname @hf_model_path@`
+            mv metadata*.json metadata.json
+            mv metrics*.json metrics.json
+            mv detailed_results* detailed_results.jsonl
+            mv output_data*.jsonl output_data.jsonl
                         
             echo "Server stopped. Copying files to pvc..."
 
-            # Copy first before any git commands so we have the data in case of any error
+            # Copy data out before any git commands so we have the data in case of any git issues
             RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/$timestamp
             mkdir -p $RUN_OUTPUT_DIR
             cp -R $RUN_DIR/* $RUN_OUTPUT_DIR/
@@ -109,6 +140,9 @@ spec:
             git push "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
 
             echo "Finalising container"
+            job_end_time=$(date +%s)
+            job_duration=$((job_end_time - job_start_time))
+            echo "Job took $job_duration seconds" >> timings.log
 
         ports:
           - containerPort: 30000 
