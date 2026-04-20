@@ -31,9 +31,9 @@ python3 generate.py --csv_file=data/smoke_tests.csv
 
 ## Create k8s jobs on EIDF
 
-Create a single experiment job using e.g.: `kubectl -n eidf230ns create -f sglang-gpt-oss-20b-gsm8k-ns1-a100x1-bs1.yaml`
+To run a job:  `./submit.sh sglang-gpt-oss-20b-gsm8k-ns1-a100x1-bs1.yaml`
 
-To delete both the job itself and the associated configmap (used to save the job yaml in outputs):  `kubectl -n eidf230ns delete -f sglang-gpt-oss-20b-gsm8k-ns1-a100x1-bs1.yaml`
+
 
 
 

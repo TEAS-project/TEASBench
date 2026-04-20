@@ -24,6 +24,8 @@ spec:
             cpu: 2
             memory: '4Gi'
         volumeMounts:
+          - mountPath: /mnt/shared
+            name: shared
           - mountPath: /mnt/input
             name: inputs
           - mountPath: /mnt/develop
@@ -32,6 +34,9 @@ spec:
             name: results
       restartPolicy: Never
       volumes:
+        - name: shared
+          persistentVolumeClaim:
+            claimName: eidf230shared
         - name: inputs
           persistentVolumeClaim:
             claimName: inputs-pvc

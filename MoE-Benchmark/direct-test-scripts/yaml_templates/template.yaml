@@ -15,6 +15,10 @@ spec:
         image: @image_name@
         imagePullPolicy: IfNotPresent
         env:
+          - name: k8s_job_name
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['job-name']
           - name: HF_HOME
             value: /mnt/input/hf_cache
           - name: TEAS_OUTPUT_DIR
@@ -28,6 +32,7 @@ spec:
         command: ["/bin/bash", "-c"]
         args:
           - |
+            job_start_time=$(date +%s)
 
             timestamp=$( date +%Y%m%d-%H%M )
             RUN_DIR=/dev/shm/$timestamp
@@ -35,10 +40,8 @@ spec:
             
             exec &> $RUN_DIR/stdout_stderr.log
 
-            @configmap_copy_job_yaml@
-
-            job_start_time$(date +%s)
             env_start_time=$(date +%s)
+            
             apt-get update
             apt-get -y install git
             git clone  https://github.com/Auto-CAP/MoE-CAP.git /dev/shm/MoE-CAP
@@ -46,11 +49,15 @@ spec:
             echo "MoE-CAP commit: " `git rev-parse HEAD`
             pip install -e .
             pip install gputil
+            apt-get -y install jq
+
             env_end_time=$(date +%s)
             env_duration=$((env_end_time - env_start_time))
-            echo "Environment setup took $env_duration seconds" > timings.log
+            echo "Environment setup took $env_duration seconds"
+            jq -n --arg env_duration $env_duration '{environment_setup: $env_duration}'  >> $RUN_DIR/timings.json
 
             server_init_start_time=$(date +%s)
+
             # Start server
             echo "Initialising server"
             {{ server_start_command }} &> $RUN_DIR/server.log &
@@ -62,7 +69,7 @@ spec:
             until curl -s -f http://localhost:30000/health > /dev/null; do
                 # Check if the server has crashed (if so the health check will never succeed)
                 if ! kill -0 "$SERVER_PID" 2> /dev/null; then
-                    echo -e "\n[ERROR] Server proces died before becoming ready to use."
+                    echo -e "\n[ERROR] Server process died before becoming ready to use."
                     SERVER_STATUS="dead"
                     break
                 fi
@@ -75,18 +82,21 @@ spec:
                 server_init_end_time=$(date +%s)
                 server_init_duration=$((server_init_end_time - server_init_start_time))
                 echo "Server is ready!"
-                echo "Server initialisation took $server_init_duration seconds" >> timings.log
+                echo "Server initialisation took $server_init_duration seconds"
+                jq -n --arg server_init_duration $server_init_duration '{server_initialisation: $server_init_duration}'  >> $RUN_DIR/timings.json
                 echo "Starting to run benchmark (sending http requests)..."
 
                 # Start client
                 client_start_time=$(date +%s)
                 {{ client_run_command }} &> $RUN_DIR/client.log
                 CLIENT_SUCCESS=$?  # not 100% robust, could be failed redirection
+
                 if [ "$CLIENT_SUCCESS" == 0 ]; then
                     echo "Benchmark run finished"
                     client_end_time=$(date +%s)
                     client_duration=$((client_end_time - client_start_time))
-                    echo "Client took $client_duration seconds" >> timings.log
+                    echo "Client took $client_duration seconds" 
+                    jq -n --arg client_duration $client_duration '{client: $client_duration}'  >> $RUN_DIR/timings.json
                 else
                     echo "Client crashed"
                 fi
@@ -117,14 +127,18 @@ spec:
             RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/$timestamp
             mkdir -p $RUN_OUTPUT_DIR
             cp -R $RUN_DIR/* $RUN_OUTPUT_DIR/
+            cp /mnt/shared/job-configs/${k8s_job_name}.yaml $RUN_OUTPUT_DIR/
+            rm /mnt/shared/job-configs/${k8s_job_name}.yaml
 
             # We've also moved our log so change where we are writing
             exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
 
             echo "Files copied to pvc at $RUN_OUTPUT_DIR"
 
-            # Move to root of output directory 
-            cd $TEAS_OUTPUT_DIR/
+            job_end_time=$(date +%s)
+            job_duration=$((job_end_time - job_start_time))
+            echo "Job took $job_duration seconds"
+            jq -n --arg job_duration $job_duration '{job: $job_duration}'  >> $RUN_OUTPUT_DIR/timings.json
 
             # Pull to refresh before committing and pushing
             cd $RUN_OUTPUT_DIR
@@ -135,15 +149,11 @@ spec:
             git config user.email "autopush@eidf"
             git config user.name "Pipeline Autopush"
             
-            git add metrics*.json metadata*.json *.yaml
+            git add metrics*.json metadata*.json *.yaml timings.json
             git commit -m "auto: @name_k8s@"
             git push "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
 
             echo "Finalising container"
-            job_end_time=$(date +%s)
-            job_duration=$((job_end_time - job_start_time))
-            echo "Job took $job_duration seconds" >> timings.log
-
         ports:
           - containerPort: 30000 
         resources:
@@ -161,7 +171,8 @@ spec:
             name: inputs
           - mountPath: /dev/shm
             name: dshm
-          @configmap_volumeMounts@
+          - mountPath: /mnt/shared
+            name: shared
       restartPolicy: Never
       volumes:
         - name: inputs
@@ -170,10 +181,12 @@ spec:
         - name: develop
           persistentVolumeClaim:
             claimName: develop-pvc
+        - name: shared
+          persistentVolumeClaim:
+            claimName: eidf230shared
         - name: dshm
           emptyDir:
             medium: Memory
             sizeLimit: 16Gi
-        @configmap_volumes@
       nodeSelector:
         nvidia.com/gpu.product: @gpu_product@ 
