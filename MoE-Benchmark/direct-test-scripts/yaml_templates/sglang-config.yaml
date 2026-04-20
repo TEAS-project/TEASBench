@@ -1,0 +1,60 @@
+inference_engine_version: 0.5.9
+
+image:
+  base: "lmsysorg/sglang"
+  cuda_variant:
+    EIDF:
+      A100: ""
+      H100: "-cu130"
+      H200: "-cu130"
+    
+extra_container_env: |
+  - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
+    value: "/dev/shm/sglang_expert_distribution_recorder"
+
+server_start_command: |
+            python3 -m moe_cap.systems.sglang \
+                        --model-path @hf_model_path@ \
+                        --port 30000 \
+                        --expert-distribution-recorder-mode stat \
+                        --tp-size @tensor_parallel_size@ \
+                        --reasoning-parser @reasoning_parser@ @extra_server_flags@
+client_run_command: |
+            python3 -m moe_cap.runner.openai_api_profile \
+                        --model_name @hf_model_path@ \
+                        --datasets @dataset@ \
+                        --num-samples @num_samples@ \
+                        --api-url http://localhost:30000/v1/completions \
+                        --backend sglang \
+                        --use-chat-api \
+                        --output_dir $RUN_DIR @extra_client_flags@
+
+client_run_command_arena-hard: |
+            python3 -m moe_cap.runner.openai_api_profile \
+                        --model_name @hf_model_path@ \
+                        --datasets arena-hard \
+                        --num-samples @num_samples@ \
+                        --api-url http://localhost:30000/v1/completions \
+                        --backend sglang \
+                        --use-chat-api \
+                        --output_dir $RUN_DIR \
+                        --judge-api-url https://openrouter.ai/api/v1/chat/completions \
+                        --judge-model google/gemini-3.1-flash-lite-preview \
+                        --judge-api-key $OPENROUTER_API_KEY \
+                        --baseline-answers-path /path/to/baseline.jsonl
+
+reasoning_parser:  # see https://docs.sglang.io/advanced_features/separate_reasoning.html
+  gpt-oss-20b: "gpt-oss"
+  gpt-oss-120b: "gpt-oss"
+  Qwen3-235B-A22B-Instruct-2507: "qwen3"
+
+conditional_flags: 
+  server_set_batch_size: "--max-running-requests @batch_size@"
+  client_notify_batch_size: "--server-batch-size @batch_size@"
+
+extra_client_flags:
+  arena-hard:
+    --judge-api-url https://openrouter.ai/api/v1/chat/completions \
+    --judge-model google/gemini-3.1-flash-lite-preview \
+    --judge-api-key $OPENROUTER_API_KEY \
+    --baseline-answers-path /path/to/baseline.jsonl

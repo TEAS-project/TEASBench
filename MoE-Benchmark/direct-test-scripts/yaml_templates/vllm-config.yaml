@@ -1,0 +1,56 @@
+inference_engine_version: 0.16.0
+
+image:
+  base: "vllm/vllm-openai"
+  cuda_variant:
+    EIDF:
+      A100: ""
+      H100: "-cu13"
+      H200: "-cu13"
+
+extra_container_env: ""
+
+
+
+server_start_command: |
+            python3 -m moe_cap.systems.vllm \
+              --model @hf_model_path@ \
+              --port 30000 \
+              --host 0.0.0.0 \
+              --enable-expert-distribution-metrics \
+              --tensor-parallel-size @tensor_parallel_size@ \
+              --reasoning-parser @reasoning_parser@ @extra_server_flags@
+
+client_run_command: |
+            python3 -m moe_cap.runner.openai_api_profile \
+              --model_name @hf_model_path@ \
+              --datasets @dataset@ \
+              --num-samples @num_samples@ \
+              --api-url http://localhost:30000/v1/completions \
+              --backend vllm \
+              --use-chat-api \
+              --output_dir $RUN_DIR @extra_client_flags@
+
+client_run_command_arena-hard: |
+            python3 -m moe_cap.runner.openai_api_profile \
+                        --model_name @hf_model_path@ \
+                        --datasets arena-hard \
+                        --num-samples @num_samples@ \
+                        --api-url http://localhost:30000/v1/completions \
+                        --backend vllm \
+                        --use-chat-api \
+                        --output_dir $RUN_DIR \
+                        --judge-api-url https://openrouter.ai/api/v1/chat/completions \
+                        --judge-model google/gemini-3.1-flash-lite-preview \
+                        --judge-api-key $OPENROUTER_API_KEY \
+                        --baseline-answers-path /path/to/baseline.jsonl
+
+reasoning_parser:  # see https://docs.vllm.ai/en/latest/features/reasoning_outputs/#supported-models
+  gpt-oss-20b: "openai_gptoss"
+  gpt-oss-120b: "openai_gptoss"
+  Qwen3-235B-A22B-Instruct-2507: "qwen3"
+
+conditional_flags: 
+  server_set_batch_size: "--max_num_seqs @batch_size@"
+  client_notify_batch_size: "--server-batch-size @batch_size@"
+  reasoning_parser: "--reasoning_parser @reasoning_parser@"
