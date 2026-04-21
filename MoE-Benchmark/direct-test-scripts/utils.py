@@ -51,7 +51,7 @@ def k8s_friendlify(unfriendly_string):
     return unfriendly_string.replace("_", "-").lower()
 
 def results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
-    dir = f"moe/eidf/{inference_engine}/{model}/{dataset}_{num_samples}samples/{gpu.lower()}x{num_gpu}"
+    dir = f"moe/eidf/{inference_engine}/{model.lower()}/{dataset}_{num_samples}samples/{gpu.lower()}x{num_gpu}"
     if batch_size == "default":
         dir += f"/batch-size-default"
     else:
