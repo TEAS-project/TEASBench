@@ -14,6 +14,7 @@ MODEL_SHORT_NAME_MAP={
     "gpt-oss-20b": "gpt-oss-20b",
     "gpt-oss-120b": "gpt-oss-120b",
     "Qwen3-235B-A22B-Instruct-2507": "qwen3-235b",
+    "Qwen3-235B-A22B-Instruct-2507-FP8": "qwen3-235b-fp8",
     "DeepSeek-R1": "deepseek-r1",
     "Kimi-K2.5": "kimi-k2.5"
 }
@@ -28,16 +29,9 @@ HF_MODEL_MAP={
     "gpt-oss-20b": "unsloth/gpt-oss-20b",
     "gpt-oss-120b": "unsloth/gpt-oss-120b",
     "Qwen3-235B-A22B-Instruct-2507": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "Qwen3-235B-A22B-Instruct-2507-FP8": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
     "DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
     "Kimi-K2.5": "moonshotai/Kimi-K2.5"
-}
-
-VLLM_REASONING_PARSER_MAP={
-    "gpt-oss-20b": False,
-    "gpt-oss-120b": False,
-    "Qwen3-235B-A22B-Instruct-2507": False,
-    "DeepSeek-R1": "deepseek_r1",
-    "Kimi-K2.5": "kimi_k2"
 }
 
 

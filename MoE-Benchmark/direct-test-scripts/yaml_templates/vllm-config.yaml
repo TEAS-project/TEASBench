@@ -5,8 +5,8 @@ image:
   cuda_variant:
     EIDF:
       A100: ""
-      H100: "-cu13"
-      H200: "-cu13"
+      H100: "-cu130"
+      H200: "-cu130"
 
 extra_container_env: ""
 
@@ -49,6 +49,9 @@ reasoning_parser:  # see https://docs.vllm.ai/en/latest/features/reasoning_outpu
   gpt-oss-20b: "openai_gptoss"
   gpt-oss-120b: "openai_gptoss"
   Qwen3-235B-A22B-Instruct-2507: "qwen3"
+  Qwen3-235B-A22B-Instruct-2507-FP8: "qwen3"
+  DeepSeek-R1: "deepseek_r1"
+  Kimi-K2.5: "kimi_k2"
 
 conditional_flags: 
   server_set_batch_size: "--max_num_seqs @batch_size@"

@@ -47,6 +47,9 @@ reasoning_parser:  # see https://docs.sglang.io/advanced_features/separate_reaso
   gpt-oss-20b: "gpt-oss"
   gpt-oss-120b: "gpt-oss"
   Qwen3-235B-A22B-Instruct-2507: "qwen3"
+  Qwen3-235B-A22B-Instruct-2507-FP8: "qwen3"
+  DeepSeek-R1: "deepseek-r1"
+  Kimi-K2.5: "kimi_k2"
 
 conditional_flags: 
   server_set_batch_size: "--max-running-requests @batch_size@"

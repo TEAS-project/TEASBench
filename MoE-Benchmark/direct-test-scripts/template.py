@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 import yaml
 import re
-from utils import get_run_name, k8s_friendlify, results_repo_dir, VLLM_REASONING_PARSER_MAP
+from utils import get_run_name, k8s_friendlify, results_repo_dir
 
 class Template:
     def __init__(self):
@@ -54,11 +54,6 @@ class Template:
             extra_server_flags += f"\\\n{server_set_batch_size}"
             extra_client_flags += f"\\\n{client_notify_batch_size}"
 
-        # MoE-CAP Reasoning parser
-        if inference_engine == "vllm" and VLLM_REASONING_PARSER_MAP[model] != False:
-            reasoning_parser = conditional_flags['reasoning_parser'].replace("@reasoning_parser@", str(VLLM_REASONING_PARSER_MAP[model]))
-            extra_server_flags += f"\\\n{reasoning_parser}"
-            
         # Inject config into template 
         config = template
         if dataset == "arena-hard":
