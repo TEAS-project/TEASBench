@@ -74,6 +74,11 @@ class Template:
 
 
         output_repo_dir = results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size)
+
+        if dataset == "arena-hard":
+            arena_cap_download_baseline="wget https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl"
+        else:
+            arena_cap_download_baseline=""
         
         # Inject experiment parameters 
         replacements = {
@@ -93,7 +98,8 @@ class Template:
             "@extra_client_flags@": str(extra_client_flags),
             "@output_repo_dir@": str(output_repo_dir),
             "@results_repo@": str(results_repo),
-            "@reasoning_parser@": str(engine_config.pop('reasoning_parser')[model])
+            "@reasoning_parser@": str(engine_config.pop('reasoning_parser')[model]),
+            "@arena_cap_download_baseline@": str(arena_cap_download_baseline)
         }
 
         

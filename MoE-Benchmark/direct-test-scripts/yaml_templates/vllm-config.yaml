@@ -41,9 +41,9 @@ client_run_command_arena-hard: |
                         --use-chat-api \
                         --output_dir $RUN_DIR \
                         --judge-api-url https://openrouter.ai/api/v1/chat/completions \
-                        --judge-model google/gemini-3.1-flash-lite-preview \
+                        --judge-model openai/gpt-4.1 \
                         --judge-api-key $OPENROUTER_API_KEY \
-                        --baseline-answers-path /path/to/baseline.jsonl
+                        --baseline-answers-path ./gpt-4-0613.jsonl
 
 reasoning_parser:  # see https://docs.vllm.ai/en/latest/features/reasoning_outputs/#supported-models
   gpt-oss-20b: "openai_gptoss"

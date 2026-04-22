@@ -18,7 +18,8 @@ server_start_command: |
                         --port 30000 \
                         --expert-distribution-recorder-mode stat \
                         --tp-size @tensor_parallel_size@ \
-                        --reasoning-parser @reasoning_parser@ @extra_server_flags@
+                        --reasoning-parser @reasoning_parser@ \
+                        --dist-timeout 3600 @extra_server_flags@
 client_run_command: |
             python3 -m moe_cap.runner.openai_api_profile \
                         --model_name @hf_model_path@ \
@@ -39,9 +40,9 @@ client_run_command_arena-hard: |
                         --use-chat-api \
                         --output_dir $RUN_DIR \
                         --judge-api-url https://openrouter.ai/api/v1/chat/completions \
-                        --judge-model google/gemini-3.1-flash-lite-preview \
+                        --judge-model openai/gpt-4.1 \
                         --judge-api-key $OPENROUTER_API_KEY \
-                        --baseline-answers-path /path/to/baseline.jsonl
+                        --baseline-answers-path ./gpt-4-0613.jsonl
 
 reasoning_parser:  # see https://docs.sglang.io/advanced_features/separate_reasoning.html
   gpt-oss-20b: "gpt-oss"
