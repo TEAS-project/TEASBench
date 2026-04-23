@@ -43,7 +43,7 @@ client_run_command_arena-hard: |
                         --judge-api-url https://openrouter.ai/api/v1/chat/completions \
                         --judge-model openai/gpt-4.1 \
                         --judge-api-key $OPENROUTER_API_KEY \
-                        --baseline-answers-path ./gpt-4-0613.jsonl
+                        --baseline-answers-path $RUN_DIR/gpt-4-0613.jsonl
 
 reasoning_parser:  # see https://docs.vllm.ai/en/latest/features/reasoning_outputs/#supported-models
   gpt-oss-20b: "openai_gptoss"
@@ -57,3 +57,9 @@ conditional_flags:
   server_set_batch_size: "--max_num_seqs @batch_size@"
   client_notify_batch_size: "--server-batch-size @batch_size@"
   reasoning_parser: "--reasoning_parser @reasoning_parser@"
+
+extra_server_flags:
+  Qwen3-235B-A22B-Instruct-2507-FP8:
+    H100: "--max-model-len 200k"
+
+download_arena_hard_baseline_answers: "curl -L --output-dir $RUN_DIR -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl"

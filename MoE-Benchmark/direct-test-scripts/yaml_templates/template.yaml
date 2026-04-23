@@ -19,6 +19,10 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.labels['job-name']
+          - name: k8s_node_name
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
           - name: HF_HOME
             value: /mnt/input/hf_cache
           - name: TEAS_OUTPUT_DIR
@@ -28,6 +32,11 @@ spec:
               secretKeyRef:
                 name: teas-develop-results-private-ap
                 key: token
+          - name: OPENROUTER_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: openrouter-api-key
+                key: OPENROUTER_API_KEY
           {{ extra_container_env }}
         command: ["/bin/bash", "-c"]
         args:
@@ -40,6 +49,8 @@ spec:
             
             exec &> $RUN_DIR/stdout_stderr.log
 
+            echo "Running on node $k8s_node_name"
+            
             env_start_time=$(date +%s)
             
             apt-get update
@@ -55,6 +66,8 @@ spec:
             env_duration=$((env_end_time - env_start_time))
             echo "Environment setup took $env_duration seconds"
             jq -n --arg env_duration $env_duration '{environment_setup: $env_duration}'  >> $RUN_DIR/timings.json
+
+            @download_arena_hard_baseline_answers@
 
             server_init_start_time=$(date +%s)
 

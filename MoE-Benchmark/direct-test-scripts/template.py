@@ -55,10 +55,14 @@ class Template:
             extra_client_flags += f"\\\n{client_notify_batch_size}"
 
         # Inject config into template 
-        config = template
         if dataset == "arena-hard":
             engine_config['client_run_command'] = engine_config['client_run_command_arena-hard']
-            
+            download_arena_hard_baseline_answers=str(engine_config["download_arena_hard_baseline_answers"])
+        else:
+            download_arena_hard_baseline_answers=""
+
+
+        config = template
         for key, value in engine_config.items():
             placeholder = "{{ " + key + " }}"
             replacement = str(value).rstrip('\n') if value is not None else ""
@@ -75,10 +79,6 @@ class Template:
 
         output_repo_dir = results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size)
 
-        if dataset == "arena-hard":
-            arena_cap_download_baseline="wget https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl"
-        else:
-            arena_cap_download_baseline=""
         
         # Inject experiment parameters 
         replacements = {
@@ -99,7 +99,7 @@ class Template:
             "@output_repo_dir@": str(output_repo_dir),
             "@results_repo@": str(results_repo),
             "@reasoning_parser@": str(engine_config.pop('reasoning_parser')[model]),
-            "@arena_cap_download_baseline@": str(arena_cap_download_baseline)
+            "@download_arena_hard_baseline_answers@": str(download_arena_hard_baseline_answers)
         }
 
         
