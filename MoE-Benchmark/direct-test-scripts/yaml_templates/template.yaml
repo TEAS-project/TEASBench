@@ -32,12 +32,7 @@ spec:
               secretKeyRef:
                 name: teas-develop-results-private-ap
                 key: token
-          - name: OPENROUTER_API_KEY
-            valueFrom:
-              secretKeyRef:
-                name: openrouter-api-key
-                key: OPENROUTER_API_KEY
-          {{ extra_container_env }}
+          @extra_container_env@
         command: ["/bin/bash", "-c"]
         args:
           - |
@@ -53,14 +48,14 @@ spec:
             
             env_start_time=$(date +%s)
             
-            apt-get update
-            apt-get -y install git
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" -y install git
             git clone  https://github.com/Auto-CAP/MoE-CAP.git /dev/shm/MoE-CAP
             cd /dev/shm/MoE-CAP
             echo "MoE-CAP commit: " `git rev-parse HEAD`
             pip install -e .
             pip install gputil
-            apt-get -y install jq
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" -y install jq
 
             env_end_time=$(date +%s)
             env_duration=$((env_end_time - env_start_time))
@@ -73,7 +68,7 @@ spec:
 
             # Start server
             echo "Initialising server"
-            {{ server_start_command }} &> $RUN_DIR/server.log &
+            @server_start_command@ &> $RUN_DIR/server.log &
             SERVER_PID=$!
             
             # Wait until the /health endpoint returns HTTP 200
@@ -101,7 +96,7 @@ spec:
 
                 # Start client
                 client_start_time=$(date +%s)
-                {{ client_run_command }} &> $RUN_DIR/client.log
+                @client_run_command@ &> $RUN_DIR/client.log
                 CLIENT_SUCCESS=$?  # not 100% robust, could be failed redirection
 
                 if [ "$CLIENT_SUCCESS" == 0 ]; then

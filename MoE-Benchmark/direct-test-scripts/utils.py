@@ -41,21 +41,20 @@ EIDF_GPU_MAP={
     "H200":"NVIDIA-H200"
 }
 
-
-def get_run_name(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
-    name = f"{inference_engine}_{MODEL_SHORT_NAME_MAP[model]}_{DATASET_SHORT_NAME_MAP[dataset]}_ns{num_samples}_{gpu}x{num_gpu}"
-    name += f"_bs{batch_size}"
+def get_run_name(p: dict):
+    name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
+    name += f"_bs{p['batch_size']}"
     return name
 
 def k8s_friendlify(unfriendly_string):
     return unfriendly_string.replace("_", "-").lower()
 
-def results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
-    dir = f"moe/eidf/{inference_engine}/{model.lower()}/{dataset}_{num_samples}samples/{gpu.lower()}x{num_gpu}"
-    if batch_size == "default":
+def results_repo_dir(p: dict):
+    dir = f"moe/eidf/{p['inference_engine']}/{p['model'].lower()}/{p['dataset']}_{p['num_samples']}samples/{p['gpu'].lower()}x{p['num_gpu']}"
+    if p['batch_size'] == "default":
         dir += f"/batch-size-default"
     else:
-        dir += f"/batch-size-{batch_size}"
+        dir += f"/batch-size-{p['batch_size']}"
     return dir
 
 
