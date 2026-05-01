@@ -14,7 +14,7 @@ variables_defaults:
     sglang:
       port:
         flag: "--port"
-        default_value: "30000"
+        value: "30000"
       reasoning_parser:
         flag: "--reasoning-parser"
       hf_model_path:
@@ -23,23 +23,23 @@ variables_defaults:
         flag: "--tp-size"
       expert_recording:
         flag: "--expert-distribution-recorder-mode"
-        default_value: "stat"
+        value: "stat"
       batch_size:
         flag: "--max-running-requests"
       max_context:
         flag: "--context-length"
       model_load_timeout:
         flag: "--dist_timeout"
-        default_value: "3600"
+        value: "3600"
       gpu_memory_fraction:
         flag: "--mem-fraction-static"
     vllm:
       port:
         flag: "--port"
-        default_value: "30000"
+        value: "30000"
       host:
         flag: "--host"
-        default_value: "0.0.0.0"
+        value: "0.0.0.0"
       reasoning_parser:
         flag: "--reasoning-parser"
       hf_model_path:
@@ -48,8 +48,8 @@ variables_defaults:
         flag: "--tensor-parallel-size"
       expert_recording:
         flag: "--enable-expert-distribution-metrics"
-        default_value: true
-      max_batch_size:
+        value: true
+      batch_size:
         flag: "--max_num_seqs"
       max_context:
         flag: "--max-model-len"
@@ -67,15 +67,15 @@ variables_defaults:
       flag: "--server-batch-size"
     api_url:
       flag: "--api-url"
-      default_value: "http://localhost:30000/v1/completions"
+      value: "http://localhost:30000/v1/completions"
     backend:
       flag: "--backend"
     chat_api:
       flag: "--use-chat-api"
-      default_value: true
+      value: true
     output_dir:
       flag: "--output_dir"
-      default_value: "$RUN_DIR"
+      value: "$RUN_DIR"
     judge_url:
       flag: "--judge-api-url"
     judge_model:                    
@@ -130,10 +130,10 @@ variables_defaults:
       base: "vllm/vllm-openai"
 
   extra_container_env:
-    default_value: 
-
+    value:
+    
   download_arena_hard_baseline_answers:
-    default_value: 
+    value: 
 
 
 
@@ -154,9 +154,9 @@ rules:
       inference_engine:
         - "sglang"
     extra_container_env:
-      value: '|
-    - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
-       value: "/dev/shm/sglang_expert_distribution_recorder"'
+      value: |
+        - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
+          value: "/dev/shm/sglang_expert_distribution_recorder"
     client_flags:
       backend: "sglang"
 
@@ -170,16 +170,9 @@ rules:
 # Rules based on model alone
   - match:
       model:
-        - "gpt-oss-20b"
-        - "gpt-oss-120b"
-    server_flags:
-      reasoning_parser: "gpt-oss"
-
-  - match:
-      model:
         - "DeepSeek-R1"
     server_flags:
-      reasoning_parser: "deepseek-r1"
+      reasoning_parser: "deepseek_r1"
 
   - match:
       model:
@@ -195,6 +188,15 @@ rules:
       model_load_timeout: 3600
 
 
+# Rules based on batch size alone
+  - match:
+      batch_size:
+        - "1"
+    server_flags:
+      batch_size: "1"
+    client_flags:
+      batch_size: "1"
+
 # Rules based on dataset alone
   - match: 
       dataset:
@@ -205,12 +207,12 @@ rules:
       baseline_answers: "$RUN_DIR/gpt-4-0613.jsonl"
     download_arena_hard_baseline_answers: "curl -L --output-dir $RUN_DIR -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl"
     extra_container_env:
-      value: '|
-      - name: OPENROUTER_API_KEY
+      value: |
+        - name: OPENROUTER_API_KEY
           valueFrom:
             secretKeyRef:
               name: openrouter-api-key
-              key: OPENROUTER_API_KEY'
+              key: OPENROUTER_API_KEY
 
 
 # Rules based on hardware alone
@@ -226,6 +228,26 @@ rules:
         - "H200"
       image:
         cuda_variant: "-cu130"
+
+
+# Rules based on model and inference engine
+  - match:
+      model:
+        - "gpt-oss-20b"
+        - "gpt-oss-120b"
+      inference_engine:
+        - "sglang"
+    server_flags:
+      reasoning_parser: "gpt-oss"
+
+  - match:
+      model:
+        - "gpt-oss-20b"
+        - "gpt-oss-120b"
+      inference_engine:
+        - "vllm"
+    server_flags:
+      reasoning_parser: "openai_gptoss"
 
 
 # Rules based on model and hardware

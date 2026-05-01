@@ -43,36 +43,53 @@ class Template:
                     resolved[param] = value
         return resolved
 
-    
+
+
     def resolve_generic_variable(self, var_name, config, matching_rules, parameters):
-        """
-        Resolves a non-command variable by checking defaults and applying rules.
-        """
-        # 1. Start with the default value from variables_defaults
+        # 1. Start with the default value
         value = config["variables_defaults"].get(var_name)
-        
-        # If it's an engine-specific dict, narrow it down
+
         engine = parameters.get('inference_engine')
         if isinstance(value, dict) and engine in value:
             value = value[engine]
 
-        # 2. Overwrite with values from matching rules
+        # 2. Accumulate values from all matching rules
         for rule in matching_rules:
             if var_name in rule:
                 rule_val = rule[var_name]
-                # If rule_val is a dict, merge it; otherwise overwrite
+
+                # Handle dictionary merging (existing logic)
                 if isinstance(value, dict) and isinstance(rule_val, dict):
-                    value.update(rule_val)
+                    for k, v in rule_val.items():
+                        # If the key exists and both are strings, concatenate them
+                        if k in value and isinstance(value[k], str) and isinstance(v, str):
+                            if v not in value[k]:
+                                # Strip trailing/leading newlines and join with a single newline
+                                value[k] = value[k].rstrip('\n') + "\n" + v.lstrip('\n')
+                        # Otherwise, behave like a normal update
+                        else:
+                            value[k] = v
+
+                # Handle String/Environment Variable Aggregation
+                elif isinstance(value, str) and isinstance(rule_val, str):
+                    # Ensure we don't duplicate exact blocks and maintain spacing
+                    if rule_val not in value:
+                        value = value.strip() + "\n" + rule_val.strip()
+
+                # Handle list aggregation
+                elif isinstance(value, list) and isinstance(rule_val, list):
+                    value.extend(x for x in rule_val if x not in value)
+
+                # Fallback for initial assignment if default was None/empty
                 else:
                     value = rule_val
-        
-        # If the result is a dict with a 'default_value' key, simplify it
-        if isinstance(value, dict) and "default_value" in value:
-            value = value["default_value"]
-            
+
+        if isinstance(value, dict) and "value" in value:
+            value = value["value"]
+
         return "" if value is None else value
 
-    
+
     def _build_flag(self, flag_def, param, value):
         flag_str = flag_def["flag"] if isinstance(flag_def, dict) else flag_def
         if value is True:
@@ -102,7 +119,7 @@ class Template:
         for param in cmd_cfg["base_parameters"]:
             if param not in flags_def: continue
             flag_def = flags_def[param]
-            value = parameters.get(param, flag_def.get("default_value") if isinstance(flag_def, dict) else None)
+            value = parameters.get(param, flag_def.get("value") if isinstance(flag_def, dict) else None)
             
             rendered = self._build_flag(flag_def, param, value)
             if rendered: cmd += f"  {rendered} \\\n"
