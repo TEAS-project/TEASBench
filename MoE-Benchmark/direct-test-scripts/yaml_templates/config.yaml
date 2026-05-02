@@ -29,7 +29,7 @@ variables_defaults:
       max_context:
         flag: "--context-length"
       model_load_timeout:
-        flag: "--dist_timeout"
+        flag: "--dist-timeout"
         value: "3600"
       gpu_memory_fraction:
         flag: "--mem-fraction-static"

@@ -3,6 +3,7 @@
 import yaml
 import os
 import re
+import subprocess
 from utils import get_run_name, k8s_friendlify, results_repo_dir
 
 class Template:
@@ -156,6 +157,8 @@ class Template:
         cuda_variant = img_cfg.get("cuda_variant", "") if isinstance(img_cfg, dict) else ""
         image_name = f"{img_cfg['base']}:v{img_version}{cuda_variant if cuda_variant else ''}"
 
+        teasbench_commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+        
         # Prepare replacements for substitution in template.yaml
         replacements={
             "@name_k8s@": k8s_friendlify(get_run_name(parameters)),
@@ -169,7 +172,8 @@ class Template:
             "@num_gpu@": str(parameters.get("num_gpu")),
             "@gpu_product@": str(parameters.get("gpu_product")),
             "@results_repo@": results_repo,
-            "@output_repo_dir@": results_repo_dir(parameters)
+            "@output_repo_dir@": results_repo_dir(parameters),
+            "@teasbench_commit@": teasbench_commit
         }
 
 

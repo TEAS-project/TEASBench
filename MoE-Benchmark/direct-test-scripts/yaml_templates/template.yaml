@@ -52,11 +52,11 @@ spec:
             apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" -y install git
             git clone  https://github.com/Auto-CAP/MoE-CAP.git /dev/shm/MoE-CAP
             cd /dev/shm/MoE-CAP
-            echo "MoE-CAP commit: " `git rev-parse HEAD`
+            MOE_CAP_COMMIT=$(git rev-parse --short HEAD)
             pip install -e .
             pip install gputil
-            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" -y install jq
-
+            apt-get -y install jq
+            
             env_end_time=$(date +%s)
             env_duration=$((env_end_time - env_start_time))
             echo "Environment setup took $env_duration seconds"
@@ -140,8 +140,12 @@ spec:
 
             # We've also moved our log so change where we are writing
             exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
+            cd $RUN_OUTPUT_DIR           
 
             echo "Files copied to pvc at $RUN_OUTPUT_DIR"
+
+            # Add commit IDs of MoE-CAP and TEASBench to metadata.json
+            jq --arg moe_cap_commit $MOE_CAP_COMMIT '.system_environment += {"teasbench_commit": "@teasbench_commit@", "moe_cap_commit": $moe_cap_commit}' $RUN_OUTPUT_DIR/metadata.json > tmp.json && mv tmp.json $RUN_OUTPUT_DIR/metadata.json 
 
             job_end_time=$(date +%s)
             job_duration=$((job_end_time - job_start_time))
@@ -149,7 +153,6 @@ spec:
             jq -n --arg job_duration $job_duration '{job: $job_duration}'  >> $RUN_OUTPUT_DIR/timings.json
 
             # Pull to refresh before committing and pushing
-            cd $RUN_OUTPUT_DIR
             GIT_TOKEN="${GIT_TOKEN%$'\n'}"   # remove trailing newline that causes issues
             git pull "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
             
