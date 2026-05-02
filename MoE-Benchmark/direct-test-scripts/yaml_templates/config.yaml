@@ -204,6 +204,7 @@ rules:
     client_flags:
       judge_url: "https://openrouter.ai/api/v1/chat/completions"
       judge_model: "openai/gpt-4.1"
+      judge_key: "$OPENROUTER_API_KEY"
       baseline_answers: "$RUN_DIR/gpt-4-0613.jsonl"
     download_arena_hard_baseline_answers: "curl -L --output-dir $RUN_DIR -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl"
     extra_container_env:
@@ -250,20 +251,37 @@ rules:
       reasoning_parser: "openai_gptoss"
 
 
-# Rules based on model and hardware
+# Memory requirement tweaks for models that only barely fit in GPU memory
   - match:
       model:
         - "gpt-oss-120b"
       gpu:
         - "H100"
+      num_gpu:
+        - 1
+      inference_engine:
+        - "sglang"
     server_flags:
       gpu_memory_fraction: "0.9"
 
+  - match:
+      model:
+        - "gpt-oss-120b"
+      gpu:
+        - "H100"
+      num_gpu:
+        - 1
+      inference_engine:
+        - "vllm"
+    server_flags:
+      gpu_memory_fraction: "0.95"
 
   - match:
       model:
         - "Qwen3-235B-A22B-Instruct-2507-FP8"
         - "Qwen3-235B-A22B-Instruct-2507"
+      inference_engine:
+        - "vllm"
       gpu:
         - "H100"
     server_flags:
