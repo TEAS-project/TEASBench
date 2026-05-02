@@ -267,5 +267,5 @@ rules:
       gpu:
         - "H100"
     server_flags:
-      max_context_length: 200k
+      max_context: 200k
 

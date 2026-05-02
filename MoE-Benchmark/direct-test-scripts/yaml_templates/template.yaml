@@ -145,7 +145,8 @@ spec:
             echo "Files copied to pvc at $RUN_OUTPUT_DIR"
 
             # Add commit IDs of MoE-CAP and TEASBench to metadata.json
-            jq --arg moe_cap_commit $MOE_CAP_COMMIT '.system_environment += {"teasbench_commit": "@teasbench_commit@", "moe_cap_commit": $moe_cap_commit}' $RUN_OUTPUT_DIR/metadata.json > tmp.json && mv tmp.json $RUN_OUTPUT_DIR/metadata.json 
+            jq --arg moe_cap_commit $MOE_CAP_COMMIT '.system_environment += {"teasbench_commit": "@teasbench_commit@", "moe_cap_commit": $moe_cap_commit}' $RUN_OUTPUT_DIR/metadata.json > tmp.json && mv tmp.json $RUN_OUTPUT_DIR/metadata.json
+            rm $RUN_OUTPUT_DIR/tmp.json
 
             job_end_time=$(date +%s)
             job_duration=$((job_end_time - job_start_time))
