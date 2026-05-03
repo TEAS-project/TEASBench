@@ -212,8 +212,8 @@ rules:
         - name: OPENROUTER_API_KEY
           valueFrom:
             secretKeyRef:
-              name: openrouter-api-key
-              key: OPENROUTER_API_KEY
+              name: openrouter-api-key-ap
+              key: key
 
 
 # Rules based on hardware alone
@@ -259,6 +259,8 @@ rules:
         - "H100"
       num_gpu:
         - 1
+      batch_size:
+        - "default"
       inference_engine:
         - "sglang"
     server_flags:
@@ -271,6 +273,8 @@ rules:
         - "H100"
       num_gpu:
         - 1
+      batch_size:
+        - "default"
       inference_engine:
         - "vllm"
     server_flags:
