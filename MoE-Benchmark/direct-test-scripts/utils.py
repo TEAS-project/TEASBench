@@ -14,6 +14,7 @@ MODEL_SHORT_NAME_MAP={
     "gpt-oss-20b": "gpt-oss-20b",
     "gpt-oss-120b": "gpt-oss-120b",
     "Qwen3-235B-A22B-Instruct-2507": "qwen3-235b",
+    "Qwen3-235B-A22B-Instruct-2507-FP8": "qwen3-235b-fp8",
     "DeepSeek-R1": "deepseek-r1",
     "Kimi-K2.5": "kimi-k2.5"
 }
@@ -28,16 +29,9 @@ HF_MODEL_MAP={
     "gpt-oss-20b": "unsloth/gpt-oss-20b",
     "gpt-oss-120b": "unsloth/gpt-oss-120b",
     "Qwen3-235B-A22B-Instruct-2507": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "Qwen3-235B-A22B-Instruct-2507-FP8": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
     "DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
     "Kimi-K2.5": "moonshotai/Kimi-K2.5"
-}
-
-VLLM_REASONING_PARSER_MAP={
-    "gpt-oss-20b": False,
-    "gpt-oss-120b": False,
-    "Qwen3-235B-A22B-Instruct-2507": False,
-    "DeepSeek-R1": "deepseek_r1",
-    "Kimi-K2.5": "kimi_k2"
 }
 
 
@@ -47,21 +41,20 @@ EIDF_GPU_MAP={
     "H200":"NVIDIA-H200"
 }
 
-
-def get_run_name(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
-    name = f"{inference_engine}_{MODEL_SHORT_NAME_MAP[model]}_{DATASET_SHORT_NAME_MAP[dataset]}_ns{num_samples}_{gpu}x{num_gpu}"
-    name += f"_bs{batch_size}"
+def get_run_name(p: dict):
+    name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
+    name += f"_bs{p['batch_size']}"
     return name
 
 def k8s_friendlify(unfriendly_string):
     return unfriendly_string.replace("_", "-").lower()
 
-def results_repo_dir(inference_engine, model, dataset, num_samples, gpu, num_gpu, batch_size):
-    dir = f"moe/eidf/{inference_engine}/{model}/{dataset}_{num_samples}samples/{gpu.lower()}x{num_gpu}"
-    if batch_size == "default":
+def results_repo_dir(p: dict):
+    dir = f"moe/eidf/{p['inference_engine']}/{p['model'].lower()}/{p['dataset']}_{p['num_samples']}samples/{p['gpu'].lower()}x{p['num_gpu']}"
+    if p['batch_size'] == "default":
         dir += f"/batch-size-default"
     else:
-        dir += f"/batch-size-{batch_size}"
+        dir += f"/batch-size-{p['batch_size']}"
     return dir
 
 
