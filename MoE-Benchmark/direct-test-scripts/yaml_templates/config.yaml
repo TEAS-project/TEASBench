@@ -1,0 +1,293 @@
+# This config file is consumed by template.py to construct
+# substitutions for variables in template.yaml
+
+########################
+# VARIABLES & DEFAULTS #
+########################
+
+
+variables_defaults:
+
+# Dict mapping engine-agnostic settings to actual flag names
+# for each inference engine, and any default values for these flags
+  server_flags:
+    sglang:
+      port:
+        flag: "--port"
+        value: "30000"
+      reasoning_parser:
+        flag: "--reasoning-parser"
+      hf_model_path:
+        flag: "--model-path"
+      tensor_parallel_size:
+        flag: "--tp-size"
+      expert_recording:
+        flag: "--expert-distribution-recorder-mode"
+        value: "stat"
+      batch_size:
+        flag: "--max-running-requests"
+      max_context:
+        flag: "--context-length"
+      model_load_timeout:
+        flag: "--dist-timeout"
+        value: "3600"
+      gpu_memory_fraction:
+        flag: "--mem-fraction-static"
+    vllm:
+      port:
+        flag: "--port"
+        value: "30000"
+      host:
+        flag: "--host"
+        value: "0.0.0.0"
+      reasoning_parser:
+        flag: "--reasoning-parser"
+      hf_model_path:
+        flag: "--model"
+      tensor_parallel_size:
+        flag: "--tensor-parallel-size"
+      expert_recording:
+        flag: "--enable-expert-distribution-metrics"
+        value: true
+      batch_size:
+        flag: "--max_num_seqs"
+      max_context:
+        flag: "--max-model-len"
+      gpu_memory_fraction:
+        flag: "--gpu_memory_utilization"
+
+  client_flags:
+    hf_model_path:
+      flag: "--model_name"
+    dataset:
+      flag: "--datasets"
+    num_samples:
+      flag: "--num-samples"
+    batch_size:
+      flag: "--server-batch-size"
+    api_url:
+      flag: "--api-url"
+      value: "http://localhost:30000/v1/completions"
+    backend:
+      flag: "--backend"
+    chat_api:
+      flag: "--use-chat-api"
+      value: true
+    output_dir:
+      flag: "--output_dir"
+      value: "$RUN_DIR"
+    judge_url:
+      flag: "--judge-api-url"
+    judge_model:                    
+      flag: "--judge-model"
+    judge_key:                      
+      flag: "--judge-api-key"
+    baseline_answers:               
+      flag: "--baseline-answers-path"
+
+
+  # Base settings that are always present in server command
+  server_command:
+    sglang:
+      base_command: "python3 -m moe_cap.systems.sglang"
+      base_parameters:              
+        - hf_model_path
+        - port
+        - expert_recording
+        - tensor_parallel_size
+    vllm:
+      base_command: "python3 -m moe_cap.systems.vllm"
+      base_parameters:
+        - hf_model_path
+        - port
+        - host
+        - expert_recording
+        - tensor_parallel_size
+
+  # Base settings that are always present in client command
+  client_command:
+    base_command: "python3 -m moe_cap.runner.openai_api_profile"
+    base_parameters:
+      - hf_model_path
+      - dataset
+      - num_samples
+      - api_url
+      - backend
+      - chat_api
+      - output_dir
+
+
+  # Other variables needed to make up substitutions for template.yaml
+  
+  inference_engine_version:
+      sglang: "0.5.9"
+      vllm: "0.16.0"
+
+  image:
+    sglang:
+      base: "lmsysorg/sglang"
+    vllm:
+      base: "vllm/vllm-openai"
+
+  extra_container_env:
+    value:
+    
+  download_arena_hard_baseline_answers:
+    value: 
+
+
+
+
+#########
+# RULES #
+#########
+
+# Rules for conditional inclusion and values of variables depending on experiment parameters.
+# 'match' keys are ANDed together; list values within a key are ORed.
+# server_flags / client_flags name canonical params (as defined above)
+# and supply the value to pass to that flag.
+rules:
+
+
+# Rules based on inference engine alone
+  - match:
+      inference_engine:
+        - "sglang"
+    extra_container_env:
+      value: |
+        - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
+          value: "/dev/shm/sglang_expert_distribution_recorder"
+    client_flags:
+      backend: "sglang"
+
+  - match:
+      inference_engine:
+        - "vllm"
+    client_flags:
+      backend: "vllm"
+        
+
+# Rules based on model alone
+  - match:
+      model:
+        - "DeepSeek-R1"
+    server_flags:
+      reasoning_parser: "deepseek_r1"
+
+  - match:
+      model:
+        - "Kimi-K2.5"
+    server_flags:
+      reasoning_parser: "kimi_k2"
+
+  - match: 
+      model:
+        - "Qwen3-235B-A22B-Instruct-2507-FP8"
+        - "Qwen3-235B-A22B-Instruct-2507"
+    server_flags:
+      model_load_timeout: 3600
+
+
+# Rules based on batch size alone
+  - match:
+      batch_size:
+        - "1"
+    server_flags:
+      batch_size: "1"
+    client_flags:
+      batch_size: "1"
+
+# Rules based on dataset alone
+  - match: 
+      dataset:
+        - "arena-hard"
+    client_flags:
+      judge_url: "https://openrouter.ai/api/v1/chat/completions"
+      judge_model: "openai/gpt-4.1"
+      judge_key: "$OPENROUTER_API_KEY"
+      baseline_answers: "$RUN_DIR/gpt-4-0613.jsonl"
+    download_arena_hard_baseline_answers: "curl -L --output-dir $RUN_DIR -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl"
+    extra_container_env:
+      value: |
+        - name: OPENROUTER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openrouter-api-key-ap
+              key: key
+
+
+# Rules based on hardware alone
+  - match:
+      gpu:
+        - "A100"
+      image:
+        cuda_variant: null
+
+  - match:
+      gpu:
+        - "H100"
+        - "H200"
+      image:
+        cuda_variant: "-cu130"
+
+
+# Rules based on model and inference engine
+  - match:
+      model:
+        - "gpt-oss-20b"
+        - "gpt-oss-120b"
+      inference_engine:
+        - "sglang"
+    server_flags:
+      reasoning_parser: "gpt-oss"
+
+  - match:
+      model:
+        - "gpt-oss-20b"
+        - "gpt-oss-120b"
+      inference_engine:
+        - "vllm"
+    server_flags:
+      reasoning_parser: "openai_gptoss"
+
+
+# Memory requirement tweaks for models that only barely fit in GPU memory
+  - match:
+      model:
+        - "gpt-oss-120b"
+      gpu:
+        - "H100"
+      num_gpu:
+        - 1
+      batch_size:
+        - "default"
+      inference_engine:
+        - "sglang"
+    server_flags:
+      gpu_memory_fraction: "0.9"
+
+  - match:
+      model:
+        - "gpt-oss-120b"
+      gpu:
+        - "H100"
+      num_gpu:
+        - 1
+      batch_size:
+        - "default"
+      inference_engine:
+        - "vllm"
+    server_flags:
+      gpu_memory_fraction: "0.95"
+
+  - match:
+      model:
+        - "Qwen3-235B-A22B-Instruct-2507-FP8"
+        - "Qwen3-235B-A22B-Instruct-2507"
+      inference_engine:
+        - "vllm"
+      gpu:
+        - "H100"
+    server_flags:
+      max_context: 200k
+

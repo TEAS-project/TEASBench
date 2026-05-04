@@ -1,0 +1,13 @@
+inference_engine,model,dataset,num_samples,gpu,num_gpu,batch_size
+sglang,gpt-oss-20b,gsm8k,256,A100,1,1
+sglang,gpt-oss-20b,gsm8k,256,A100,1,default
+sglang,gpt-oss-20b,arena-hard,256,A100,1,1
+sglang,gpt-oss-20b,arena-hard,256,A100,1,default
+sglang,gpt-oss-20b,longbench_v1,256,A100,1,1
+sglang,gpt-oss-20b,longbench_v1,256,A100,1,default
+vllm,gpt-oss-20b,gsm8k,256,A100,1,1
+vllm,gpt-oss-20b,gsm8k,256,A100,1,default
+vllm,gpt-oss-20b,arena-hard,256,A100,1,1
+vllm,gpt-oss-20b,arena-hard,256,A100,1,default
+vllm,gpt-oss-20b,longbench_v1,256,A100,1,1
+vllm,gpt-oss-20b,longbench_v1,256,A100,1,default

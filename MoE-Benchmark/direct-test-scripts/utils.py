@@ -9,28 +9,52 @@ Supported GPU products on EIDF:
     nvidia.com/gpu.product: 'NVIDIA-H100-80GB-HBM3'
     nvidia.com/gpu.product: 'NVIDIA-H200'
 """
-GPU_MAP={
+
+MODEL_SHORT_NAME_MAP={
+    "gpt-oss-20b": "gpt-oss-20b",
+    "gpt-oss-120b": "gpt-oss-120b",
+    "Qwen3-235B-A22B-Instruct-2507": "qwen3-235b",
+    "Qwen3-235B-A22B-Instruct-2507-FP8": "qwen3-235b-fp8",
+    "DeepSeek-R1": "deepseek-r1",
+    "Kimi-K2.5": "kimi-k2.5"
+}
+
+DATASET_SHORT_NAME_MAP={
+    "gsm8k": "gsm8k",
+    "arena-hard": "arena-hard",
+    "longbench_v1": "longbench"
+    }
+
+HF_MODEL_MAP={
+    "gpt-oss-20b": "unsloth/gpt-oss-20b",
+    "gpt-oss-120b": "unsloth/gpt-oss-120b",
+    "Qwen3-235B-A22B-Instruct-2507": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "Qwen3-235B-A22B-Instruct-2507-FP8": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+    "DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
+    "Kimi-K2.5": "moonshotai/Kimi-K2.5"
+}
+
+
+EIDF_GPU_MAP={
     "A100":"NVIDIA-A100-SXM4-80GB",
     "H100":"NVIDIA-H100-80GB-HBM3",
-    "H200":"NVIDIA-H200",
+    "H200":"NVIDIA-H200"
 }
 
-TOKEN_LENGTH_MAP={
-    "1K": 1000,
-    "4K": 4000,
-    "8K": 8000,
-    "13K": 13000
-}
+def get_run_name(p: dict):
+    name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
+    name += f"_bs{p['batch_size']}"
+    return name
 
-def get_run_name(model_name, gpu, num_gpu, target_input_tokens, target_output_tokens, batch_size, dataset, token_abbrev=True):
-    model_name_clean=model_name.split("/")[1].replace(".", "-")
+def k8s_friendlify(unfriendly_string):
+    return unfriendly_string.replace("_", "-").lower()
 
-    if token_abbrev: # 4K
-        token_in = target_input_tokens
-        token_out = target_output_tokens
-    else: # 4000
-        token_in = TOKEN_LENGTH_MAP[target_input_tokens]
-        token_out = TOKEN_LENGTH_MAP[target_output_tokens]
+def results_repo_dir(p: dict):
+    dir = f"moe/eidf/{p['inference_engine']}/{p['model'].lower()}/{p['dataset']}_{p['num_samples']}samples/{p['gpu'].lower()}x{p['num_gpu']}"
+    if p['batch_size'] == "default":
+        dir += f"/batch-size-default"
+    else:
+        dir += f"/batch-size-{p['batch_size']}"
+    return dir
 
-    run_name=f"{model_name_clean}_{gpu}x{num_gpu}_{token_in}_{token_out}_bs{batch_size}_{dataset}"
-    return run_name
+
