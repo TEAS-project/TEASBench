@@ -2,10 +2,10 @@
 
 python3 -m venv venv
 source venv/bin/activate
-pip install pandas pyyaml re
+pip install pandas pyyaml
 
 python3 generate.py \
-    --csv_file=data/smoke_test.csv \
+    --csv_file=../experiments/smoke_test.csv \
     --target_dir=./ \
 
 

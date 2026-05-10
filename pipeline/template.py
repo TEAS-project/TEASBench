@@ -136,7 +136,7 @@ class Template:
 
     
     def get(self, parameters: dict, results_repo: str):
-        with open("yaml_templates/config.yaml", "r") as f:
+        with open("configs/config.yaml", "r") as f:
             config = yaml.safe_load(f)
 
         rules = config.get("rules", [])
@@ -178,7 +178,7 @@ class Template:
 
 
         # Load the job template
-        template_path = os.path.join("yaml_templates/template.yaml")
+        template_path = os.path.join("templates/template.yaml")
         with open(template_path, "r") as f:
             template = f.read()
 
