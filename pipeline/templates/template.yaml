@@ -94,6 +94,12 @@ spec:
                 jq -n --arg server_init_duration $server_init_duration '{server_initialisation: $server_init_duration}'  >> $RUN_DIR/timings.json
                 echo "Starting to run benchmark (sending http requests)..."
 
+                if [ -n "$OPENAI_API_KEY" ]; then
+                    OPENAI_API_KEY="${OPENAI_API_KEY%$'\n'}"
+                    export OPENAI_API_KEY
+                fi
+
+
                 # Start client
                 client_start_time=$(date +%s)
                 @client_run_command@ &> $RUN_DIR/client.log
