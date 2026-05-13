@@ -13,6 +13,7 @@ if [ $job_creation_exit_code -eq 0 ]; then
     job_name=`echo $job_create_response | awk '{print $1}' | xargs basename`
     echo "Copying job yaml to ${JOB_CONFIGS_DIR}/${job_name}.yaml"
     cp $job_yaml ${JOB_CONFIGS_DIR}/${job_name}.yaml
+    echo $job_name >> submitted_jobs.log 
 fi
 
 

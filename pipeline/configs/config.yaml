@@ -202,17 +202,17 @@ rules:
       dataset:
         - "arena-hard"
     client_flags:
-      judge_url: "https://openrouter.ai/api/v1/chat/completions"
-      judge_model: "openai/gpt-4.1"
-      judge_key: "$OPENROUTER_API_KEY"
+      judge_url: "https://api.openai.com/v1/chat/completions"
+      judge_model: "gpt-4.1"
+      judge_key: "$OPENAI_API_KEY"
       baseline_answers: "$RUN_DIR/gpt-4-0613.jsonl"
     download_arena_hard_baseline_answers: "curl -L --output-dir $RUN_DIR -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl"
     extra_container_env:
       value: |
-        - name: OPENROUTER_API_KEY
+        - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
-              name: openrouter-api-key-ap
+              name: elm-openai-key-ap
               key: key
 
 
