@@ -269,6 +269,9 @@ rules:
   - match:
       model:
         - "gpt-oss-120b"
+      dataset:
+        - "gsm8k"
+        - "arena-hard"
       gpu:
         - "H100"
       num_gpu:
@@ -278,7 +281,23 @@ rules:
       inference_engine:
         - "vllm"
     server_flags:
-      gpu_memory_fraction: "0.95"
+      gpu_memory_fraction: "0.92"
+
+  - match:
+      model:
+        - "gpt-oss-120b"
+      dataset:
+        - "longbench_v1"
+      gpu:
+        - "H100"
+      num_gpu:
+        - 1
+      batch_size:
+        - "default"
+      inference_engine:
+        - "vllm"
+    server_flags:
+      gpu_memory_fraction: "0.94"
 
   - match:
       model:
