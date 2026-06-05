@@ -1,0 +1,7 @@
+inference_engine,model,dataset,num_samples,gpu,num_gpu,batch_size
+vllm,gpt-oss-20b,gsm8k,1,A100,1,1
+vllm,gpt-oss-20b,gsm8k,1,A100,1,default
+vllm,gpt-oss-20b,arena-hard,1,A100,1,1
+vllm,gpt-oss-20b,arena-hard,1,A100,1,default
+vllm,gpt-oss-20b,longbench_v1,1,A100,1,1
+vllm,gpt-oss-20b,longbench_v1,1,A100,1,default
