@@ -1,0 +1,520 @@
+#!/usr/bin/env python3
+"""
+Compute rent + buy cost for MoE-CAP TEAS_Development MoE results.
+
+Two metrics (identical for rent and buy):
+  - avg_cost_per_request_usd       = e2e_s          * effective_$/s
+  - avg_cost_per_1M_output_tokens  = tpot * 1_000_000 * effective_$/s
+
+RENT (vast.ai etc.):
+  effective_$/s = (price_per_GPU_per_hour * num_gpus) / 3600
+  Prices come from the USER (look them up at https://vast.ai/pricing).
+
+BUY (per https://arxiv.org/html/2412.07067v6, Eqs. 1-3):
+  Amortize hardware capital over lifetime, add energy:
+    capital_$  = (gpu_$ * num_gpus + cpu_$ * num_cpus) * scale_other_capital
+    power_W    = gpu_W * num_gpus + cpu_W * num_cpus
+    amort_$/h  = capital_$ / lifetime_hours
+    energy_$/h = (power_W / 1000) * electricity_$_per_kWh
+    effective_$/h = amort_$/h + energy_$/h
+    effective_$/s = effective_$/h / 3600
+
+  Defaults use vendor datasheets / Intel ARK / AMD official; override
+  via --buy-gpu-price <gpu>=<usd>, --buy-gpu-tdp <gpu>=<W>, etc.
+
+Output: a sibling JSON file (cost.json / cost_<name>.json) is written
+next to each metrics file (metrics.json / metrics_<name>.json).
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Optional
+
+
+VASTAI_PRICING_URL = "https://vast.ai/pricing"
+DEFAULT_RENT_PRICE_SOURCE = VASTAI_PRICING_URL
+
+DEFAULT_LIFETIME_HOURS = 3 * 365 * 24
+DEFAULT_ELECTRICITY_USD_PER_KWH = 0.15
+DEFAULT_SCALE_OTHER_CAPITAL = 1.2
+
+GPU_SPECS: dict[str, dict] = {
+    "a100": {
+        "price_per_unit_usd": 18000.0,
+        "price_source": "https://modal.com/blog/nvidia-a100-price-article",
+        "tdp_w": 400,
+        "tdp_source": "https://lenovopress.lenovo.com/lp1734-thinksystem-nvidia-a100-pcie-40-gpu",
+    },
+    "h100": {
+        "price_per_unit_usd": 25000.0,
+        "price_source": "https://modal.com/blog/nvidia-h100-price-article",
+        "tdp_w": 700,
+        "tdp_source": "https://lenovopress.lenovo.com/lp1732-thinksystem-nvidia-h100-pcie-gen5-gpu",
+    },
+    "h200": {
+        "price_per_unit_usd": 30000.0,
+        "price_source": "https://modal.com/blog/nvidia-h200-price-article",
+        "tdp_w": 700,
+        "tdp_source": "https://lenovopress.lenovo.com/lp1944-nvidia-h200-141gb-gpu",
+    },
+    "b200": {
+        "price_per_unit_usd": 35000.0,
+        "price_source": "https://modal.com/blog/nvidia-b200-pricing",
+        "tdp_w": 1000,
+        "tdp_source": "https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf",
+    },
+    "b300": {
+        "price_per_unit_usd": 42500.0,
+        "price_source": "https://tech-insider.org/nvidia-blackwell-gpu-pricing/",
+        "tdp_w": 1400,
+        "tdp_source": "https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-data-sheet",
+    },
+    "mi355x": {
+        "price_per_unit_usd": 30000.0,
+        "price_source": "https://www.fitmyllm.com/gpu/radeon-instinct-mi355x",
+        "tdp_w": 1400,
+        "tdp_source": "https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html",
+    },
+}
+
+CPU_SPECS: dict[str, dict] = {
+    "epyc-7713p": {
+        "model": "AMD EPYC 7713P",
+        "price_per_unit_usd": 5010.0,
+        "price_source": "https://www.amd.com/en/products/processors/server/epyc/7003-series/amd-epyc-7713p.html",
+        "tdp_w": 225,
+        "tdp_source": "https://www.amd.com/en/products/processors/server/epyc/7003-series/amd-epyc-7713p.html",
+    },
+    "xeon-8468": {
+        "model": "Intel Xeon Platinum 8468",
+        "price_per_unit_usd": 7214.0,
+        "price_source": "https://www.intel.com/content/www/us/en/products/sku/231735/intel-xeon-platinum-8468-processor-105m-cache-2-10-ghz/specifications.html",
+        "tdp_w": 350,
+        "tdp_source": "https://www.intel.com/content/www/us/en/products/sku/231735/intel-xeon-platinum-8468-processor-105m-cache-2-10-ghz/specifications.html",
+    },
+    "xeon-8558": {
+        "model": "Intel Xeon Platinum 8558",
+        "price_per_unit_usd": 5208.0,
+        "price_source": "https://www.intel.com/content/www/us/en/products/sku/237255/intel-xeon-platinum-8558-processor-260m-cache-2-10-ghz/specifications.html",
+        "tdp_w": 330,
+        "tdp_source": "https://www.intel.com/content/www/us/en/products/sku/237255/intel-xeon-platinum-8558-processor-260m-cache-2-10-ghz/specifications.html",
+    },
+}
+
+GPU_HOST_CPU: dict[str, tuple[int, str]] = {
+    "a100": (2, "xeon-8468"),
+    "h100": (2, "xeon-8468"),
+    "h200": (2, "xeon-8468"),
+    "b200": (2, "xeon-8468"),
+    "b300": (2, "xeon-8558"),
+    "mi355x": (2, "epyc-7713p"),
+}
+
+
+GPU_DIR_RE = re.compile(r"^([a-z][a-z0-9]*?)x(\d+)(?:[_-].*)?$")
+
+
+def parse_gpu_dir(name: str) -> Optional[tuple[str, int]]:
+    m = GPU_DIR_RE.match(name.lower())
+    if not m:
+        return None
+    return m.group(1), int(m.group(2))
+
+
+def find_metrics_files(root: Path) -> list[Path]:
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for pat in ("metrics_*.json", "metrics.json"):
+        for p in root.rglob(pat):
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+    return sorted(out)
+
+
+def load_json(path: Path) -> Optional[dict]:
+    try:
+        return json.loads(path.read_text())
+    except Exception as e:
+        print(f"  [warn] cannot read {path}: {e}", file=sys.stderr)
+        return None
+
+
+def describe_run(path: Path, root: Path) -> dict[str, str]:
+    rel = path.relative_to(root).parts
+    gpu_idx = next(
+        (i for i, p in enumerate(rel) if parse_gpu_dir(p) is not None), -1
+    )
+    return {
+        "location": rel[gpu_idx - 4] if gpu_idx >= 4 else "",
+        "framework": rel[gpu_idx - 3] if gpu_idx >= 3 else "",
+        "model": rel[gpu_idx - 2] if gpu_idx >= 2 else "",
+        "dataset": rel[gpu_idx - 1] if gpu_idx >= 1 else "",
+        "gpu_dir": rel[gpu_idx] if gpu_idx >= 0 else "",
+    }
+
+
+def _swap_prefix(name: str, old: str, new: str) -> str:
+    if name == f"{old}.json":
+        return f"{new}.json"
+    if name.startswith(f"{old}_"):
+        return new + name[len(old):]
+    return f"{new}_{name}"
+
+
+def cost_path_for(metrics_path: Path) -> Path:
+    return metrics_path.with_name(_swap_prefix(metrics_path.name, "metrics", "cost"))
+
+
+def metadata_path_for(metrics_path: Path) -> Path:
+    return metrics_path.with_name(_swap_prefix(metrics_path.name, "metrics", "metadata"))
+
+
+def load_framework_version(metrics_path: Path) -> Optional[str]:
+    meta_path = metadata_path_for(metrics_path)
+    if not meta_path.is_file():
+        return None
+    meta = load_json(meta_path)
+    if not meta:
+        return None
+    return (meta.get("system_environment") or {}).get("inference_engine_version")
+
+
+def parse_kv_args(items: list[str], cast=str) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise SystemExit(f"expects key=value, got {item!r}")
+        k, v = item.split("=", 1)
+        out[k.strip().lower()] = cast(v)
+    return out
+
+
+def discover_gpu_keys(metrics_files: list[Path], root: Path) -> list[str]:
+    keys: set[str] = set()
+    for f in metrics_files:
+        parsed = parse_gpu_dir(describe_run(f, root)["gpu_dir"])
+        if parsed:
+            keys.add(parsed[0])
+    return sorted(keys)
+
+
+def need_rent_prices_message(needed: list[str], have: dict[str, float]) -> str:
+    missing = [k for k in needed if k not in have]
+    lines = [
+        "",
+        "Per-GPU on-demand RENT hourly prices are required.",
+        f"Look them up on vast.ai: {VASTAI_PRICING_URL}",
+        "",
+        "Re-run with prices, e.g.:",
+        "    python compute_cost.py \\",
+    ]
+    for k in needed:
+        if k in have:
+            lines.append(f"        --rent-price {k}={have[k]} \\")
+        else:
+            lines.append(f"        --rent-price {k}=<USD_PER_GPU_PER_HOUR> \\")
+    lines[-1] = lines[-1].rstrip(" \\")
+    lines.append("")
+    lines.append(f"Missing: {', '.join(missing)}")
+    return "\n".join(lines)
+
+
+def build_buy_block(
+    gpu_key: str,
+    num_gpus: int,
+    e2e_s: float,
+    tpot: float,
+    *,
+    gpu_specs: dict[str, dict],
+    cpu_specs: dict[str, dict],
+    gpu_host_cpu: dict[str, tuple[int, str]],
+    lifetime_hours: float,
+    electricity_usd_per_kwh: float,
+    scale_other_capital: float,
+) -> Optional[dict]:
+    gpu = gpu_specs.get(gpu_key)
+    host = gpu_host_cpu.get(gpu_key)
+    if gpu is None or host is None:
+        return None
+    num_cpus, cpu_key = host
+    cpu = cpu_specs.get(cpu_key)
+    if cpu is None:
+        return None
+
+    gpu_capital = gpu["price_per_unit_usd"] * num_gpus
+    cpu_capital = cpu["price_per_unit_usd"] * num_cpus
+    total_capital_usd = (gpu_capital + cpu_capital) * scale_other_capital
+    total_power_w = gpu["tdp_w"] * num_gpus + cpu["tdp_w"] * num_cpus
+
+    amort_per_h = total_capital_usd / lifetime_hours
+    energy_per_h = (total_power_w / 1000.0) * electricity_usd_per_kwh
+    effective_per_h = amort_per_h + energy_per_h
+    effective_per_s = effective_per_h / 3600.0
+
+    return {
+        "lifetime_hours": lifetime_hours,
+        "electricity_usd_per_kwh": electricity_usd_per_kwh,
+        "scale_other_capital": scale_other_capital,
+        "gpu": {
+            "key": gpu_key,
+            "num": num_gpus,
+            "price_per_unit_usd": gpu["price_per_unit_usd"],
+            "price_source": gpu.get("price_source", "user-supplied"),
+            "tdp_w": gpu["tdp_w"],
+            "tdp_source": gpu.get("tdp_source", "user-supplied"),
+        },
+        "cpu": {
+            "key": cpu_key,
+            "model": cpu.get("model", cpu_key),
+            "num": num_cpus,
+            "price_per_unit_usd": cpu["price_per_unit_usd"],
+            "price_source": cpu.get("price_source", "user-supplied"),
+            "tdp_w": cpu["tdp_w"],
+            "tdp_source": cpu.get("tdp_source", "user-supplied"),
+        },
+        "total_capital_usd": total_capital_usd,
+        "total_power_w": total_power_w,
+        "amortized_capital_usd_per_hour": amort_per_h,
+        "energy_usd_per_hour": energy_per_h,
+        "effective_hourly_rate_usd": effective_per_h,
+        "cost": {
+            "avg_cost_per_request_usd": e2e_s * effective_per_s,
+            "avg_cost_per_1M_output_tokens_usd": tpot * 1_000_000 * effective_per_s,
+        },
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--root", type=Path, default=Path(__file__).parent,
+        help="Tree to scan for metrics files",
+    )
+    parser.add_argument(
+        "--rent-price", action="append", default=[],
+        help='Per-GPU rent $/h, e.g. --rent-price b200=4.26 (repeat)',
+    )
+    parser.add_argument(
+        "--rent-price-source", action="append", default=[],
+        help=f"Per-GPU rent price source URL, e.g. --rent-price-source "
+             f"mi355x=https://www.vultr.com/.../amd-mi355x/ "
+             f"(default: {DEFAULT_RENT_PRICE_SOURCE})",
+    )
+    parser.add_argument(
+        "--rent-prices-json", type=Path, default=None,
+        help='JSON file mapping gpu_key -> $/h',
+    )
+    parser.add_argument(
+        "--rent-price-quote-time", default=None,
+        help="ISO time when rent prices were quoted (default: now, UTC)",
+    )
+
+    parser.add_argument(
+        "--buy-gpu-price", action="append", default=[],
+        help="Override GPU purchase price, e.g. --buy-gpu-price b200=35000",
+    )
+    parser.add_argument(
+        "--buy-gpu-tdp", action="append", default=[],
+        help="Override GPU TDP (W), e.g. --buy-gpu-tdp b200=1000",
+    )
+    parser.add_argument(
+        "--buy-cpu-for", action="append", default=[],
+        help="Override CPU choice per GPU, e.g. --buy-cpu-for mi355x=epyc-7713p",
+    )
+    parser.add_argument(
+        "--buy-num-cpus", action="append", default=[],
+        help="Override CPU count per GPU platform, e.g. --buy-num-cpus b200=2",
+    )
+    parser.add_argument(
+        "--buy-cpu-price", action="append", default=[],
+        help="Override CPU price, e.g. --buy-cpu-price xeon-8468=7214",
+    )
+    parser.add_argument(
+        "--buy-cpu-tdp", action="append", default=[],
+        help="Override CPU TDP (W)",
+    )
+    parser.add_argument(
+        "--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS,
+        help=f"Server lifetime hours (default: {DEFAULT_LIFETIME_HOURS} = 3 yr)",
+    )
+    parser.add_argument(
+        "--buy-electricity-usd-per-kwh", type=float, default=DEFAULT_ELECTRICITY_USD_PER_KWH,
+        help=f"Electricity price (default: {DEFAULT_ELECTRICITY_USD_PER_KWH})",
+    )
+    parser.add_argument(
+        "--buy-scale-other-capital", type=float, default=DEFAULT_SCALE_OTHER_CAPITAL,
+        help=f"Capital scaling for motherboard/DRAM/SSD/etc. (default: "
+             f"{DEFAULT_SCALE_OTHER_CAPITAL}, from MoE-CAP)",
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    root: Path = args.root.resolve()
+    if not root.is_dir():
+        print(f"error: root {root} not found", file=sys.stderr)
+        return 2
+
+    metrics_files = find_metrics_files(root)
+    if not metrics_files:
+        print(f"error: no metrics files under {root}", file=sys.stderr)
+        return 2
+
+    gpu_keys = discover_gpu_keys(metrics_files, root)
+    print(f"GPU types found: {gpu_keys}")
+
+    rent_prices: dict[str, float] = {}
+    if args.rent_prices_json and args.rent_prices_json.is_file():
+        rent_prices.update(
+            {k.lower(): float(v) for k, v in json.loads(args.rent_prices_json.read_text()).items()}
+        )
+    rent_prices.update({k: float(v) for k, v in parse_kv_args(args.rent_price).items()})
+    rent_price_sources: dict[str, str] = {
+        k: str(v) for k, v in parse_kv_args(args.rent_price_source).items()
+    }
+
+    if not all(k in rent_prices for k in gpu_keys):
+        print(need_rent_prices_message(gpu_keys, rent_prices), file=sys.stderr)
+        missing = [k for k in gpu_keys if k not in rent_prices]
+        print(f"\nProceeding; rent figures will be omitted for {missing}.\n", file=sys.stderr)
+
+    gpu_specs = {k: dict(v) for k, v in GPU_SPECS.items()}
+    for k, v in parse_kv_args(args.buy_gpu_price, float).items():
+        spec = gpu_specs.setdefault(k, {})
+        spec["price_per_unit_usd"] = float(v)
+        spec["price_source"] = "user-supplied"
+    for k, v in parse_kv_args(args.buy_gpu_tdp, float).items():
+        spec = gpu_specs.setdefault(k, {})
+        spec["tdp_w"] = float(v)
+        spec["tdp_source"] = "user-supplied"
+
+    cpu_specs = {k: dict(v) for k, v in CPU_SPECS.items()}
+    for k, v in parse_kv_args(args.buy_cpu_price, float).items():
+        spec = cpu_specs.setdefault(k, {"model": k})
+        spec["price_per_unit_usd"] = float(v)
+        spec["price_source"] = "user-supplied"
+    for k, v in parse_kv_args(args.buy_cpu_tdp, float).items():
+        spec = cpu_specs.setdefault(k, {"model": k})
+        spec["tdp_w"] = float(v)
+        spec["tdp_source"] = "user-supplied"
+
+    gpu_host_cpu = dict(GPU_HOST_CPU)
+    for k, v in parse_kv_args(args.buy_cpu_for).items():
+        n, _ = gpu_host_cpu.get(k, (2, str(v)))
+        gpu_host_cpu[k] = (n, str(v))
+    for k, v in parse_kv_args(args.buy_num_cpus, int).items():
+        _, cpu_key = gpu_host_cpu.get(k, (int(v), "xeon-8468"))
+        gpu_host_cpu[k] = (int(v), cpu_key)
+
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    recorded_at = now.isoformat().replace("+00:00", "Z")
+    rent_quote_time = args.rent_price_quote_time or recorded_at
+
+    print(f"\nRent prices ($/GPU/h):")
+    for k in gpu_keys:
+        if k in rent_prices:
+            src = rent_price_sources.get(k, DEFAULT_RENT_PRICE_SOURCE)
+            print(f"  {k}: {rent_prices[k]:.4f}   [{src}]")
+        else:
+            print(f"  {k}: <missing>")
+
+    print(f"\nBuy specs (lifetime={args.buy_lifetime_hours}h, "
+          f"electricity=${args.buy_electricity_usd_per_kwh}/kWh, "
+          f"scale_other_capital={args.buy_scale_other_capital}):")
+    for k in gpu_keys:
+        if k in gpu_specs and k in gpu_host_cpu:
+            g = gpu_specs[k]
+            num_cpu, cpu_key = gpu_host_cpu[k]
+            c = cpu_specs.get(cpu_key, {})
+            print(f"  {k}: GPU ${g.get('price_per_unit_usd', '?')}/{g.get('tdp_w', '?')}W "
+                  f"+ {num_cpu}x {c.get('model', cpu_key)} "
+                  f"(${c.get('price_per_unit_usd', '?')}/{c.get('tdp_w', '?')}W)")
+        else:
+            print(f"  {k}: <no buy spec; supply --buy-gpu-price/-tdp/--buy-cpu-for>")
+
+    written = 0
+    skipped = 0
+    for f in metrics_files:
+        info = describe_run(f, root)
+        parsed = parse_gpu_dir(info["gpu_dir"])
+        if not parsed:
+            skipped += 1
+            continue
+        gpu_key, num_gpus = parsed
+        metrics = load_json(f)
+        if not metrics:
+            skipped += 1
+            continue
+        perf = metrics.get("performance") or {}
+        e2e_s = perf.get("e2e_s")
+        tpot = perf.get("tpot")
+        ttft = perf.get("ttft")
+        if e2e_s is None or tpot is None:
+            skipped += 1
+            continue
+
+        payload = {
+            "recorded_at": recorded_at,
+            "run": {
+                "location": info["location"],
+                "framework": info["framework"],
+                "framework_version": load_framework_version(f),
+                "model": info["model"],
+                "dataset": info["dataset"],
+                "gpu_key": gpu_key,
+                "num_gpus": num_gpus,
+            },
+            "performance": {
+                "e2e_s": e2e_s,
+                "ttft_s": ttft,
+                "tpot_s": tpot,
+            },
+        }
+
+        if gpu_key in rent_prices:
+            price_per_gpu_h = rent_prices[gpu_key]
+            hourly_rate = price_per_gpu_h * num_gpus
+            price_per_s = hourly_rate / 3600.0
+            payload["rent"] = {
+                "price_quote_time": rent_quote_time,
+                "price_per_gpu_hour_usd": price_per_gpu_h,
+                "total_hourly_rate_usd": hourly_rate,
+                "price_per_second_usd": price_per_s,
+                "price_source": rent_price_sources.get(gpu_key, DEFAULT_RENT_PRICE_SOURCE),
+                "cost": {
+                    "avg_cost_per_request_usd": e2e_s * price_per_s,
+                    "avg_cost_per_1M_output_tokens_usd": tpot * 1_000_000 * price_per_s,
+                },
+            }
+
+        buy = build_buy_block(
+            gpu_key, num_gpus, e2e_s, tpot,
+            gpu_specs=gpu_specs, cpu_specs=cpu_specs, gpu_host_cpu=gpu_host_cpu,
+            lifetime_hours=args.buy_lifetime_hours,
+            electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
+            scale_other_capital=args.buy_scale_other_capital,
+        )
+        if buy is not None:
+            payload["buy"] = buy
+
+        out_path = cost_path_for(f)
+        if args.dry_run:
+            print(f"  [dry-run] would write {out_path.relative_to(root.parent)}")
+        else:
+            out_path.write_text(json.dumps(payload, indent=2) + "\n")
+        written += 1
+
+    print(f"\nWrote {written} cost JSON files (skipped {skipped})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
