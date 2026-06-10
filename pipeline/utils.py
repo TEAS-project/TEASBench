@@ -42,8 +42,11 @@ EIDF_GPU_MAP={
 }
 
 def get_run_name(p: dict):
-    name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
-    name += f"_bs{p['batch_size']}"
+    name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}_bs{p['batch_size']}"
+    if p['input_length'] != None:
+        name += f"_i{p['input_length']}"
+    if p['output_length'] != None:
+        name += f"_o{p['output_length']}"
     return name
 
 def k8s_friendlify(unfriendly_string):
@@ -55,6 +58,11 @@ def results_repo_dir(p: dict):
         dir += f"/batch-size-default"
     else:
         dir += f"/batch-size-{p['batch_size']}"
+    if p['input_length'] != None:
+        dir += f"_input{p['input_length']}"
+    if p['output_length'] != None:
+        dir += f"_output{p['output_length']}"
+    
     return dir
 
 
