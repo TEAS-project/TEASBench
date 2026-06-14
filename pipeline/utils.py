@@ -11,8 +11,8 @@ Supported GPU products on EIDF:
 """
 
 MODEL_SHORT_NAME_MAP={
-    "gpt-oss-20b": "gpt-oss-20b",
-    "gpt-oss-120b": "gpt-oss-120b",
+    "gpt-oss-20b": "gptoss20b",
+    "gpt-oss-120b": "gptoss120b",
     "Qwen3-235B-A22B-Instruct-2507": "qwen3-235b",
     "Qwen3-235B-A22B-Instruct-2507-FP8": "qwen3-235b-fp8",
     "DeepSeek-R1": "deepseek-r1",
@@ -42,7 +42,12 @@ EIDF_GPU_MAP={
 }
 
 def get_run_name(p: dict):
-    name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}_bs{p['batch_size']}"
+    name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
+
+    if p['batch_size'] == "default":
+        name += "_bsd"
+    else:
+        name += f"_bs{p['batch_size']}"
     if p['input_length'] != None:
         name += f"_i{p['input_length']}"
     if p['output_length'] != None:
