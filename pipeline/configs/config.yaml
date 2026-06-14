@@ -84,30 +84,38 @@ variables_defaults:
       flag: "--judge-api-key"
     baseline_answers:               
       flag: "--baseline-answers-path"
+    fixed_length_mode:
+      flag: "--fixed-length-mode"
+    input_length:
+      flag: "--target-input-tokens"
+      from_parameter: input_length
+    output_length:
+      flag: "--target-output-tokens"
+      from_parameter: output_length
 
 
-  # Base settings that are always present in server command
+  # Base settings 
   server_command:
     sglang:
       base_command: "python3 -m moe_cap.systems.sglang"
-      base_parameters:              
+      flags:              
         - hf_model_path
         - port
         - expert_recording
         - tensor_parallel_size
     vllm:
       base_command: "python3 -m moe_cap.systems.vllm"
-      base_parameters:
+      flags:
         - hf_model_path
         - port
         - host
         - expert_recording
         - tensor_parallel_size
 
-  # Base settings that are always present in client command
+  # Base settings 
   client_command:
     base_command: "python3 -m moe_cap.runner.openai_api_profile"
-    base_parameters:
+    flags:
       - hf_model_path
       - dataset
       - num_samples
@@ -115,6 +123,8 @@ variables_defaults:
       - backend
       - chat_api
       - output_dir
+      - input_length
+      - output_length
 
 
   # Other variables needed to make up substitutions for template.yaml
@@ -309,4 +319,16 @@ rules:
         - "H100"
     server_flags:
       max_context: 200k
+
+      
+# Activate fixed-length mode
+  - match:
+      input_length: "<defined>"
+    client_flags:
+      fixed_length_mode: true
+
+  - match:
+      output_length: "<defined>"
+    client_flags:
+      fixed_length_mode: true
 
