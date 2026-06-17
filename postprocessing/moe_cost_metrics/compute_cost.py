@@ -513,6 +513,13 @@ def main() -> int:
         else:
             print(f"  {k}: <missing>")
 
+    print(
+        "\nBuy-cost assumptions note: built-in GPU/CPU purchase prices are "
+        "curated current/recent-average estimates, not canonical vendor list "
+        "prices. For reproducible TEASBench releases, prefer "
+        "--buy-gpu-prices-json/--buy-cpu-prices-json and set --utilisation "
+        "explicitly."
+    )
     print(f"\nBuy specs (lifetime={effective_lifetime_hours}h, "
           f"base_lifetime={args.buy_lifetime_hours}h, utilisation={args.utilisation}, "
           f"electricity=${args.buy_electricity_usd_per_kwh}/kWh, "

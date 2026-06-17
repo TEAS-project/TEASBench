@@ -27,13 +27,14 @@ class MoeComputeCostCliTests(unittest.TestCase):
             gpu_prices.write_text(json.dumps({"b200": 12345.0}))
             cpu_prices.write_text(json.dumps({"xeon-8468": 678.0}))
 
-            subprocess.run([
+            result = subprocess.run([
                 sys.executable, str(SCRIPT),
                 "--root", str(root / "moe"),
                 "--buy-gpu-prices-json", str(gpu_prices),
                 "--buy-cpu-prices-json", str(cpu_prices),
-            ], check=True, cwd=REPO)
+            ], check=True, cwd=REPO, text=True, capture_output=True)
 
+            self.assertIn("Buy-cost assumptions note", result.stdout)
             cost = json.loads((run / "cost.json").read_text())
             self.assertEqual(cost["buy"]["gpu"]["price_per_unit_usd"], 12345.0)
             self.assertEqual(cost["buy"]["gpu"]["price_source"], "user-supplied-json")
@@ -45,13 +46,14 @@ class MoeComputeCostCliTests(unittest.TestCase):
             root = Path(td)
             run = make_run(root)
 
-            subprocess.run([
+            result = subprocess.run([
                 sys.executable, str(SCRIPT),
                 "--root", str(root / "moe"),
                 "--buy-lifetime-hours", "1000",
                 "--utilisation", "0.25",
-            ], check=True, cwd=REPO)
+            ], check=True, cwd=REPO, text=True, capture_output=True)
 
+            self.assertIn("Buy-cost assumptions note", result.stdout)
             cost = json.loads((run / "cost.json").read_text())
             self.assertEqual(cost["buy"]["lifetime_hours"], 250.0)
             self.assertEqual(cost["buy"]["base_lifetime_hours"], 1000.0)

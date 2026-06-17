@@ -7,6 +7,8 @@ Computes two cost metrics per benchmark run, for both **rent** and **buy**:
 
 Following [MoE-CAP, arXiv 2412.07067 v6](https://arxiv.org/html/2412.07067v6) (Eqs. 1-3) for the buy model; rent uses the live per-GPU hourly price you look up on vast.ai (or any other provider). Built-in purchase prices are curated current/recent-average market estimates: public pricing for datacenter accelerators is inconsistent across vendors and TEASBench releases should prefer an explicit curated estimate over treating any single blog/OEM listing as canonical.
 
+> **User-facing change notice.** Buy-cost runs now print a short assumptions note. If a TEASBench release needs reproducible buy-cost assumptions, check in or publish explicit price tables and run with `--buy-gpu-prices-json`, `--buy-cpu-prices-json`, and an explicit `--utilisation` value. Existing commands remain compatible: default `--utilisation 1.0` preserves the previous calendar-lifetime assumption, while the output now records `base_lifetime_hours`, effective `lifetime_hours`, and `utilisation`.
+
 Required Installation:
 ```bash
 git clone https://github.com/Auto-CAP/MoE-CAP.git
