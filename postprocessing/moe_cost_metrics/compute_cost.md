@@ -5,7 +5,7 @@ Computes two cost metrics per benchmark run, for both **rent** and **buy**:
 - `avg_cost_per_request_usd`
 - `avg_cost_per_1M_output_tokens_usd`
 
-Following [MoE-CAP, arXiv 2412.07067 v6](https://arxiv.org/html/2412.07067v6) (Eqs. 1-3) for the buy model; rent uses the live per-GPU hourly price you look up on vast.ai (or any other provider).
+Following [MoE-CAP, arXiv 2412.07067 v6](https://arxiv.org/html/2412.07067v6) (Eqs. 1-3) for the buy model; rent uses the live per-GPU hourly price you look up on vast.ai (or any other provider). Built-in purchase prices are curated current/recent-average market estimates: public pricing for datacenter accelerators is inconsistent across vendors and TEASBench releases should prefer an explicit curated estimate over treating any single blog/OEM listing as canonical.
 
 Required Installation:
 ```bash
@@ -69,8 +69,9 @@ avg_cost_per_1M_output_tokens_usd = tpot × 1e6     × price_per_second_$/s
 capital_$        = (gpu_$ × N + cpu_$ × M) × scale_other_capital
 power_W          =  gpu_W × N + cpu_W × M
 
-amortized_$/h    = capital_$ / lifetime_hours
-energy_$/h       = (power_W / 1000) × electricity_$_per_kWh
+effective_lifetime_hours = lifetime_hours × utilisation
+amortized_$/h           = capital_$ / effective_lifetime_hours
+energy_$/h              = (power_W / 1000) × electricity_$_per_kWh
 effective_$/h    = amortized_$/h + energy_$/h
 effective_$/s    = effective_$/h / 3600
 
@@ -80,7 +81,9 @@ avg_cost_per_1M_output_tokens_usd = tpot × 1e6     × effective_$/s
 
 `scale_other_capital` (default **1.2**, from MoE-CAP) inflates the GPU+CPU bill-of-materials to approximate motherboard + DRAM + SSD overhead.
 
-`lifetime_hours` default **26,280** = 3 yr × 365 × 24.
+`lifetime_hours` default **26,280** = 3 yr × 365 × 24 calendar hours.
+
+`utilisation` default **1.0**. Set it to fleet-average hardware utilisation, e.g. `--utilisation 0.6`; the script uses `effective_lifetime_hours = lifetime_hours × utilisation` so users do not need to pre-compute effective lifetime hours manually.
 
 `electricity_$_per_kWh` default **0.15** (MoE-CAP default).
 
@@ -115,12 +118,15 @@ Missing prices for some GPU types → that GPU's `rent` block is omitted; `buy` 
 | Flag | Format | Notes |
 |---|---|---|
 | `--buy-gpu-price` | `gpu=usd` | Override default GPU purchase price |
+| `--buy-gpu-prices-json` | path | JSON `{"b200": 35000}` or `{"b200": {"price_per_unit_usd": 35000, "price_source": "..."}}` |
 | `--buy-gpu-tdp` | `gpu=W` | Override default GPU TDP |
 | `--buy-cpu-for` | `gpu=cpu_key` | Change which CPU is paired with a GPU |
 | `--buy-num-cpus` | `gpu=N` | Change CPU count per platform (default 2) |
 | `--buy-cpu-price` | `cpu_key=usd` | Override a CPU's purchase price |
+| `--buy-cpu-prices-json` | path | JSON `{"xeon-8468": 7214}` or `{"xeon-8468": {"price_per_unit_usd": 7214, "price_source": "..."}}` |
 | `--buy-cpu-tdp` | `cpu_key=W` | Override a CPU's TDP |
-| `--buy-lifetime-hours` | float | Default 26280 (3 yr) |
+| `--buy-lifetime-hours` | float | Calendar lifetime hours; default 26280 (3 yr) |
+| `--utilisation` / `--utilization` | float | Average utilisation in `(0, 1]`; effective lifetime = lifetime × utilisation |
 | `--buy-electricity-usd-per-kwh` | float | Default 0.15 |
 | `--buy-scale-other-capital` | float | Default 1.2 (MoE-CAP) |
 
@@ -129,6 +135,8 @@ Missing prices for some GPU types → that GPU's `rent` block is omitted; `buy` 
 ## 4. Built-in defaults
 
 ### GPUs
+
+Purchase prices below are curated current/recent-average market estimates for TEASBench, not a claim that one source is authoritative for every release. The linked price source is an audit trail / anchor for the estimate; override with `--buy-gpu-prices-json` for a release-specific curated table.
 
 | key | price (USD/unit) | TDP (W) | Default host CPU × qty | Price source | TDP source |
 |---|---:|---:|---|---|---|
@@ -140,6 +148,8 @@ Missing prices for some GPU types → that GPU's `rent` block is omitted; `buy` 
 | `mi355x` | 30,000 | 1400 | AMD EPYC 7713P × 2 | [FitMyLLM MI355X](https://www.fitmyllm.com/gpu/radeon-instinct-mi355x) | [AMD MI355X](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html) |
 
 ### CPUs
+
+CPU prices are likewise curated estimates with linked public references; override with `--buy-cpu-prices-json` when a release uses a different price table.
 
 | key | model | price (USD) | TDP (W) | Source |
 |---|---|---:|---:|---|
@@ -189,7 +199,9 @@ One file per metrics file, written to the same directory. Naming:
     }
   },
   "buy": {
-    "lifetime_hours": 26280,
+    "lifetime_hours": 15768,
+    "base_lifetime_hours": 26280,
+    "utilisation": 0.6,
     "electricity_usd_per_kwh": 0.15,
     "scale_other_capital": 1.2,
     "gpu":  { "key": "mi355x", "num": 1, "price_per_unit_usd": 30000,
@@ -231,14 +243,39 @@ python3 compute_cost.py \
   --rent-price-quote-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-### Use a more realistic buy TCO
+### Use a more realistic buy TCO and utilisation
 
 ```bash
 python3 compute_cost.py \
   --root TEAS_Development_Results_Private/moe \
   --buy-scale-other-capital 2.5 \
-  --buy-lifetime-hours 15768  \   # 3 yr × 60% utilization
+  --buy-lifetime-hours 26280 \
+  --utilisation 0.60 \
   --buy-electricity-usd-per-kwh 0.10
+```
+
+### Use curated release-specific buy price tables
+
+```bash
+cat > gpu_prices.json <<'JSON'
+{
+  "a100": {"price_per_unit_usd": 18000, "price_source": "TEASBench curated estimate, 2026-Q2"},
+  "h100": {"price_per_unit_usd": 25000, "price_source": "TEASBench curated estimate, 2026-Q2"},
+  "b200": {"price_per_unit_usd": 35000, "price_source": "TEASBench curated estimate, 2026-Q2"}
+}
+JSON
+
+cat > cpu_prices.json <<'JSON'
+{
+  "xeon-8468": {"price_per_unit_usd": 7214, "price_source": "Intel ARK / curated estimate"},
+  "xeon-8558": {"price_per_unit_usd": 5208, "price_source": "Intel ARK / curated estimate"}
+}
+JSON
+
+python3 compute_cost.py \
+  --root TEAS_Development_Results_Private/moe \
+  --buy-gpu-prices-json gpu_prices.json \
+  --buy-cpu-prices-json cpu_prices.json
 ```
 
 ### Override a single GPU spec on the fly
@@ -263,11 +300,11 @@ python3 compute_cost.py ... --dry-run | head
 
 The buy figures are a **theoretical lower bound** under the MoE-CAP simplification. They will look optimistic vs. cloud rent if you don't adjust:
 
-1. **Utilization.** Defaults assume 24×7 use over `lifetime_hours`. Real fleets see 40-70%; at 50% your effective $/h roughly doubles on the capital side.
+1. **Utilisation.** Defaults assume 24×7 use over `lifetime_hours` (`--utilisation 1.0`). Real fleets see 40-70%; set `--utilisation 0.4`–`0.7` to make the capital amortization explicit instead of manually pre-computing effective lifetime hours. At 50% utilisation your effective capital $/h roughly doubles.
 2. **Capital scaling = 1.2** covers only motherboard / DRAM / SSD. Real DC TCO adds chassis, NICs, switches, PDUs, cooling (PUE ~1.5-2.0), rack space, ops staff, financing. Industry rule-of-thumb: server TCO ≈ 2-3× BoM. Override with `--buy-scale-other-capital 2.5` (or higher).
 3. **Electricity $0.15/kWh** is mid-tier. Industrial rates can be $0.05-0.10/kWh, but multiply by PUE.
 4. **3-year lifetime** is conservative; hyperscalers depreciate 5-6 yr now.
-5. **GPU/CPU prices** are public-market mids. Hyperscaler / OEM volume deals can be substantially lower; "list" pricing for new datacenter GPUs is also rarely public (NVIDIA does not publish DC GPU prices on nvidia.com, hence the third-party `price_source` URLs).
+5. **GPU/CPU prices** are curated current/recent-average market estimates with linked public anchors. Hyperscaler / OEM volume deals can be substantially lower; "list" pricing for new datacenter GPUs is also rarely public (NVIDIA does not publish DC GPU prices on nvidia.com). For each TEASBench release, prefer checking in a release-specific JSON table via `--buy-gpu-prices-json` / `--buy-cpu-prices-json` when the built-ins are stale.
 6. **Single-card prices for GB200/GB300/HGX boards are nominal** — those parts are almost always sold as 4-/8-GPU boards or full systems. The per-GPU number is derived from system price ÷ GPU count where indicated.
 
-For an apples-to-apples comparison with the rent quote, match your assumed utilization to the provider's effective utilization, or compare against **reserved** cloud rates (1-3 yr) rather than on-demand.
+For an apples-to-apples comparison with the rent quote, match your assumed utilisation to the provider's effective utilisation, or compare against **reserved** cloud rates (1-3 yr) rather than on-demand.

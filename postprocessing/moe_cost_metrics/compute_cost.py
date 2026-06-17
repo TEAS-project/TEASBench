@@ -19,8 +19,9 @@ BUY (per https://arxiv.org/html/2412.07067v6, Eqs. 1-3):
     effective_$/h = amort_$/h + energy_$/h
     effective_$/s = effective_$/h / 3600
 
-  Defaults use vendor datasheets / Intel ARK / AMD official; override
-  via --buy-gpu-price <gpu>=<usd>, --buy-gpu-tdp <gpu>=<W>, etc.
+  Defaults use curated current/recent-average market estimates plus vendor
+  datasheets for power. Override via --buy-gpu-price <gpu>=<usd>,
+  --buy-gpu-prices-json <path>, --buy-gpu-tdp <gpu>=<W>, etc.
 
 Output: a sibling JSON file (cost.json / cost_<name>.json) is written
 next to each metrics file (metrics.json / metrics_<name>.json).
@@ -146,6 +147,54 @@ def load_json(path: Path) -> Optional[dict]:
         return None
 
 
+def parse_price_json(path: Optional[Path]) -> dict[str, dict[str, object]]:
+    """Load price overrides from JSON.
+
+    Accepted shapes:
+      {"b200": 35000}
+      {"b200": {"price_per_unit_usd": 35000, "price_source": "..."}}
+      {"b200": {"price": 35000, "source": "..."}}
+    """
+    if path is None:
+        return {}
+    data = load_json(path)
+    if data is None:
+        raise SystemExit(f"cannot read price JSON: {path}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"price JSON must be an object: {path}")
+    out: dict[str, dict[str, object]] = {}
+    for raw_key, raw_value in data.items():
+        key = str(raw_key).strip().lower()
+        if isinstance(raw_value, (int, float)):
+            out[key] = {
+                "price_per_unit_usd": float(raw_value),
+                "price_source": "user-supplied-json",
+            }
+            continue
+        if not isinstance(raw_value, dict):
+            raise SystemExit(
+                f"price JSON entry for {raw_key!r} must be a number or object"
+            )
+        price = (
+            raw_value.get("price_per_unit_usd")
+            if "price_per_unit_usd" in raw_value
+            else raw_value.get("price")
+        )
+        if price is None:
+            raise SystemExit(
+                f"price JSON entry for {raw_key!r} missing price_per_unit_usd"
+            )
+        out[key] = {
+            "price_per_unit_usd": float(price),
+            "price_source": str(
+                raw_value.get("price_source")
+                or raw_value.get("source")
+                or "user-supplied-json"
+            ),
+        }
+    return out
+
+
 def describe_run(path: Path, root: Path) -> dict[str, str]:
     rel = path.relative_to(root).parts
     gpu_idx = next(
@@ -236,6 +285,8 @@ def build_buy_block(
     cpu_specs: dict[str, dict],
     gpu_host_cpu: dict[str, tuple[int, str]],
     lifetime_hours: float,
+    base_lifetime_hours: float,
+    utilisation: float,
     electricity_usd_per_kwh: float,
     scale_other_capital: float,
 ) -> Optional[dict]:
@@ -260,6 +311,8 @@ def build_buy_block(
 
     return {
         "lifetime_hours": lifetime_hours,
+        "base_lifetime_hours": base_lifetime_hours,
+        "utilisation": utilisation,
         "electricity_usd_per_kwh": electricity_usd_per_kwh,
         "scale_other_capital": scale_other_capital,
         "gpu": {
@@ -323,6 +376,13 @@ def main() -> int:
         help="Override GPU purchase price, e.g. --buy-gpu-price b200=35000",
     )
     parser.add_argument(
+        "--buy-gpu-prices-json", type=Path, default=None,
+        help=(
+            "JSON mapping gpu_key -> purchase USD, or gpu_key -> "
+            "{price_per_unit_usd, price_source}"
+        ),
+    )
+    parser.add_argument(
         "--buy-gpu-tdp", action="append", default=[],
         help="Override GPU TDP (W), e.g. --buy-gpu-tdp b200=1000",
     )
@@ -339,12 +399,26 @@ def main() -> int:
         help="Override CPU price, e.g. --buy-cpu-price xeon-8468=7214",
     )
     parser.add_argument(
+        "--buy-cpu-prices-json", type=Path, default=None,
+        help=(
+            "JSON mapping cpu_key -> purchase USD, or cpu_key -> "
+            "{price_per_unit_usd, price_source}"
+        ),
+    )
+    parser.add_argument(
         "--buy-cpu-tdp", action="append", default=[],
         help="Override CPU TDP (W)",
     )
     parser.add_argument(
         "--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS,
-        help=f"Server lifetime hours (default: {DEFAULT_LIFETIME_HOURS} = 3 yr)",
+        help=f"Server calendar lifetime hours before utilisation (default: {DEFAULT_LIFETIME_HOURS} = 3 yr)",
+    )
+    parser.add_argument(
+        "--utilisation", "--utilization", dest="utilisation", type=float, default=1.0,
+        help=(
+            "Average hardware utilisation in (0, 1]; effective buy lifetime "
+            "hours are --buy-lifetime-hours * utilisation (default: 1.0)"
+        ),
     )
     parser.add_argument(
         "--buy-electricity-usd-per-kwh", type=float, default=DEFAULT_ELECTRICITY_USD_PER_KWH,
@@ -357,6 +431,11 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    if not (0.0 < args.utilisation <= 1.0):
+        print("error: --utilisation must be in (0, 1]", file=sys.stderr)
+        return 2
+    effective_lifetime_hours = args.buy_lifetime_hours * args.utilisation
 
     root: Path = args.root.resolve()
     if not root.is_dir():
@@ -387,6 +466,10 @@ def main() -> int:
         print(f"\nProceeding; rent figures will be omitted for {missing}.\n", file=sys.stderr)
 
     gpu_specs = {k: dict(v) for k, v in GPU_SPECS.items()}
+    for k, override in parse_price_json(args.buy_gpu_prices_json).items():
+        spec = gpu_specs.setdefault(k, {})
+        spec["price_per_unit_usd"] = float(override["price_per_unit_usd"])
+        spec["price_source"] = str(override["price_source"])
     for k, v in parse_kv_args(args.buy_gpu_price, float).items():
         spec = gpu_specs.setdefault(k, {})
         spec["price_per_unit_usd"] = float(v)
@@ -397,6 +480,10 @@ def main() -> int:
         spec["tdp_source"] = "user-supplied"
 
     cpu_specs = {k: dict(v) for k, v in CPU_SPECS.items()}
+    for k, override in parse_price_json(args.buy_cpu_prices_json).items():
+        spec = cpu_specs.setdefault(k, {"model": k})
+        spec["price_per_unit_usd"] = float(override["price_per_unit_usd"])
+        spec["price_source"] = str(override["price_source"])
     for k, v in parse_kv_args(args.buy_cpu_price, float).items():
         spec = cpu_specs.setdefault(k, {"model": k})
         spec["price_per_unit_usd"] = float(v)
@@ -426,7 +513,8 @@ def main() -> int:
         else:
             print(f"  {k}: <missing>")
 
-    print(f"\nBuy specs (lifetime={args.buy_lifetime_hours}h, "
+    print(f"\nBuy specs (lifetime={effective_lifetime_hours}h, "
+          f"base_lifetime={args.buy_lifetime_hours}h, utilisation={args.utilisation}, "
           f"electricity=${args.buy_electricity_usd_per_kwh}/kWh, "
           f"scale_other_capital={args.buy_scale_other_capital}):")
     for k in gpu_keys:
@@ -498,7 +586,9 @@ def main() -> int:
         buy = build_buy_block(
             gpu_key, num_gpus, e2e_s, tpot,
             gpu_specs=gpu_specs, cpu_specs=cpu_specs, gpu_host_cpu=gpu_host_cpu,
-            lifetime_hours=args.buy_lifetime_hours,
+            lifetime_hours=effective_lifetime_hours,
+            base_lifetime_hours=args.buy_lifetime_hours,
+            utilisation=args.utilisation,
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
         )
