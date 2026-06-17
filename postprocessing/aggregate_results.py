@@ -5,7 +5,9 @@ import pathlib
 import os
 import re
 import json
+import math
 import pandas as pd
+from decimal import Decimal, ROUND_DOWN
 
 # Path layout is the inverse of pipeline/utils.results_repo_dir(), with a run timestamp and
 # the metrics file appended beneath the directory that function returns:
@@ -98,17 +100,48 @@ def parse_run_path(rel_parts):
     }
 
 
-def find_acc_column(columns):
-    """Locate the accuracy ("acc") column after json_normalize.
+def find_metric_column(columns, metric):
+    """Locate the column for a given metric after json_normalize.
 
-    Handles a top-level "acc" key and nested keys such as "results.acc".
+    Handles a top-level key (e.g. "acc") and nested keys (e.g. "results.acc").
     """
-    if "acc" in columns:
-        return "acc"
+    if metric in columns:
+        return metric
     for col in columns:
-        if col.split(".")[-1] == "acc":
+        if col.split(".")[-1] == metric:
             return col
     return None
+
+
+def trunc_fixed(decimals):
+    """Return a transform that truncates a value toward zero to `decimals` decimal
+    places and renders it as a string with exactly that many decimals.
+
+    Fixed decimal places (rather than significant figures) are what make a column
+    line up by the decimal point for the eye. Uses Decimal on the shortest
+    round-trip repr so truncation matches the value as written, not its binary
+    approximation. Non-finite / non-numeric inputs (NaN, None) pass through
+    unchanged (written as blanks by to_csv).
+    """
+    quantum = Decimal(1).scaleb(-decimals)
+
+    def _format(x):
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            return x
+        if not math.isfinite(x):
+            return x
+        d = Decimal(repr(x)).quantize(quantum, rounding=ROUND_DOWN)
+        return f"{d:.{decimals}f}"
+
+    return _format
+
+
+# Fixed decimal places used when writing the per model-dataset CSVs, so values
+# line up by the decimal point. Tune per metric group as the scales warrant.
+ACC_DECIMALS = 5
+PERF_DECIMALS = 5
 
 
 def get_results(results_dir):
@@ -163,39 +196,114 @@ def arrange_combined(df):
     return df
 
 
-def write_accuracy_per_permutation_csvs(df, output_dir):
-    """Write one CSV per unique (model, dataset) pair.
+CORE_DESCRIPTOR_COLS = ["platform", "gpu_type x num_gpu", "batch_size", "inference_engine"]
+OPTIONAL_DESCRIPTOR_COLS = ["num_samples", "input_length", "output_length"]
 
-    Core columns are platform, gpu config, batch size, inference engine and
-    accuracy. num_samples / input_length / output_length are included as well
-    when present, so rows stay unambiguous across the full sweep.
+
+def sanitize_filename_part(value):
+    """Make a single path-safe filename component from a value."""
+    return re.sub(r"[^0-9A-Za-z._-]+", "_", str(value))
+
+
+def write_metric_per_permutation_csvs(df, output_dir, value_specs,
+                                      group_cols=("model", "dataset"),
+                                      filename_fn=None, subdir_fn=None):
+    """Write one CSV per unique combination of `group_cols`.
+
+    Descriptor columns are CORE_DESCRIPTOR_COLS plus whichever OPTIONAL_DESCRIPTOR_COLS
+    are present, EXCEPT any column already fixed by `group_cols` -- a column that is
+    constant within every file (because it defines the file) is dropped, since it
+    adds nothing. `value_specs` is a list of (output_column, source_metric,
+    transform) tuples appended after the descriptors; `source_metric` is resolved
+    via find_metric_column and `transform` is an optional per-value function (or
+    None to write as-is).
+
+    `filename_fn` maps the dict of group-key values to a filename stem (default:
+    sanitized key values joined with "_"). `subdir_fn` optionally maps the same
+    dict to a subdirectory (relative to output_dir) the file is placed in.
     """
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    group_cols = list(group_cols)
 
-    acc_col = find_acc_column(df.columns)
-    if acc_col is None:
-        print("Warning: no 'acc' column found in metrics; per-permutation files "
-              "will report accuracy as NaN.")
+    # Resolve each metric to its actual (possibly nested) column name once.
+    resolved_specs = []
+    for out_name, source_metric, transform in value_specs:
+        src = find_metric_column(df.columns, source_metric)
+        if src is None:
+            print(f"Warning: metric '{source_metric}' not found; column "
+                  f"'{out_name}' will be NaN.")
+        resolved_specs.append((out_name, src, transform))
 
-    core_cols = ["platform", "gpu_type x num_gpu", "batch_size", "inference_engine"]
-    optional_cols = ["num_samples", "input_length", "output_length"]
+    descriptor_cols = [c for c in CORE_DESCRIPTOR_COLS if c not in group_cols]
+    optional_cols = [c for c in OPTIONAL_DESCRIPTOR_COLS if c not in group_cols]
 
     written = []
-    for (model, dataset), group in df.groupby(["model", "dataset"]):
-        present_optional = [c for c in optional_cols if group[c].notna().any()]
-        table = group[core_cols + present_optional].copy()
-        table["acc"] = group[acc_col] if acc_col is not None else pd.NA
+    for keys, group in df.groupby(group_cols, dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        key_values = dict(zip(group_cols, keys))
 
-        safe_model = re.sub(r"[^0-9A-Za-z._-]+", "_", str(model))
-        safe_dataset = re.sub(r"[^0-9A-Za-z._-]+", "_", str(dataset))
-        out_path = output_dir / f"{safe_model}_{safe_dataset}.csv"
+        present_optional = [c for c in optional_cols if group[c].notna().any()]
+        table = group[descriptor_cols + present_optional].copy()
+
+        for out_name, src, transform in resolved_specs:
+            if src is None:
+                table[out_name] = pd.NA
+            elif transform is not None:
+                table[out_name] = group[src].apply(transform)
+            else:
+                table[out_name] = group[src]
+
+        if filename_fn is not None:
+            stem = filename_fn(key_values)
+        else:
+            stem = "_".join(sanitize_filename_part(k) for k in keys)
+
+        target_dir = output_dir / subdir_fn(key_values) if subdir_fn else output_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        out_path = target_dir / f"{stem}.csv"
 
         table.to_csv(out_path, index=False)
         written.append(out_path)
         print(f"  wrote {out_path} ({len(table)} run(s))")
 
     return written
+
+
+def write_accuracy_per_permutation_csvs(df, output_dir):
+    """Per (model, dataset) CSVs whose final column is accuracy ("acc"),
+    truncated to a fixed ACC_DECIMALS decimal places for aligned display.
+    Batch size remains a column, since each file spans all batch sizes."""
+    return write_metric_per_permutation_csvs(
+        df, output_dir,
+        value_specs=[("acc", "acc", trunc_fixed(ACC_DECIMALS))],
+        group_cols=("model", "dataset"),
+    )
+
+
+def write_performance_per_permutation_csvs(df, output_dir):
+    """Per (model, dataset, batch_size) CSVs whose final columns are the
+    performance metrics, each truncated to a fixed PERF_DECIMALS decimal places:
+    end-to-end latency ("e2e_s"), time to first token ("ttft") and time per
+    output token ("tpot"). Files are bucketed into a "batch-size-<n>"
+    subdirectory per batch size, so batch_size appears in neither the columns
+    nor the filename."""
+    fmt = trunc_fixed(PERF_DECIMALS)
+    return write_metric_per_permutation_csvs(
+        df, output_dir,
+        value_specs=[
+            ("e2e_s", "e2e_s", fmt),
+            ("ttft", "ttft", fmt),
+            ("tpot", "tpot", fmt),
+        ],
+        group_cols=("model", "dataset", "batch_size"),
+        subdir_fn=lambda k: "batch-size-" + sanitize_filename_part(k["batch_size"]),
+        filename_fn=lambda k: "_".join([
+            sanitize_filename_part(k["model"]),
+            sanitize_filename_part(k["dataset"]),
+        ]),
+    )
 
 
 def main(results_dir, output_dir):
@@ -211,6 +319,11 @@ def main(results_dir, output_dir):
 
     print(f"Writing accuracy per model-dataset CSVs to {accuracy_per_permutation_dir} ...")
     write_accuracy_per_permutation_csvs(df, accuracy_per_permutation_dir)
+
+    performance_per_permutation_dir = pathlib.Path(output_dir) / "performance/by_model_dataset"
+
+    print(f"Writing performance per model-dataset CSVs to {performance_per_permutation_dir} ...")
+    write_performance_per_permutation_csvs(df, performance_per_permutation_dir)
 
     print("Done.")
 
