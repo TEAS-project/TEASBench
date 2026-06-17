@@ -7,9 +7,12 @@ Per the user spec:
   cost_per_1M_output_tokens  = (avg_e2e_latency_s / avg_total_output_tokens)
                                * 1_000_000 * effective_$/s
 
-The per-token figure naturally amortizes GPU-idle-during-tool-call time onto
-each generated output token (since avg_e2e_latency_s spans both the LLM
-generation and the tool-call wall time the GPU was reserved through).
+For buy-cost accounting, the script reports two explicit modes instead of
+mixing conventions:
+  active_resource: charge GPU for estimated LLM-active time and CPU for
+                   estimated tool-wait/tool-execution time (default).
+  reserved_worker: charge both GPU and CPU for full end-to-end wall time as a
+                   single-task/exclusive-worker upper bound.
 
 For transparency the cost JSON also reports an estimated time breakdown:
   llm_active_s_est = ttft * avg_num_requests + tpot * avg_total_output_tokens
@@ -313,23 +316,25 @@ def compute_costs_lumped(
     return out
 
 
-def compute_costs_split(
-    e2e_s: float,
-    tool_wait_s: float,
+def _compute_split_mode_costs(
+    gpu_billable_s: float,
+    cpu_billable_s: float,
     output_tokens: float,
     gpu_hourly_rate_usd: float,
     cpu_hourly_rate_usd: float,
     *,
-    p99_e2e_s: Optional[float] = None,
-    p99_tool_wait_s: Optional[float] = None,
+    p99_gpu_billable_s: Optional[float] = None,
+    p99_cpu_billable_s: Optional[float] = None,
 ) -> dict[str, float]:
     gpu_per_s = gpu_hourly_rate_usd / 3600.0
     cpu_per_s = cpu_hourly_rate_usd / 3600.0
     scale = _per_token_scale(output_tokens)
 
-    gpu_cost_task = e2e_s * gpu_per_s
-    cpu_cost_task = tool_wait_s * cpu_per_s
+    gpu_cost_task = gpu_billable_s * gpu_per_s
+    cpu_cost_task = cpu_billable_s * cpu_per_s
     out: dict[str, float] = {
+        "gpu_billable_s": gpu_billable_s,
+        "cpu_billable_s": cpu_billable_s,
         "gpu_cost_per_task_usd": gpu_cost_task,
         "cpu_cost_per_task_usd": cpu_cost_task,
         "avg_cost_per_task_usd": gpu_cost_task + cpu_cost_task,
@@ -337,15 +342,56 @@ def compute_costs_split(
         "cpu_cost_per_1M_output_tokens_usd": cpu_cost_task * scale,
         "avg_cost_per_1M_output_tokens_usd": (gpu_cost_task + cpu_cost_task) * scale,
     }
-    if p99_e2e_s is not None and p99_tool_wait_s is not None:
-        p99_gpu_task = p99_e2e_s * gpu_per_s
-        p99_cpu_task = p99_tool_wait_s * cpu_per_s
+    if p99_gpu_billable_s is not None and p99_cpu_billable_s is not None:
+        p99_gpu_task = p99_gpu_billable_s * gpu_per_s
+        p99_cpu_task = p99_cpu_billable_s * cpu_per_s
+        out["p99_gpu_billable_s"] = p99_gpu_billable_s
+        out["p99_cpu_billable_s"] = p99_cpu_billable_s
         out["p99_gpu_cost_per_task_usd"] = p99_gpu_task
         out["p99_cpu_cost_per_task_usd"] = p99_cpu_task
         out["p99_cost_per_task_usd"] = p99_gpu_task + p99_cpu_task
         out["p99_gpu_cost_per_1M_output_tokens_usd"] = p99_gpu_task * scale
         out["p99_cpu_cost_per_1M_output_tokens_usd"] = p99_cpu_task * scale
         out["p99_cost_per_1M_output_tokens_usd"] = (p99_gpu_task + p99_cpu_task) * scale
+    return out
+
+
+def compute_costs_split(
+    e2e_s: float,
+    llm_active_s: float,
+    tool_wait_s: float,
+    output_tokens: float,
+    gpu_hourly_rate_usd: float,
+    cpu_hourly_rate_usd: float,
+    *,
+    default_mode: str = "active_resource",
+    p99_e2e_s: Optional[float] = None,
+    p99_llm_active_s: Optional[float] = None,
+    p99_tool_wait_s: Optional[float] = None,
+) -> dict[str, object]:
+    if default_mode not in {"active_resource", "reserved_worker"}:
+        raise ValueError(f"unknown buy cost mode: {default_mode}")
+
+    active = _compute_split_mode_costs(
+        llm_active_s, tool_wait_s, output_tokens,
+        gpu_hourly_rate_usd, cpu_hourly_rate_usd,
+        p99_gpu_billable_s=p99_llm_active_s,
+        p99_cpu_billable_s=p99_tool_wait_s,
+    )
+    reserved = _compute_split_mode_costs(
+        e2e_s, e2e_s, output_tokens,
+        gpu_hourly_rate_usd, cpu_hourly_rate_usd,
+        p99_gpu_billable_s=p99_e2e_s,
+        p99_cpu_billable_s=p99_e2e_s,
+    )
+
+    selected = active if default_mode == "active_resource" else reserved
+    out: dict[str, object] = {
+        "active_resource": active,
+        "reserved_worker": reserved,
+    }
+    # Backward-friendly aliases: top-level cost fields mirror the selected mode.
+    out.update(selected)
     return out
 
 
@@ -372,6 +418,10 @@ def main() -> int:
     parser.add_argument("--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS)
     parser.add_argument("--buy-electricity-usd-per-kwh", type=float, default=DEFAULT_ELECTRICITY_USD_PER_KWH)
     parser.add_argument("--buy-scale-other-capital", type=float, default=DEFAULT_SCALE_OTHER_CAPITAL)
+    parser.add_argument("--buy-cost-mode", choices=("active-resource", "reserved-worker"), default="active-resource",
+                        help="Which buy-cost accounting mode to mirror at buy.cost top level. "
+                             "Both modes are always reported: active-resource charges GPU for LLM-active time "
+                             "and CPU for tool-wait time; reserved-worker charges both for full e2e latency.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -522,11 +572,28 @@ def main() -> int:
         )
         if buy_pricing is not None:
             buy = dict(buy_pricing)
+            buy_cost_mode = args.buy_cost_mode.replace("-", "_")
+            buy["default_cost_mode"] = buy_cost_mode
+            buy["accounting_modes"] = {
+                "active_resource": {
+                    "description": "Default per-resource active-time attribution. GPU is charged for estimated LLM-active time; CPU is charged for estimated tool-wait/tool-execution time. Appropriate for continuous batching/multiplexing where the GPU can serve other requests while this task waits on tools.",
+                    "avg_gpu_billable_s": llm_active_s,
+                    "avg_cpu_billable_s": tool_wait_s,
+                },
+                "reserved_worker": {
+                    "description": "Single-task/exclusive-worker upper bound. Both GPU and CPU are charged for full end-to-end latency because the whole worker is treated as reserved.",
+                    "avg_gpu_billable_s": avg_e2e,
+                    "avg_cpu_billable_s": avg_e2e,
+                },
+            }
             buy["cost"] = compute_costs_split(
-                avg_e2e, tool_wait_s, out_tok,
+                avg_e2e, llm_active_s, tool_wait_s, out_tok,
                 buy_pricing["gpu"]["effective_hourly_rate_usd"],
                 buy_pricing["cpu"]["effective_hourly_rate_usd"],
-                p99_e2e_s=p99_e2e, p99_tool_wait_s=p99_tool_wait_s,
+                default_mode=buy_cost_mode,
+                p99_e2e_s=p99_e2e,
+                p99_llm_active_s=p99_llm_active_s,
+                p99_tool_wait_s=p99_tool_wait_s,
             )
             payload["buy"] = buy
 

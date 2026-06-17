@@ -5,9 +5,9 @@ Computes per-run rent + buy cost for agentic benchmarks (mcp-atlas, swe-bench-li
 Two metrics, reported at **avg / p50 / p99**:
 
 - `cost_per_task` — total cost for one task
-- `cost_per_1M_output_tokens` — same cost amortized onto output tokens; naturally rolls GPU-idle-during-tool-call time onto each generated token
+- `cost_per_1M_output_tokens` — same cost amortized onto output tokens
 
-Buy cost is further **split into GPU vs CPU contributions**, because during tool calls the GPU is reserved but mostly idle while the CPU is doing work. (See §3 below for the formula.)
+Buy cost is further **split into GPU vs CPU contributions** and reports two explicit accounting modes: active-resource attribution (default) and reserved-worker upper bound. (See §3 below for the formula.)
 
 For the GPU/CPU specs, sources, and buy formula derivation see [`../moe/compute_cost.md`](../moe/compute_cost.md) — they are identical to the MoE script.
 
@@ -62,7 +62,7 @@ tool_wait_s  = max(0, avg_e2e_latency_s − llm_active_s)
 Intuition:
 - `num_req × ttft` ≈ prefill time summed over all turns.
 - `out_tok × tpot` ≈ decode time summed over all turns.
-- Whatever's left of the wall clock the GPU was reserved but waiting for the tool (network, CPU work, shell, sandbox …).
+- Whatever is left of the wall clock is attributed to tool wait / CPU-side work (network, shell, sandbox, external service latency …). During this interval SGLang-style continuous batching can often use the GPU for other requests.
 
 `max(0, …)` guards against rounding/jitter where the estimate slightly exceeds wall time.
 
@@ -94,7 +94,7 @@ p99_cost_per_task        = p99_e2e_latency_s × $/s         (if p99 present)
 p99_cost_per_1M_out_tok  = p99_e2e_latency_s × $/s × (1e6 / avg_total_output_tokens)
 ```
 
-### Buy (split GPU + CPU)
+### Buy (split GPU + CPU, two accounting modes)
 
 Per-hour rates (each = capital amortization + energy):
 
@@ -105,27 +105,37 @@ cpu_$/h  = (cpu_$ × M × scale_other_capital) / lifetime_hours
          + (cpu_W × M) / 1000 × electricity_$_per_kWh
 ```
 
-Cost charged:
+The script reports **both** buy-cost modes in every `buy.cost` block. The top-level `buy.cost.avg_cost_per_task_usd` mirrors `--buy-cost-mode` (default `active-resource`) for backward-friendly consumers, while the nested mode blocks are always present.
+
+#### Mode A: `active_resource` (default)
+
+Use this for per-resource active-time attribution, especially continuous batching / multiplexed serving where another request can use the GPU while this task waits on tools.
 
 ```
-gpu_cost_per_task   = gpu_$/h × avg_e2e_latency_s / 3600     # GPU reserved full wall time
-cpu_cost_per_task   = cpu_$/h × tool_wait_s       / 3600     # CPU paid only when working
+gpu_billable_s = llm_active_s
+cpu_billable_s = tool_wait_s
+
+gpu_cost_per_task   = gpu_$/h × gpu_billable_s / 3600
+cpu_cost_per_task   = cpu_$/h × cpu_billable_s / 3600
 total_cost_per_task = gpu_cost_per_task + cpu_cost_per_task
-
-For per-1M-tokens, multiply each by (1e6 / avg_total_output_tokens).
-
-p99_gpu_cost_per_task = gpu_$/h × p99_e2e_latency_s / 3600
-p99_cpu_cost_per_task = cpu_$/h × p99_tool_wait_s    / 3600
-p99_cost_per_task     = p99_gpu_cost_per_task + p99_cpu_cost_per_task
 ```
 
-This matches the user's intent: `cpu_cost ∝ cpu_tdp × tool_call_time` (the energy term is exactly that; capital amortization is added on top).
+#### Mode B: `reserved_worker` (upper bound)
 
-Why CPU is charged for `tool_wait_s` only:
-- During LLM generation the GPU is the bottleneck; CPU sits at near-idle.
-- During tool execution the GPU is idle but reserved; CPU (or the tool sandbox running on CPU) is doing the work.
+Use this for a single-task / batch-size-1 worker when the whole machine is treated as reserved for the full request.
 
-GPU is charged for the full `avg_e2e_latency_s` because if you own the box the GPU is depreciating + drawing energy the whole time it's reserved.
+```
+gpu_billable_s = avg_e2e_latency_s
+cpu_billable_s = avg_e2e_latency_s
+
+gpu_cost_per_task   = gpu_$/h × gpu_billable_s / 3600
+cpu_cost_per_task   = cpu_$/h × cpu_billable_s / 3600
+total_cost_per_task = gpu_cost_per_task + cpu_cost_per_task
+```
+
+For per-1M-tokens, multiply each cost by `(1e6 / avg_total_output_tokens)`.
+
+The old mixed convention (`GPU = full e2e`, `CPU = tool_wait`) is intentionally not used because it mixes reserved-capacity accounting for GPU with active-time accounting for CPU. If the GPU is charged as reserved for full e2e, the CPU should be too; if the CPU is charged only while active, the GPU should also be charged only while active.
 
 ---
 
@@ -154,6 +164,7 @@ All rent + buy flags are identical to `../moe/compute_cost.py`. See [`../moe/com
 | Buy | `--buy-lifetime-hours` | Default 26280 (3 yr) |
 | Buy | `--buy-electricity-usd-per-kwh` | Default 0.15 |
 | Buy | `--buy-scale-other-capital` | Default 1.2 (MoE-CAP) |
+| Buy | `--buy-cost-mode` | Which mode is mirrored at `buy.cost` top level: `active-resource` (default) or `reserved-worker`; both nested modes are always reported |
 
 ---
 
@@ -250,7 +261,15 @@ Sidecar JSON written to the same directory as the metrics file:
       "effective_hourly_rate_usd": <float>
     },
     "cpu": { /* same shape as gpu, plus "model" */ },
+    "default_cost_mode": "active_resource | reserved_worker",
+    "accounting_modes": {
+      "active_resource": { "description": "...", "avg_gpu_billable_s": <float>, "avg_cpu_billable_s": <float> },
+      "reserved_worker": { "description": "...", "avg_gpu_billable_s": <float>, "avg_cpu_billable_s": <float> }
+    },
     "cost": {
+      // top-level fields mirror --buy-cost-mode for backward-friendly readers
+      "gpu_billable_s":                    <float>,
+      "cpu_billable_s":                    <float>,
       "gpu_cost_per_task_usd":             <float>,
       "cpu_cost_per_task_usd":             <float>,
       "avg_cost_per_task_usd":             <float>,   // gpu + cpu
@@ -258,12 +277,8 @@ Sidecar JSON written to the same directory as the metrics file:
       "cpu_cost_per_1M_output_tokens_usd": <float>,
       "avg_cost_per_1M_output_tokens_usd": <float>,
 
-      "p99_gpu_cost_per_task_usd":             <float>,
-      "p99_cpu_cost_per_task_usd":             <float>,
-      "p99_cost_per_task_usd":                 <float>,
-      "p99_gpu_cost_per_1M_output_tokens_usd": <float>,
-      "p99_cpu_cost_per_1M_output_tokens_usd": <float>,
-      "p99_cost_per_1M_output_tokens_usd":     <float>
+      "active_resource": { /* same cost fields; GPU=llm_active, CPU=tool_wait */ },
+      "reserved_worker": { /* same cost fields; GPU=e2e, CPU=e2e */ }
     }
   }
 }
@@ -319,24 +334,26 @@ p99_tool_wait  = 475.37 − 55.83 = 419.54 s       (88% of p99 wall time)
 - GPU effective rate = $1.580/h (= $1.370 amort + $0.210 energy)
 - CPU effective rate = $0.525/h (= $0.458 amort + $0.068 energy)
 
+Active-resource attribution (default):
+
 | | gpu $/task | cpu $/task | total |
 |---|---:|---:|---:|
-| avg | 0.01945 | 0.00383 | **0.02328** |
-| p99 | 0.20862 | 0.06119 | **0.26981** |
+| avg | 0.00793 | 0.00383 | **0.01176** |
+| p99 | 0.02451 | 0.06119 | **0.08570** |
 
-| | gpu $/1M tok | cpu $/1M tok | total |
+Reserved-worker upper bound:
+
+| | gpu $/task | cpu $/task | total |
 |---|---:|---:|---:|
-| avg | 5.61 | 1.11 | **6.72** |
-| p99 | 60.22 | 17.66 | **77.89** |
-
-CPU is the **17% slice** of the avg buy cost and **23%** of the p99 cost — entirely attributable to tool-call wait time.
+| avg | 0.01945 | 0.00646 | **0.02591** |
+| p99 | 0.20862 | 0.06934 | **0.27796** |
 
 ---
 
 ## 8. Caveats
 
 1. **p99 uses avg counts.** `p99_num_requests` / `p99_output_tokens` are not in the metrics file, so `p99_llm_active_s_est` uses average counts with p99 per-event rates. For long-tail tasks (more turns, more tokens) the real p99 LLM-active is larger and `p99_tool_wait_s_est` is correspondingly over-estimated. Treat p99 tool-wait (and thus p99 CPU cost) as an **upper bound**.
-2. **CPU only charged for `tool_wait_s`.** During LLM generation the CPU is largely idle. If you want a flat-rate model (CPU always charged), apply the lumped formula from the MoE script.
-3. **Per-task wall time assumes one concurrent task on the box.** With concurrency > 1 you should divide by concurrency to get amortized cost per task — the metrics file reports `hardware.concurrency` for sanity-checking. (This script does **not** auto-divide; numbers are reported as if the whole machine ran one task at a time.)
+2. **Two buy accounting modes are reported.** `active_resource` is the default attribution mode for multiplexed/continuous-batching serving; `reserved_worker` is a conservative upper bound for single-task workers. Do not mix GPU-full-e2e with CPU-tool-wait as a single metric.
+3. **Per-task wall time and concurrency.** With concurrency > 1, active-resource attribution is usually the cleaner per-task view because idle GPU time during tool waits can be used by other requests. The reserved-worker mode intentionally ignores that multiplexing and treats the full worker as occupied.
 4. **All the MoE caveats still apply** — utilization, `scale_other_capital = 1.2`, electricity price, 3-year lifetime, GPU/CPU MSRPs vs. realized deals. See [`../moe/compute_cost.md`](../moe/compute_cost.md) §7.
-5. **`avg_total_output_tokens` is per-task, not per-LLM-call.** All per-1M-token figures are amortized over the full per-task output budget (so they include the cost of the tool-wait that produced no tokens).
+5. **`avg_total_output_tokens` is per-task, not per-LLM-call.** All per-1M-token figures are amortized over the full per-task output budget.
