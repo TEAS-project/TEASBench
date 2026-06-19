@@ -20,27 +20,31 @@ def main(experiments_csv, yaml_target_dir, results_repo):
 
     # Generate K8s config(s) using templates based on experiment parameters from CSV file
     df["yaml"] = df.apply(lambda row: yaml_template().get({"inference_engine": row.inference_engine,
-                                                          "model": row.model,
-                                                          "hf_model_path": HF_MODEL_MAP[row.model],
-                                                          "dataset": row.dataset,
-                                                          "num_samples": row.num_samples,
-                                                          "gpu": row.gpu,
-                                                          "gpu_product": EIDF_GPU_MAP[row.gpu],
-                                                          "num_gpu": row.num_gpu,
-                                                          "tensor_parallel_size": row.num_gpu,
-                                                          "batch_size": row.batch_size},
+                                                           "model": row.model,
+                                                           "hf_model_path": HF_MODEL_MAP[row.model],
+                                                           "dataset": row.dataset,
+                                                           "num_samples": row.num_samples,
+                                                           "gpu": row.gpu,
+                                                           "gpu_product": EIDF_GPU_MAP[row.gpu],
+                                                           "num_gpu": row.num_gpu,
+                                                           "tensor_parallel_size": row.num_gpu,
+                                                           "batch_size": row.batch_size,
+                                                           "input_length": int(row.input_length) if pd.notna(row.input_length) else None,
+                                                           "output_length": int(row.output_length) if pd.notna(row.output_length) else None},
                                                           results_repo=results_repo),
                           axis=1)
     
     # # Write K8s config(s) to yaml file
     df.apply(lambda row: write_yaml_files(target_dir=yaml_target_dir,
                                           file_name=k8s_friendlify(get_run_name({"inference_engine": row.inference_engine,
-                                                                                "model": row.model,
-                                                                                "dataset": row.dataset,
-                                                                                "num_samples": row.num_samples,
-                                                                                "gpu": row.gpu,
-                                                                                "num_gpu": row.num_gpu,
-                                                                                 "batch_size": row.batch_size})
+                                                                                 "model": row.model,
+                                                                                 "dataset": row.dataset,
+                                                                                 "num_samples": row.num_samples,
+                                                                                 "gpu": row.gpu,
+                                                                                 "num_gpu": row.num_gpu,
+                                                                                 "batch_size": row.batch_size,
+                                                                                 "input_length": int(row.input_length) if pd.notna(row.input_length) else None,
+                                                                                 "output_length": int(row.output_length) if pd.notna(row.output_length) else None})
                                                                    + ".yaml"),
                                           file_content=row.yaml),
              axis=1)

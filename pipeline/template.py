@@ -6,13 +6,20 @@ import re
 import subprocess
 from utils import get_run_name, k8s_friendlify, results_repo_dir
 
+DEFINED_SENTINEL = "<defined>"
+
 class Template:
     def __init__(self):
         pass
 
+
     def matches(self, rule_match_condition, experiment_parameters):
         for parameter, rule_value in rule_match_condition.items():
             experiment_value = experiment_parameters.get(parameter)
+            if rule_value == DEFINED_SENTINEL:
+                if experiment_value is None or experiment_value == "":
+                    return False
+                continue
             if isinstance(rule_value, list):
                 if experiment_value not in rule_value:
                     return False
@@ -21,7 +28,7 @@ class Template:
                     return False
         return True
 
-    
+
     def get_matching_rules(self, rules, experiment_parameters):
         matching = []
         for rule in rules:
@@ -31,11 +38,11 @@ class Template:
         matching.sort(key=lambda x: x[0])
         return [rule for _, rule in matching]
 
-    
-    def specificity(self, match):
-        return len(match)
 
+    def specificity(self, match):
+        return sum(1 if v == DEFINED_SENTINEL else 2 for v in match.values())
     
+
     def resolve_params(self, flags_key, matching_rules):
         resolved = {}
         for rule in matching_rules:
@@ -99,6 +106,22 @@ class Template:
             return f"{flag_str} {value}"
         return None
 
+
+    def _resolve_flag_value(self, param, flag_def, parameters):
+        """Determine the value to use for a flag in the flags loop.
+
+        If the flag definition has 'from_parameter', look up that key in
+        parameters; when the referenced parameter is missing or empty the
+        flag is omitted (since _build_flag treats None and "" as 'omit').
+        Otherwise, fall back to the parameter named after the flag itself,
+        then to the flag's hard-coded 'value' default.
+        """
+        if isinstance(flag_def, dict):
+            if "from_parameter" in flag_def:
+                return parameters.get(flag_def["from_parameter"])
+            return parameters.get(param, flag_def.get("value"))
+        return parameters.get(param)
+
     
     def build_command(self, cmd_type, config, parameters, matching_rules):
         """Generalized command builder for both server and client."""
@@ -117,10 +140,10 @@ class Template:
         cmd = cmd_cfg["base_command"] + " \\\n"
         
         # Base parameters
-        for param in cmd_cfg["base_parameters"]:
+        for param in cmd_cfg["flags"]:
             if param not in flags_def: continue
             flag_def = flags_def[param]
-            value = parameters.get(param, flag_def.get("value") if isinstance(flag_def, dict) else None)
+            value = self._resolve_flag_value(param, flag_def, parameters)
             
             rendered = self._build_flag(flag_def, param, value)
             if rendered: cmd += f"  {rendered} \\\n"
@@ -197,5 +220,3 @@ class Template:
 
         
         return job_config
-
-    

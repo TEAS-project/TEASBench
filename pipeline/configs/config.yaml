@@ -84,30 +84,38 @@ variables_defaults:
       flag: "--judge-api-key"
     baseline_answers:               
       flag: "--baseline-answers-path"
+    fixed_length_mode:
+      flag: "--fixed-length-mode"
+    input_length:
+      flag: "--target-input-tokens"
+      from_parameter: input_length
+    output_length:
+      flag: "--target-output-tokens"
+      from_parameter: output_length
 
 
-  # Base settings that are always present in server command
+  # Base settings 
   server_command:
     sglang:
       base_command: "python3 -m moe_cap.systems.sglang"
-      base_parameters:              
+      flags:              
         - hf_model_path
         - port
         - expert_recording
         - tensor_parallel_size
     vllm:
       base_command: "python3 -m moe_cap.systems.vllm"
-      base_parameters:
+      flags:
         - hf_model_path
         - port
         - host
         - expert_recording
         - tensor_parallel_size
 
-  # Base settings that are always present in client command
+  # Base settings 
   client_command:
     base_command: "python3 -m moe_cap.runner.openai_api_profile"
-    base_parameters:
+    flags:
       - hf_model_path
       - dataset
       - num_samples
@@ -115,6 +123,8 @@ variables_defaults:
       - backend
       - chat_api
       - output_dir
+      - input_length
+      - output_length
 
 
   # Other variables needed to make up substitutions for template.yaml
@@ -202,17 +212,17 @@ rules:
       dataset:
         - "arena-hard"
     client_flags:
-      judge_url: "https://openrouter.ai/api/v1/chat/completions"
-      judge_model: "openai/gpt-4.1"
-      judge_key: "$OPENROUTER_API_KEY"
+      judge_url: "https://api.openai.com/v1/chat/completions"
+      judge_model: "gpt-4.1"
+      judge_key: "$OPENAI_API_KEY"
       baseline_answers: "$RUN_DIR/gpt-4-0613.jsonl"
     download_arena_hard_baseline_answers: "curl -L --output-dir $RUN_DIR -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl"
     extra_container_env:
       value: |
-        - name: OPENROUTER_API_KEY
+        - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
-              name: openrouter-api-key-ap
+              name: elm-openai-key-ap
               key: key
 
 
@@ -269,6 +279,9 @@ rules:
   - match:
       model:
         - "gpt-oss-120b"
+      dataset:
+        - "gsm8k"
+        - "arena-hard"
       gpu:
         - "H100"
       num_gpu:
@@ -278,7 +291,23 @@ rules:
       inference_engine:
         - "vllm"
     server_flags:
-      gpu_memory_fraction: "0.95"
+      gpu_memory_fraction: "0.92"
+
+  - match:
+      model:
+        - "gpt-oss-120b"
+      dataset:
+        - "longbench_v1"
+      gpu:
+        - "H100"
+      num_gpu:
+        - 1
+      batch_size:
+        - "default"
+      inference_engine:
+        - "vllm"
+    server_flags:
+      gpu_memory_fraction: "0.94"
 
   - match:
       model:
@@ -290,4 +319,16 @@ rules:
         - "H100"
     server_flags:
       max_context: 200k
+
+      
+# Activate fixed-length mode
+  - match:
+      input_length: "<defined>"
+    client_flags:
+      fixed_length_mode: true
+
+  - match:
+      output_length: "<defined>"
+    client_flags:
+      fixed_length_mode: true
 
