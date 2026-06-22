@@ -199,6 +199,13 @@ def arrange_combined(df):
 CORE_DESCRIPTOR_COLS = ["platform", "gpu_type x num_gpu", "batch_size", "inference_engine"]
 OPTIONAL_DESCRIPTOR_COLS = ["num_samples", "input_length", "output_length"]
 
+# Descriptor column order used inside the per-permutation CSVs, which also serves
+# as the successive row-sort key order. Kept deliberately separate for accuracy and
+# performance so they can diverge later. Any listed column that is fixed by the
+# grouping (e.g. batch_size in the performance files) is dropped automatically.
+ACCURACY_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
+PERFORMANCE_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
+
 
 def sanitize_filename_part(value):
     """Make a single path-safe filename component from a value."""
@@ -207,6 +214,7 @@ def sanitize_filename_part(value):
 
 def write_metric_per_permutation_csvs(df, output_dir, value_specs,
                                       group_cols=("model", "dataset"),
+                                      descriptor_order=None,
                                       filename_fn=None, subdir_fn=None):
     """Write one CSV per unique combination of `group_cols`.
 
@@ -221,6 +229,11 @@ def write_metric_per_permutation_csvs(df, output_dir, value_specs,
     `filename_fn` maps the dict of group-key values to a filename stem (default:
     sanitized key values joined with "_"). `subdir_fn` optionally maps the same
     dict to a subdirectory (relative to output_dir) the file is placed in.
+
+    `descriptor_order` lists the descriptor columns in the order they should appear
+    (defaults to CORE_DESCRIPTOR_COLS). It also serves as the successive row-sort
+    key order. Entries that are fixed by `group_cols` (and so dropped from output)
+    are ignored; only listed columns appear, so omitting one removes it.
     """
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -235,7 +248,10 @@ def write_metric_per_permutation_csvs(df, output_dir, value_specs,
                   f"'{out_name}' will be NaN.")
         resolved_specs.append((out_name, src, transform))
 
-    descriptor_cols = [c for c in CORE_DESCRIPTOR_COLS if c not in group_cols]
+    if descriptor_order is None:
+        descriptor_order = CORE_DESCRIPTOR_COLS
+    descriptor_cols = [c for c in descriptor_order
+                       if c in CORE_DESCRIPTOR_COLS and c not in group_cols]
     optional_cols = [c for c in OPTIONAL_DESCRIPTOR_COLS if c not in group_cols]
 
     written = []
@@ -254,6 +270,10 @@ def write_metric_per_permutation_csvs(df, output_dir, value_specs,
                 table[out_name] = group[src].apply(transform)
             else:
                 table[out_name] = group[src]
+
+        if descriptor_cols:
+            table = table.sort_values(by=descriptor_cols, kind="stable",
+                                      ignore_index=True)
 
         if filename_fn is not None:
             stem = filename_fn(key_values)
@@ -279,6 +299,7 @@ def write_accuracy_per_permutation_csvs(df, output_dir):
         df, output_dir,
         value_specs=[("acc", "acc", trunc_fixed(ACC_DECIMALS))],
         group_cols=("model", "dataset"),
+        descriptor_order=ACCURACY_DESCRIPTOR_ORDER,
     )
 
 
@@ -298,6 +319,7 @@ def write_performance_per_permutation_csvs(df, output_dir):
             ("tpot", "tpot", fmt),
         ],
         group_cols=("model", "dataset", "batch_size"),
+        descriptor_order=PERFORMANCE_DESCRIPTOR_ORDER,
         subdir_fn=lambda k: "batch-size-" + sanitize_filename_part(k["batch_size"]),
         filename_fn=lambda k: "_".join([
             sanitize_filename_part(k["model"]),
