@@ -3,7 +3,7 @@
 # This runs outside the container.
 
 # Encode CSV contents with base64.
-csv_file="../../../experiments/smoke_tests_vllm.csv"
+csv_file="smoke_tests_vllm_simple.csv"
 CONTAINER_CSV=$(base64 -w 0 $csv_file)
 echo "Contents of $csv_file:"
 echo "$CONTAINER_CSV"
@@ -147,7 +147,7 @@ while IFS=',' read -r -a VALUES; do
     SERVER_PID=$!
 
     # Wait until the /health endpoint returns HTTP 200
-    echo "Waiting for server to be ready..."
+    echo "Waiting for server $SERVER_PID to be ready..."
 
     until curl -s -f http://localhost:30000/health > /dev/null; do
         # Check if the server has crashed (if so the health check will never succeed)
@@ -179,7 +179,7 @@ while IFS=',' read -r -a VALUES; do
         # Determine the extra arguments to the client.
         extra_args=""
         if [[ "${row[batch_size]}" != "default" ]]; then
-            extra_args="$extra_args --batch-size ${row[batch_size]}"
+            extra_args="$extra_args --server-batch-size ${row[batch_size]}"
         fi
         if [[ "${row[dataset]}" == "arena-hard" ]]; then
             extra_args="$extra_args \
