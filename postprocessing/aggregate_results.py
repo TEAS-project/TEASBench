@@ -142,18 +142,28 @@ def trunc_fixed(decimals):
 # line up by the decimal point. Tune per metric group as the scales warrant.
 ACC_DECIMALS = 5
 PERF_DECIMALS = 5
+# Cost per request is sub-cent, so a couple of extra places keep some significant
+# figures while still aligning by the decimal point.
+COST_DECIMALS = 5
 
 
-def get_results(results_dir):
-    """Collect every metrics file under results_dir into a single DataFrame.
+def get_results(results_dir, pattern="metrics*", required=True):
+    """Collect every file matching `pattern` under results_dir into one DataFrame.
 
-    Each row is the json-normalized contents of one metrics file, augmented with
-    metadata derived from that file's location in the directory tree.
+    Each row is the json-normalized contents of one matched file, augmented with
+    metadata derived from that file's location in the directory tree. `pattern`
+    is an rglob glob: "metrics*" for the per-run metrics files, "*cost*" for the
+    cost files (which appear as both "cost.json" and "cost_<dataset>_<ts>.json"
+    depending on collection location).
+
+    When `required` is False and nothing matches, returns None instead of raising,
+    so optional metric families (e.g. cost, which is absent for the agentic runs)
+    don't abort the whole aggregation.
     """
     results_root = pathlib.Path(results_dir)
     data_frames = []
 
-    for path in sorted(results_root.rglob("metrics*")):
+    for path in sorted(results_root.rglob(pattern)):
         if not path.is_file():
             continue
 
@@ -174,7 +184,10 @@ def get_results(results_dir):
         data_frames.append(df)
 
     if not data_frames:
-        raise SystemExit(f"No metrics files found under {results_dir}")
+        if required:
+            raise SystemExit(f"No files matching '{pattern}' found under {results_dir}")
+        print(f"No files matching '{pattern}' found under {results_dir}; skipping.")
+        return None
 
     return pd.concat(data_frames, ignore_index=True)
 
@@ -205,6 +218,7 @@ OPTIONAL_DESCRIPTOR_COLS = ["num_samples", "input_length", "output_length"]
 # grouping (e.g. batch_size in the performance files) is dropped automatically.
 ACCURACY_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
 PERFORMANCE_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
+COST_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
 
 
 def sanitize_filename_part(value):
@@ -328,9 +342,33 @@ def write_performance_per_permutation_csvs(df, output_dir):
     )
 
 
+def write_cost_per_permutation_csvs(df, output_dir):
+    """Per (model, dataset, batch_size) CSVs whose final columns are the cost
+    metrics, each truncated to a fixed COST_DECIMALS decimal places:
+    avg_cost_per_request_usd and avg_cost_per_1M_output_tokens_usd (read from the
+    nested "buy.cost.*" keys of each run's cost file). Files are bucketed into a
+    "batch-size-<n>" subdirectory per batch size, so batch_size appears in neither
+    the columns nor the filename -- mirroring the performance CSVs."""
+    fmt = trunc_fixed(COST_DECIMALS)
+    return write_metric_per_permutation_csvs(
+        df, output_dir,
+        value_specs=[
+            ("avg_cost_per_request_usd", "avg_cost_per_request_usd", fmt),
+            ("avg_cost_per_1M_output_tokens_usd", "avg_cost_per_1M_output_tokens_usd", fmt),
+        ],
+        group_cols=("model", "dataset", "batch_size"),
+        descriptor_order=COST_DESCRIPTOR_ORDER,
+        subdir_fn=lambda k: "batch-size-" + sanitize_filename_part(k["batch_size"]),
+        filename_fn=lambda k: "_".join([
+            sanitize_filename_part(k["model"]),
+            sanitize_filename_part(k["dataset"]),
+        ]),
+    )
+
+
 def main(results_dir, output_dir):
 
-    df = get_results(results_dir)
+    df = get_results(results_dir, pattern="metrics*")
     df = arrange_combined(df)
 
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -346,6 +384,15 @@ def main(results_dir, output_dir):
 
     print(f"Writing performance per model-dataset CSVs to {performance_per_permutation_dir} ...")
     write_performance_per_permutation_csvs(df, performance_per_permutation_dir)
+
+    # Cost lives in separate cost files ("cost.json" or "cost_<dataset>_<ts>.json"),
+    # present only for a subset of runs, so it is collected in its own pass and is
+    # non-fatal when absent (e.g. the agentic runs carry no cost files).
+    cost_df = get_results(results_dir, pattern="*cost*.json", required=False)
+    if cost_df is not None:
+        cost_per_permutation_dir = pathlib.Path(output_dir) / "cost/by_model_dataset"
+        print(f"Writing cost per model-dataset CSVs to {cost_per_permutation_dir} ...")
+        write_cost_per_permutation_csvs(cost_df, cost_per_permutation_dir)
 
     print("Done.")
 
