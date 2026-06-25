@@ -183,9 +183,9 @@ while IFS=',' read -r -a VALUES; do
         fi
         if [[ "${row[dataset]}" == "arena-hard" ]]; then
             extra_args="$extra_args \
-                --judge-api-url https://openrouter.ai/api/v1/chat/completions \
+                --judge-api-url https://api.openai.com/v1/chat/completions \
                 --judge-model openai/gpt-4.1 \
-                --judge-api-key $OPENROUTER_API_KEY \
+                --judge-api-key $OPENAI_API_KEY \
                 --baseline-answers-path $BASE_DIR/gpt-4-0613.jsonl"
         fi
         echo "Benchmarking with extra arguments: $extra_args"
