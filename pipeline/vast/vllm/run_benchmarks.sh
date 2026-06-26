@@ -65,7 +65,6 @@ run_benchmark() {
 }
 
 # Function to move output into the right directory and upload to results repo.
-# I think it makes sense to do the pull/push after every successful benchmark run.
 push_results() {
     ##################
     # Saving results #
@@ -123,7 +122,14 @@ IFS=',' read -r -a HEADERS < <(echo "$CONTAINER_CSV" | base64 -d | head -n 1)
 
 # Verify that we have all the column headers we're expecting.
 for req in "${REQUIRED_HEADERS[@]}"; do
-    if [[ ! " ${HEADERS[@]} " =~ " ${req} " ]]; then
+    found=0
+    for header in "${HEADERS[@]}"; do
+        if [[ "$header" == "$req" ]]; then
+            found=1
+            break
+        fi
+    done
+    if [[ $found -eq 0 ]]; then
         echo "ERROR: Missing required column header: '$req'" >&2
         exit 1
     fi
@@ -253,10 +259,11 @@ while IFS=',' read -r -a VALUES; do
             job_end_time=$(date +%s)
             job_duration=$((job_end_time - job_start_time))
             job_description="{row[inference_engine]}-${row[model]}-${row[dataset]}-${row[num_samples]}-${row[gpu]}x${row[num_gpu]}-bs${row[batch_size]}"
+            echo "Benchmark run completed, pushing results to repo..."
             push_results "$RUN_DIR" "$RUN_SUBDIR" "$job_description" "${row[model]}" "$job_duration"
-            echo "Benchmark succeeded; push results to repo here."
+            echo "Push complete."
         else
-            echo "Benchmark run for $dataset failed, skipping pushing results."
+            echo "Benchmark run failed, skipping pushing results."
         fi
 
         echo "Shutting down server..."  # regardless of client success
