@@ -33,6 +33,8 @@ run_benchmark() {
     local model_name=$2
     local dataset=$3
     local num_samples=$4
+    # Move the first four args out of the way and store the remainder as the
+    # extra arguments to the MoE-CAP client.
     shift 4
     local extra_args=("$@")
 
@@ -84,19 +86,10 @@ push_results() {
     mv detailed_results* detailed_results.jsonl
     mv output_data*.jsonl output_data.jsonl
 
-    # Copy data into the correct directory within the repo.
-    # RUN_OUTPUT_DIR=/root/run_output/TEASBench-container-dev-results/moe/vast/vllm/${MODEL_NAME}/${dataset}_${NUM_SAMPLES}samples/${GPU}x${NUM_GPUS}/batch-size-${BATCH_SIZE}/$timestamp
-    # mkdir -p $RUN_OUTPUT_DIR
-    # cp -R $RUN_DIR/* $RUN_OUTPUT_DIR/
-
     cd "$BASE_DIR/TEASBench-container-dev-results"
     output_dir="$BASE_DIR/TEASBench-container-dev-results/$run_subdir"
     mkdir -p "$output_dir"
     cp -r "$run_dir"/* "$output_dir"/
-
-    # We've also moved our log so change where we are writing
-    # exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
-    # cd $RUN_OUTPUT_DIR
 
     echo "Files copied into repo at $output_dir."
 
@@ -108,8 +101,7 @@ push_results() {
     jq -n --arg job_duration "$job_duration" '{job: $job_duration}'  >> "$output_dir/timings.json"
 
     # Pull to refresh before committing and pushing
-    # GIT_TOKEN="${GIT_TOKEN%$'\n'}"   # remove trailing newline that causes issues
-    # git pull "https://oauth2:${GIT_TOKEN}@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
+    git pull "$RESULTS_REPO_URL" main
 
     # Commit and push data to results repository
     git add "$output_dir/metrics*.json" "$output_dir/metadata*.json" "$output_dir/timings.json"
@@ -119,7 +111,6 @@ push_results() {
 }
 
 # Get MoE-CAP commit hash for reproducibility.
-# Q: Would it be better to back MoE-CAP into the container, or to clone it here?
 cd /dev/shm/MoE-CAP
 MOE_CAP_COMMIT=$(git rev-parse --short HEAD)
 
