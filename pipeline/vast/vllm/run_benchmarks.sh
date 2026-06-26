@@ -19,6 +19,12 @@ cd "$BASE_DIR"
 
 exec &> "$BASE_DIR/stdout_stderr.log"
 
+RESULTS_REPO="TEASBench-container-dev-results"
+RESULTS_REPO_USER="welucas2"
+RESULTS_REPO_URL="https://oauth2:$GIT_TOKEN@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
+echo "Cloning results repo $RESULTS_REPO"
+git clone "$RESULTS_REPO_URL"
+
 # Function to run single benchmark with given options. Extra arguments might be
 # judge arguments for arena-hard or set the batch size, but for others this
 # argument might just be empty.
@@ -27,19 +33,20 @@ run_benchmark() {
     local model_name=$2
     local dataset=$3
     local num_samples=$4
-    local extra_args=$5
+    shift 4
+    local extra_args=("$@")
 
-    echo "Starting to run $dataset benchmark (sending http requests)..."
+    echo "Starting to run benchmark (sending http requests)..."
     client_start_time=$(date +%s)
     python3 -m moe_cap.runner.openai_api_profile \
-      --model_name unsloth/$model_name \
-      --datasets $dataset \
-      --num-samples $num_samples \
+      --model_name unsloth/"$model_name" \
+      --datasets "$dataset" \
+      --num-samples "$num_samples" \
       --api-url http://localhost:30000/v1/completions \
       --use-chat-api \
-      --output_dir $run_dir \
+      --output_dir "$run_dir" \
       --backend vllm \
-      $extra_args \
+      "${extra_args[@]}" \
       &> "$run_dir/client_$dataset.log"
     CLIENT_SUCCESS=$?  # not 100% robust, could be failed redirection
 
@@ -53,6 +60,62 @@ run_benchmark() {
         echo "Client crashed"
     fi
     return $CLIENT_SUCCESS
+}
+
+# Function to move output into the right directory and upload to results repo.
+# I think it makes sense to do the pull/push after every successful benchmark run.
+push_results() {
+    ##################
+    # Saving results #
+    ##################
+
+    local run_dir=$1
+    local run_subdir=$2
+    local job_description=$3
+    local model_name=$4
+    local job_duration=$5
+
+    # Tidy up - gather MoE-CAP generated results from subdir
+    cd "$run_dir"
+    cp unsloth/"$model_name"/* .
+    rm -r "$(dirname unsloth/"$model_name")"
+    mv metadata*.json metadata.json
+    mv metrics*.json metrics.json
+    mv detailed_results* detailed_results.jsonl
+    mv output_data*.jsonl output_data.jsonl
+
+    # Copy data into the correct directory within the repo.
+    # RUN_OUTPUT_DIR=/root/run_output/TEASBench-container-dev-results/moe/vast/vllm/${MODEL_NAME}/${dataset}_${NUM_SAMPLES}samples/${GPU}x${NUM_GPUS}/batch-size-${BATCH_SIZE}/$timestamp
+    # mkdir -p $RUN_OUTPUT_DIR
+    # cp -R $RUN_DIR/* $RUN_OUTPUT_DIR/
+
+    cd "$BASE_DIR/TEASBench-container-dev-results"
+    output_dir="$BASE_DIR/TEASBench-container-dev-results/$run_subdir"
+    mkdir -p "$output_dir"
+    cp -r "$run_dir"/* "$output_dir"/
+
+    # We've also moved our log so change where we are writing
+    # exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
+    # cd $RUN_OUTPUT_DIR
+
+    echo "Files copied into repo at $output_dir."
+
+    # Add commit IDs of MoE-CAP and TEASBench to metadata.json
+    echo "Adding commit IDs to metadata.json"
+    jq --arg moe_cap_commit "$MOE_CAP_COMMIT" --arg teasbench_commit "$TEASBENCH_COMMIT" '.system_environment += {"teasbench_commit": $teasbench_commit, "moe_cap_commit": $moe_cap_commit}' "$output_dir/metadata.json" > tmp.json && mv tmp.json "$output_dir/metadata.json"
+
+    echo "Job took $job_duration seconds"
+    jq -n --arg job_duration "$job_duration" '{job: $job_duration}'  >> "$output_dir/timings.json"
+
+    # Pull to refresh before committing and pushing
+    # GIT_TOKEN="${GIT_TOKEN%$'\n'}"   # remove trailing newline that causes issues
+    # git pull "https://oauth2:${GIT_TOKEN}@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
+
+    # Commit and push data to results repository
+    git add "$output_dir/metrics*.json" "$output_dir/metadata*.json" "$output_dir/timings.json"
+    git commit -m "auto: ${INFERENCE_ENGINE}-${MODEL_NAME}-${dataset}-${NUM_SAMPLES}-${GPU}x${NUM_GPUS}-bs${BATCH_SIZE}"
+    git push "https://oauth2:${GIT_TOKEN}@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
+    # echo "Would be pushing to results repo here, but skipping for now."
 }
 
 # Get MoE-CAP commit hash for reproducibility.
@@ -116,33 +179,36 @@ while IFS=',' read -r -a VALUES; do
     # The parameters for this benchmark look good, so go ahead and run it.
     echo "Running ${row[inference_engine]} ${row[model]} ${row[dataset]} ${row[num_samples]} ${row[gpu]} ${row[num_gpu]} ${row[batch_size]}"
 
-    run_start_time=$(date +%s)
+    job_start_time=$(date +%s)
     SERVER_STATUS=""
 
     cd "$BASE_DIR"
 
-    run_timestamp=$( date +%Y%m%d-%H%M )
-    RUN_DIR="${BASE_DIR}/moe/vast/${row[inference_engine]}/${row[model]}/${row[dataset]}_${row[num_samples]}samples/${row[gpu]}x${row[num_gpu]}/batch-size-${row[batch_size]}/$run_timestamp"
+    job_timestamp=$( date +%Y%m%d-%H%M )
+    RUN_SUBDIR="moe/vast/${row[inference_engine]}/${row[model]}/${row[dataset]}_${row[num_samples]}samples/${row[gpu]}x${row[num_gpu]}/batch-size-${row[batch_size]}/$job_timestamp"
+    RUN_DIR="${BASE_DIR}/${RUN_SUBDIR}"
     # RUN_DIR=/dev/shm/$timestamp
     mkdir -p "$RUN_DIR"
     cd "$RUN_DIR"
 
     # Extra arguments for the server.
     if [[ "${row[batch_size]}" == "1" ]]; then
-        server_extra_args="--max_num_seqs 1"
+        server_extra_args=("--max_num_seqs" "1")
     else
-        server_extra_args=""
+        server_extra_args=()
     fi
 
     echo "Starting server..."
+    echo "with extra arguments: ${server_extra_args[@]}"
+    echo "${row[model]}"
     server_init_start_time=$(date +%s)
     python3 -m moe_cap.systems.vllm \
-      --model unsloth/${row[model]} \
+      --model "unsloth/${row[model]}" \
       --port 30000 \
       --host 0.0.0.0 \
       --enable-expert-distribution-metrics \
       --tensor-parallel-size 1 \
-      $server_extra_args \
+      "${server_extra_args[@]}" \
       --reasoning-parser openai_gptoss &> "$RUN_DIR/server.log" &
     SERVER_PID=$!
 
@@ -177,24 +243,26 @@ while IFS=',' read -r -a VALUES; do
         fi
 
         # Determine the extra arguments to the client.
-        extra_args=""
+        client_extra_args=()
         if [[ "${row[batch_size]}" != "default" ]]; then
-            extra_args="$extra_args --server-batch-size ${row[batch_size]}"
+            client_extra_args+=(--server-batch-size "${row[batch_size]}")
         fi
         if [[ "${row[dataset]}" == "arena-hard" ]]; then
-            extra_args="$extra_args \
-                --judge-api-url https://api.openai.com/v1/chat/completions \
-                --judge-model openai/gpt-4.1 \
-                --judge-api-key $OPENAI_API_KEY \
-                --baseline-answers-path $BASE_DIR/gpt-4-0613.jsonl"
+            client_extra_args+=(--judge-api-url https://api.openai.com/v1/chat/completions)
+            client_extra_args+=(--judge-model openai/gpt-4.1)
+            client_extra_args+=(--judge-api-key "$OPENAI_API_KEY")
+            client_extra_args+=(--baseline-answers-path "$BASE_DIR/gpt-4-0613.jsonl")
         fi
-        echo "Benchmarking with extra arguments: $extra_args"
-        run_benchmark "$RUN_DIR" "${row[model]}" "${row[dataset]}" "${row[num_samples]}" "$extra_args"
+        echo "Benchmarking with extra arguments: ${client_extra_args[@]}"
+        run_benchmark "$RUN_DIR" "${row[model]}" "${row[dataset]}" "${row[num_samples]}" "${client_extra_args[@]}"
         RUN_SUCCESS=$?
 
         # If run is successful, stage results and push to repo. Otherwise, skip.
         if [[ $RUN_SUCCESS -eq 0 ]]; then
-            # push_results $dataset
+            job_end_time=$(date +%s)
+            job_duration=$((job_end_time - job_start_time))
+            job_description="{row[inference_engine]}-${row[model]}-${row[dataset]}-${row[num_samples]}-${row[gpu]}x${row[num_gpu]}-bs${row[batch_size]}"
+            push_results "$RUN_DIR" "$RUN_SUBDIR" "$job_description" "${row[model]}" "$job_duration"
             echo "Benchmark succeeded; push results to repo here."
         else
             echo "Benchmark run for $dataset failed, skipping pushing results."
