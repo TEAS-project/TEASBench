@@ -141,10 +141,31 @@ def trunc_fixed(decimals):
 # Fixed decimal places used when writing the per model-dataset CSVs, so values
 # line up by the decimal point. Tune per metric group as the scales warrant.
 ACC_DECIMALS = 5
-PERF_DECIMALS = 5
 # Cost per request is sub-cent, so a couple of extra places keep some significant
 # figures while still aligning by the decimal point.
 COST_DECIMALS = 5
+
+# Per-column decimal places for the performance CSVs, keyed by output column
+# label. Each performance column (latency metrics plus the merged sparsity
+# metrics) is truncated/formatted to its own fixed number of decimals, so columns
+# on very different scales -- e.g. tokens/s in the thousands vs S_MFU well below 1
+# -- can each be shown at an appropriate precision while still lining up by the
+# decimal point within a column. PERF_DECIMALS_DEFAULT applies to any performance
+# column not listed here.
+PERF_DECIMALS_DEFAULT = 5
+PERF_DECIMALS = {
+    "e2e_s": 3,
+    "ttft": 5,
+    "tpot": 5,
+    "prefill_avg_expert_activation": 2,
+    "decode_avg_expert_activation": 2,
+    "prefill_tokens_per_s": 2,
+    "decode_output_tokens_per_s": 2,
+    "prefill_S_MBU": 6,
+    "decode_S_MBU": 6,
+    "prefill_S_MFU": 6,
+    "decode_S_MFU": 6,
+}
 
 
 def get_results(results_dir, pattern="metrics*", required=True):
@@ -192,6 +213,39 @@ def get_results(results_dir, pattern="metrics*", required=True):
     return pd.concat(data_frames, ignore_index=True)
 
 
+# Sort order for the gpu_type portion of the "gpu_type x num_gpu" column. That
+# column holds "<gpu_type>x<num_gpu>" (e.g. "h200x8", "mi355xx4"); wherever it is a
+# sort key, rows are ordered by gpu_type per this list, then by num_gpu
+# numerically. gpu_types not listed here sort after all listed ones; values that
+# don't parse sort last.
+GPU_TYPE_ORDER = ["a100", "h100", "h200", "b200", "b300", "mi355x"]
+GPU_DIR_RE = re.compile(r"^(?P<gpu_type>.+)x(?P<num_gpu>\d+)$")
+
+
+def gpu_dir_sort_value(value):
+    """Map a "<gpu_type>x<num_gpu>" value to a zero-padded string that sorts by
+    gpu_type (per GPU_TYPE_ORDER) then num_gpu. A string key (rather than a tuple)
+    keeps it robust under pandas' object-dtype sorting."""
+    m = GPU_DIR_RE.match(str(value))
+    if not m:
+        return f"{len(GPU_TYPE_ORDER) + 1:03d}|{value}"
+    gpu_type = m.group("gpu_type")
+    num_gpu = int(m.group("num_gpu"))
+    rank = (GPU_TYPE_ORDER.index(gpu_type)
+            if gpu_type in GPU_TYPE_ORDER else len(GPU_TYPE_ORDER))
+    return f"{rank:03d}|{num_gpu:04d}|{gpu_type}"
+
+
+def descriptor_sort_key(col):
+    """Key for DataFrame.sort_values: apply the custom gpu ordering to the
+    "gpu_type x num_gpu" column and leave every other sort column unchanged.
+    sort_values applies this to each `by` column independently, and the Series
+    carries its column name so the gpu column can be singled out."""
+    if col.name == "gpu_type x num_gpu":
+        return col.map(gpu_dir_sort_value)
+    return col
+
+
 def arrange_combined(df):
     """Order columns and sort rows for the combined all_metrics.csv.
 
@@ -205,8 +259,46 @@ def arrange_combined(df):
 
     df = df[leading + other_meta + rest]
     if leading:
-        df = df.sort_values(by=leading, kind="stable", ignore_index=True)
+        df = df.sort_values(by=leading, kind="stable", key=descriptor_sort_key,
+                            ignore_index=True)
     return df
+
+
+# Metadata columns (all produced by parse_run_path) that together uniquely
+# identify a single run, used to join metrics from sibling files (e.g. sparsity)
+# onto the metrics rows.
+RUN_KEY_COLS = ["platform", "inference_engine", "model", "dataset", "num_samples",
+                "gpu_type x num_gpu", "batch_size", "input_length", "output_length",
+                "run_timestamp"]
+
+
+def merge_run_metrics(left, right, value_cols):
+    """Left-join the given `value_cols` from `right` onto `left`, matching rows by
+    run identity (RUN_KEY_COLS).
+
+    Both frames carry the same parse_run_path metadata, so a single "|"-joined
+    string key is built from RUN_KEY_COLS on each side. Each column is cast to the
+    nullable string dtype and its missing entries filled with a sentinel before
+    concatenation: absent values (e.g. input/output lengths) then compare equal
+    across the two frames instead of poisoning the whole key to NA (under pandas'
+    StringDtype, NA + str == NA), which would otherwise collapse every key and
+    cause a cross-join. Only `value_cols` actually present in `right` are pulled
+    across; any missing ones stay absent and are reported by find_metric_column.
+    """
+    def run_key(df):
+        parts = [df[col].astype("string").fillna("\x00") for col in RUN_KEY_COLS]
+        key = parts[0]
+        for part in parts[1:]:
+            key = key + "|" + part
+        return key
+
+    present = [c for c in value_cols if c in right.columns]
+    left = left.copy()
+    left["_run_key"] = run_key(left)
+    right_subset = right[present].copy()
+    right_subset["_run_key"] = run_key(right)
+    merged = left.merge(right_subset, on="_run_key", how="left")
+    return merged.drop(columns="_run_key")
 
 
 CORE_DESCRIPTOR_COLS = ["platform", "gpu_type x num_gpu", "batch_size", "inference_engine"]
@@ -287,7 +379,7 @@ def write_metric_per_permutation_csvs(df, output_dir, value_specs,
 
         if descriptor_cols:
             table = table.sort_values(by=descriptor_cols, kind="stable",
-                                      ignore_index=True)
+                                      key=descriptor_sort_key, ignore_index=True)
 
         if filename_fn is not None:
             stem = filename_fn(key_values)
@@ -317,20 +409,47 @@ def write_accuracy_per_permutation_csvs(df, output_dir):
     )
 
 
+# Sparsity metrics appended to the performance CSVs, as (output_label,
+# source_column) in display order. Source columns are the full json_normalize
+# paths into each run's sparsity file -- the full path is required because S_MBU
+# and S_MFU each occur under both "prefill" and "decode", so the bare-name
+# fallback in find_metric_column would be ambiguous. These are merged onto the
+# metrics rows by run identity before the performance CSVs are written (see
+# merge_run_metrics).
+SPARSITY_VALUE_SPECS = [
+    ("prefill_avg_expert_activation", "sparsity.activation.avg_expert_activation_prefill"),
+    ("decode_avg_expert_activation",  "sparsity.activation.avg_expert_activation_decode"),
+    ("prefill_tokens_per_s",          "sparsity.prefill.prefill_tokens_per_s"),
+    ("decode_output_tokens_per_s",    "sparsity.decode.output_tokens_per_s"),
+    ("prefill_S_MBU",                 "sparsity.prefill.S_MBU"),
+    ("decode_S_MBU",                  "sparsity.decode.S_MBU"),
+    ("prefill_S_MFU",                 "sparsity.prefill.S_MFU"),
+    ("decode_S_MFU",                  "sparsity.decode.S_MFU"),
+]
+
+# Latency metrics that lead the performance CSVs, as (output_label, source_column)
+# in display order, followed by the merged sparsity metrics.
+PERFORMANCE_VALUE_SPECS = [
+    ("e2e_s", "e2e_s"),
+    ("ttft", "ttft"),
+    ("tpot", "tpot"),
+] + SPARSITY_VALUE_SPECS
+
+
 def write_performance_per_permutation_csvs(df, output_dir):
     """Per (model, dataset, batch_size) CSVs whose final columns are the
-    performance metrics, each truncated to a fixed PERF_DECIMALS decimal places:
-    end-to-end latency ("e2e_s"), time to first token ("ttft") and time per
-    output token ("tpot"). Files are bucketed into a "batch-size-<n>"
-    subdirectory per batch size, so batch_size appears in neither the columns
-    nor the filename."""
-    fmt = trunc_fixed(PERF_DECIMALS)
+    performance metrics in PERFORMANCE_VALUE_SPECS order: end-to-end latency
+    ("e2e_s"), time to first token ("ttft"), time per output token ("tpot"), then
+    the sparsity metrics (present when sparsity data has been merged onto df;
+    otherwise written as NaN). Each column is truncated/formatted to its own fixed
+    number of decimals from PERF_DECIMALS (falling back to PERF_DECIMALS_DEFAULT).
+    Files are bucketed into a "batch-size-<n>" subdirectory per batch size, so
+    batch_size appears in neither the columns nor the filename."""
     return write_metric_per_permutation_csvs(
         df, output_dir,
         value_specs=[
-            ("e2e_s", "e2e_s", fmt),
-            ("ttft", "ttft", fmt),
-            ("tpot", "tpot", fmt),
+            (label, src, trunc_fixed(PERF_DECIMALS.get(label, PERF_DECIMALS_DEFAULT)))
+            for label, src in PERFORMANCE_VALUE_SPECS
         ],
         group_cols=("model", "dataset", "batch_size"),
         descriptor_order=PERFORMANCE_DESCRIPTOR_ORDER,
@@ -382,8 +501,19 @@ def main(results_dir, output_dir):
 
     performance_per_permutation_dir = pathlib.Path(output_dir) / "performance/by_model_dataset"
 
+    # Sparsity metrics live in separate sibling files ("sparsity.json" or
+    # "sparsity_<dataset>_<ts>.json"), present only for a subset of runs, so they
+    # are collected in their own pass and joined onto the metrics rows by run
+    # identity. Absent (e.g. for the agentic runs) the performance CSVs are still
+    # written, with the sparsity columns left blank.
+    performance_df = df
+    sparsity_df = get_results(results_dir, pattern="sparsity*.json", required=False)
+    if sparsity_df is not None:
+        performance_df = merge_run_metrics(
+            df, sparsity_df, [src for _, src in SPARSITY_VALUE_SPECS])
+
     print(f"Writing performance per model-dataset CSVs to {performance_per_permutation_dir} ...")
-    write_performance_per_permutation_csvs(df, performance_per_permutation_dir)
+    write_performance_per_permutation_csvs(performance_df, performance_per_permutation_dir)
 
     # Cost lives in separate cost files ("cost.json" or "cost_<dataset>_<ts>.json"),
     # present only for a subset of runs, so it is collected in its own pass and is
