@@ -16,3 +16,9 @@ Alternatively, allow an inclusive CSV within the container but only run those be
 2. This generates a bash script or scripts containing the required commands to reserve the requested resource on Vast.ai. Likely multiple scripts, separated by hardware and inference engine (since we need to ask Vast.ai to reserve given instances running given images). They will include the tokenised CSV file and the ability to retrieve and pass through as environment variables any secrets.
 3. Run the bash script to submit a 'job' to Vast.ai. Needs to be some decision-making about how to determine whether to reserve a given hardware option (given price in particular).
 4. The container will go through the entrypoint script, running all the benchmarks for this GPU/inference engine combination, pushing to GitHub as it goes.
+
+## Further work
+
+Currently, the entrypoint scripts living inside the container are decoupled from the EIDF pipeline, in particular the config.yaml options. This means any changes made to one pipeline (EIDF/VAST) need to be manually ported to the other. It's also rather ad hoc at the moment; doing something more programmatic would be much preferred.
+
+This isn't ideal. Longer term, it may be a good idea to turn container entrypoint scripts into templates to be modified much in the same way as the EIDF YAMLs with the correct option sets for different benchmarks.
