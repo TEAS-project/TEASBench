@@ -18,8 +18,7 @@ agents:
     seed: 42
 
 judge:
-  name: google/gemini-3.1-flash-lite-preview
+  name: gemini-3.1-flash-lite
   base_url: https://generativelanguage.googleapis.com/v1beta/openai
   api_key: ${GEMINI_API_KEY}
 
-output_dir: results/imo_gptoss120b_vllm

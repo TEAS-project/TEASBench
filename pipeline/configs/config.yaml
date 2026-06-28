@@ -349,10 +349,10 @@ variables_defaults:
     # agent_cap.agents --config path (engine-specific config files)
     agents_config_file_sglang:
       flag: "--config"
-      value: "/dev/shm/AgentCAP/configs/agents_imo_gptoss120b_sglang.yaml"
+      value: "/dev/shm/TEASBench/pipeline/configs/agents/imo_gptoss_sglang.yaml"
     agents_config_file_vllm:
       flag: "--config"
-      value: "/dev/shm/AgentCAP/configs/agents_imo_gptoss120b_vllm.yaml"
+      value: "/dev/shm/TEASBench/pipeline/configs/agents/imo_gptoss_vllm.yaml"
     output_dir:
       flag: "--output-dir"
       value: "$OUTPUT_ROOT"
@@ -374,15 +374,11 @@ variables_defaults:
         - num_tasks
         - output_dir
 
-  # AgentCAP image + checkout coordinates for the agentic family. Centralised
-  # here so they are no longer baked into the job YAML. Pin agentcap_ref to a
-  # commit/tag (not a moving branch) for reproducibility; recommend moving the
-  # image + repo to project-owned (Auto-CAP) infrastructure.
   agentcap_image:
     sglang:
       value: "ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312"
     vllm:
-      value: "ghcr.io/yufan196884/imo-answerbench-env:latest"   # TODO: pin to a digest/tag
+      value: "ghcr.io/yufan196884/imo-answerbench-env:latest"  
 
   # Per-engine environment-setup script (inlined into the job at generation time).
   # sglang needs a torch/torchvision repair; vllm only needs a sanity import check.
@@ -393,9 +389,6 @@ variables_defaults:
       value: "scripts/setup_vllm_env.sh"
   agentcap_repo:
     value: "github.com/Auto-CAP/AgentCAP.git"
-  agentcap_ref:
-    value: "yufan/single-agent-vllm-bench"
-
 
   # Other variables needed to make up substitutions for template.yaml
   

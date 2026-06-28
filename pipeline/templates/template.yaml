@@ -27,7 +27,7 @@ spec:
             value: /mnt/input/hf_cache
           - name: TEAS_OUTPUT_DIR
             value: /mnt/develop/outputs
-          - name: GIT_TOKEN
+          - name: GITHUB_TOKEN
             valueFrom:
               secretKeyRef:
                 name: teas-develop-results-private-ap
@@ -160,8 +160,8 @@ spec:
             jq -n --arg job_duration $job_duration '{job: $job_duration}'  >> $RUN_OUTPUT_DIR/timings.json
 
             # Pull to refresh before committing and pushing
-            GIT_TOKEN="${GIT_TOKEN%$'\n'}"   # remove trailing newline that causes issues
-            git pull "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+            GITHUB_TOKEN="${GITHUB_TOKEN%$'\n'}"   # remove trailing newline that causes issues
+            git pull "https://oauth2:${GITHUB_TOKEN}@github.com/TEAS-project/@results_repo@.git"
             
             # Commit data to results repository
             git config user.email "autopush@eidf"
@@ -169,7 +169,7 @@ spec:
             
             git add metrics*.json metadata*.json *.yaml timings.json
             git commit -m "auto: @name_k8s@"
-            git push "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+            git push "https://oauth2:${GITHUB_TOKEN}@github.com/TEAS-project/@results_repo@.git"
 
             echo "Finalising container"
         ports:

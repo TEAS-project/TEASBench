@@ -47,20 +47,20 @@ spec:
             value: /mnt/develop/outputs
 
           # --- Secrets -----------------------------------------------------
-          - name: GITHUB_TOKEN
-            valueFrom:
-              secretKeyRef:
-                name: yufan-github-pat
-                key: GITHUB_TOKEN
           - name: GEMINI_API_KEY
             valueFrom:
               secretKeyRef:
-                name: gemini-api
+                name: gemini-api-key
                 key: GEMINI_API_KEY
-          - name: GIT_TOKEN
+          - name: GITHUB_RESULTS_TOKEN
             valueFrom:
               secretKeyRef:
                 name: teas-develop-results-private-ap
+                key: token
+          - name: TEASBENCH_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: teasbench-pat
                 key: token
         command: ["/bin/bash", "-c"]
         args:
@@ -78,20 +78,25 @@ spec:
             mkdir -p /mnt/input/hf_cache \
                      /mnt/input/pip_cache
 
-            ###############################
-            # Check out AgentCAP (pinned) #
-            ###############################
+            ###################################
+            # Check out AgentCAP and TEASBench #
+            ###################################
             env_start_time=$(date +%s)
             cd /dev/shm
-            GITHUB_TOKEN="${GITHUB_TOKEN%$'\n'}"
+            GITHUB_AGENTCAP_TOKEN="${GITHUB_AGENTCAP_TOKEN%$'\n'}"
 
             rm -rf AgentCAP
-            git clone "https://x-access-token:${GITHUB_TOKEN}@@agentcap_repo@" /dev/shm/AgentCAP
+            git clone "https://@@agentcap_repo@" /dev/shm/AgentCAP
             cd AgentCAP
-            git checkout "@agentcap_ref@"
             git remote set-url origin "https://@agentcap_repo@"
             AGENTCAP_COMMIT=$(git rev-parse --short HEAD)
-            echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
+            echo "AgentCAP main at (commit $AGENTCAP_COMMIT)"
+
+            TEASBENCH_TOKEN="${TEASBENCH_TOKEN%$'\n'}"
+            rm -rf /dev/shm/TEASBench
+            git clone "https://x-access-token:${TEASBENCH_TOKEN}@github.com/TEAS-project/TEASBench.git" /dev/shm/TEASBench
+            git -C /dev/shm/TEASBench checkout @teasbench_commit@
+            echo "TEASBench at commit @teasbench_commit@"
 
             which python
             python -V
@@ -139,7 +144,7 @@ spec:
             # Run agent_cap.agents   #
             ##########################
             cd $RUN_DIR
-            export OUTPUT_ROOT=$RUN_DIR/agent_results
+            export OUTPUT_ROOT=$RUN_DIR/agentic
             mkdir -p $OUTPUT_ROOT
 
             client_start_time=$(date +%s)
@@ -200,13 +205,13 @@ spec:
             #########################
             # Push to results repo  #
             #########################
-            GIT_TOKEN="${GIT_TOKEN%$'\n'}"
-            git pull "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git" || true
+            GITHUB_RESULTS_TOKEN="${GITHUB_RESULTS_TOKEN%$'\n'}"
+            git pull "https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git" || true
             git config user.email "autopush@eidf"
             git config user.name "Pipeline Autopush"
             git add results.jsonl output-data.jsonl provenance.json *.yaml timings.json
             git commit -m "auto: @name_k8s@"
-            git push "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+            git push "https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git"
 
             echo "Finalising container"
             exit $CLIENT_SUCCESS
