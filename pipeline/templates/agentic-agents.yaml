@@ -86,7 +86,7 @@ spec:
             GITHUB_AGENTCAP_TOKEN="${GITHUB_AGENTCAP_TOKEN%$'\n'}"
 
             rm -rf AgentCAP
-            git clone "https://@@agentcap_repo@" /dev/shm/AgentCAP
+            git clone "https://@agentcap_repo@" /dev/shm/AgentCAP
             git -C /dev/shm/AgentCAP checkout @agentcap_ref@
             AGENTCAP_COMMIT=$(git -C /dev/shm/AgentCAP rev-parse --short HEAD)
             echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"

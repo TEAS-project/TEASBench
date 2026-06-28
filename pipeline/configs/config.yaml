@@ -133,9 +133,7 @@ variables_defaults:
   # sglang path: the pipeline launches SGLang as a separate background server
   # (agentic_server_command) and then runs agent_cap.agents --config
   # (agentic_command.sglang). The config file is versioned in TEASBench at
-  # pipeline/configs/agents/imo_gptoss_sglang.yaml and committed into AgentCAP
-  # at configs/agents_imo_gptoss120b_sglang.yaml so it is available inside the
-  # container at /dev/shm/AgentCAP/configs/agents_imo_gptoss120b_sglang.yaml.
+  # pipeline/configs/agents/imo_gptoss_sglang.yaml
   #
   # Both sglang and vllm now use agent_cap.agents with a separate server process.
   # agentic_server_flags contains entries for both engines; each engine's
@@ -388,7 +386,7 @@ variables_defaults:
     vllm:
       value: "scripts/setup_vllm_env.sh"
   agentcap_repo:
-    value: "github.com/Auto-CAP/AgentCAP.git"
+    value: "github.com/aproeme/AgentCAP.git"
   agentcap_ref:
     value: "arno/gemini-judge-endpoint"
 
