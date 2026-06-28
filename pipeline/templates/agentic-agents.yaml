@@ -1,0 +1,246 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: @name_k8s@-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+spec:
+  completions: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 2000
+      containers:
+      - name: @inference_engine@-agentic
+        image: @image_name@
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: k8s_job_name
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['job-name']
+          - name: k8s_node_name
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+
+          - name: HF_HOME
+            value: /mnt/input/hf_cache
+          - name: PIP_CACHE_DIR
+            value: /mnt/input/pip_cache
+          - name: PYTORCH_NVML_BASED_MEMORY_STATS
+            value: "0"
+
+          # Runner metadata / behaviour
+          - name: INFERENCE_ENGINE
+            value: @inference_engine@
+          - name: IS_LOCAL
+            value: "true"
+          - name: MODEL_NAME_FOR_METADATA
+            value: @model@
+
+          # Where the results push happens
+          - name: TEAS_OUTPUT_DIR
+            value: /mnt/develop/outputs
+
+          # --- Secrets -----------------------------------------------------
+          - name: GITHUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: yufan-github-pat
+                key: GITHUB_TOKEN
+          - name: GEMINI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: gemini-api
+                key: GEMINI_API_KEY
+          - name: GIT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: teas-develop-results-private-ap
+                key: token
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            job_start_time=$(date +%s)
+
+            timestamp=$( date +%Y%m%d-%H%M )
+            RUN_DIR=/dev/shm/$timestamp
+            mkdir -p $RUN_DIR
+            exec &> $RUN_DIR/stdout_stderr.log
+
+            echo "Running on node $k8s_node_name"
+
+            mkdir -p /mnt/input/hf_cache \
+                     /mnt/input/pip_cache
+
+            ###############################
+            # Check out AgentCAP (pinned) #
+            ###############################
+            env_start_time=$(date +%s)
+            cd /dev/shm
+            GITHUB_TOKEN="${GITHUB_TOKEN%$'\n'}"
+
+            rm -rf AgentCAP
+            git clone "https://x-access-token:${GITHUB_TOKEN}@@agentcap_repo@" /dev/shm/AgentCAP
+            cd AgentCAP
+            git checkout "@agentcap_ref@"
+            git remote set-url origin "https://@agentcap_repo@"
+            AGENTCAP_COMMIT=$(git rev-parse --short HEAD)
+            echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
+
+            which python
+            python -V
+
+            # Repair torch/torchvision (inlined from pipeline/scripts/setup_sglang_env.sh)
+            @agentic_env_setup@
+
+            env_end_time=$(date +%s)
+            env_duration=$((env_end_time - env_start_time))
+            echo "Environment setup took $env_duration seconds"
+            jq -n --arg env_duration $env_duration '{environment_setup: $env_duration}' >> $RUN_DIR/timings.json
+
+            ###############################
+            # Start SGLang server         #
+            ###############################
+            cd /dev/shm/AgentCAP
+            echo "Starting SGLang server..."
+            (
+              @agentic_server_command@
+            ) > /tmp/inference_server.log 2>&1 &
+            SERVER_PID=$!
+
+            echo "Waiting for SGLang server (PID $SERVER_PID)..."
+            server_ready=0
+            for i in $(seq 1 3600); do
+              if ! kill -0 $SERVER_PID 2>/dev/null; then
+                echo "SGLang server died unexpectedly. Logs:" >&2
+                cat /tmp/inference_server.log >&2
+                exit 1
+              fi
+              if curl -sf http://127.0.0.1:8000/v1/models > /dev/null 2>&1; then
+                echo "SGLang server ready after ${i}s"
+                server_ready=1
+                break
+              fi
+              sleep 1
+            done
+            if [ $server_ready -eq 0 ]; then
+              echo "SGLang server did not become ready within 3600s. Logs:" >&2
+              cat /tmp/inference_server.log >&2
+              exit 1
+            fi
+
+            ##########################
+            # Run agent_cap.agents   #
+            ##########################
+            cd $RUN_DIR
+            export OUTPUT_ROOT=$RUN_DIR/agent_results
+            mkdir -p $OUTPUT_ROOT
+
+            client_start_time=$(date +%s)
+            if @agentic_client_command@ ; then
+                echo "Benchmark run finished"
+                CLIENT_SUCCESS=0
+            else
+                echo "Benchmark run crashed"
+                CLIENT_SUCCESS=1
+            fi
+            client_end_time=$(date +%s)
+            client_duration=$((client_end_time - client_start_time))
+            echo "Client took $client_duration seconds"
+            jq -n --arg client_duration $client_duration '{client: $client_duration}' >> $RUN_DIR/timings.json
+
+            # Stop the server and collect its log
+            kill $SERVER_PID 2>/dev/null || true
+            wait $SERVER_PID 2>/dev/null || true
+            cp /tmp/inference_server.log $RUN_DIR/ 2>/dev/null || true
+
+            ##################
+            # Saving results #
+            ##################
+            if [ ! -f "$OUTPUT_ROOT/results.jsonl" ]; then
+                echo "[ERROR] No results.jsonl produced - nothing to save."
+                exit 1
+            fi
+
+            cd $RUN_DIR
+            cp "$OUTPUT_ROOT"/results.jsonl \
+               "$OUTPUT_ROOT"/output-data.jsonl . 2>/dev/null || true
+
+            # Copy data out to the PVC before any git operations
+            RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/$timestamp
+            mkdir -p $RUN_OUTPUT_DIR
+            cp -R $RUN_DIR/* $RUN_OUTPUT_DIR/
+            if [ -f /mnt/shared/job-configs/${k8s_job_name}.yaml ]; then
+                cp /mnt/shared/job-configs/${k8s_job_name}.yaml $RUN_OUTPUT_DIR/
+                rm /mnt/shared/job-configs/${k8s_job_name}.yaml
+            fi
+
+            exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
+            cd $RUN_OUTPUT_DIR
+            echo "Files copied to pvc at $RUN_OUTPUT_DIR"
+
+            job_end_time=$(date +%s)
+            job_duration=$((job_end_time - job_start_time))
+            jq -n --arg job_duration $job_duration '{job: $job_duration}' >> $RUN_OUTPUT_DIR/timings.json
+
+            # Write provenance (TEASBench + AgentCAP commits + timings)
+            jq -n \
+              --arg teasbench_commit "@teasbench_commit@" \
+              --arg agentcap_commit "$AGENTCAP_COMMIT" \
+              --slurpfile timings $RUN_OUTPUT_DIR/timings.json \
+              '{teasbench_commit: $teasbench_commit, agentcap_commit: $agentcap_commit, timings: ($timings | add)}' \
+              > $RUN_OUTPUT_DIR/provenance.json
+
+            #########################
+            # Push to results repo  #
+            #########################
+            GIT_TOKEN="${GIT_TOKEN%$'\n'}"
+            git pull "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git" || true
+            git config user.email "autopush@eidf"
+            git config user.name "Pipeline Autopush"
+            git add results.jsonl output-data.jsonl provenance.json *.yaml timings.json
+            git commit -m "auto: @name_k8s@"
+            git push "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+
+            echo "Finalising container"
+            exit $CLIENT_SUCCESS
+        resources:
+          requests:
+            cpu: "8"
+            memory: "64Gi"
+            nvidia.com/gpu: @num_gpu@
+          limits:
+            cpu: "8"
+            memory: "64Gi"
+            nvidia.com/gpu: @num_gpu@
+        volumeMounts:
+          - mountPath: /mnt/develop
+            name: develop
+          - mountPath: /mnt/input
+            name: inputs
+          - mountPath: /dev/shm
+            name: dshm
+          - mountPath: /mnt/shared
+            name: shared
+      volumes:
+        - name: inputs
+          persistentVolumeClaim:
+            claimName: inputs-pvc
+        - name: develop
+          persistentVolumeClaim:
+            claimName: develop-pvc
+        - name: shared
+          persistentVolumeClaim:
+            claimName: eidf230shared
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      nodeSelector:
+        nvidia.com/gpu.product: @gpu_product@

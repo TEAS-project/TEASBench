@@ -1,0 +1,5 @@
+benchmark,inference_engine,model,gpu,num_gpu,num_tasks
+imo-answerbench,sglang,gpt-oss-120b,A100,2,25
+imo-answerbench,sglang,gpt-oss-120b,H100,2,25
+imo-answerbench,vllm,gpt-oss-120b,A100,2,25
+imo-answerbench,vllm,gpt-oss-120b,H100,2,25

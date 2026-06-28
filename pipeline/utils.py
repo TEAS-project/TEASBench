@@ -41,7 +41,34 @@ EIDF_GPU_MAP={
     "H200":"NVIDIA-H200"
 }
 
+# Root under which models are staged on the cluster PVC. Combined with
+# HF_MODEL_MAP this yields the local --model-path the agentic runner expects,
+# e.g. gpt-oss-120b -> /llm-cache-pvc/models/unsloth/gpt-oss-120b
+MODELS_ROOT = "/llm-cache-pvc/models"
+
+# Benchmarks that run as a single all-in-one agentic command (the runner manages
+# its own inference server) rather than the MoE server+client split.
+AGENTIC_BENCHMARKS = {"imo-answerbench"}
+
+
+def benchmark_family(p: dict):
+    """Return the pipeline family ('agentic' or 'moe') for an experiment row.
+
+    MoE experiment CSVs predate the 'benchmark' column, so a missing/empty
+    benchmark defaults to 'moe' and the existing MoE behaviour is preserved.
+    """
+    return "agentic" if p.get("benchmark") in AGENTIC_BENCHMARKS else "moe"
+
+
+def local_model_path(model: str):
+    return f"{MODELS_ROOT}/{HF_MODEL_MAP[model]}"
+
+
 def get_run_name(p: dict):
+    if benchmark_family(p) == "agentic":
+        return (f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}"
+                f"_{p['benchmark']}_nt{p['num_tasks']}_{p['gpu']}x{p['num_gpu']}")
+
     name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
 
     if p['batch_size'] == "default":
@@ -58,6 +85,10 @@ def k8s_friendlify(unfriendly_string):
     return unfriendly_string.replace("_", "-").lower()
 
 def results_repo_dir(p: dict):
+    if benchmark_family(p) == "agentic":
+        return (f"agentic/eidf/{p['inference_engine']}/{p['model'].lower()}"
+                f"/{p['benchmark']}_{p['num_tasks']}tasks/{p['gpu'].lower()}x{p['num_gpu']}")
+
     dir = f"moe/eidf/{p['inference_engine']}/{p['model'].lower()}/{p['dataset']}_{p['num_samples']}samples/{p['gpu'].lower()}x{p['num_gpu']}"
     if p['batch_size'] == "default":
         dir += f"/batch-size-default"
@@ -67,7 +98,7 @@ def results_repo_dir(p: dict):
         dir += f"_input{p['input_length']}"
     if p['output_length'] != None:
         dir += f"_output{p['output_length']}"
-    
+
     return dir
 
 

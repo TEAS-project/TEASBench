@@ -4,7 +4,7 @@ import yaml
 import os
 import re
 import subprocess
-from utils import get_run_name, k8s_friendlify, results_repo_dir
+from utils import get_run_name, k8s_friendlify, results_repo_dir, benchmark_family
 
 DEFINED_SENTINEL = "<defined>"
 
@@ -124,14 +124,27 @@ class Template:
 
     
     def build_command(self, cmd_type, config, parameters, matching_rules):
-        """Generalized command builder for both server and client."""
+        """Generalized command builder for server, client and agentic commands.
+
+        'server' and 'agentic' are engine-keyed (sglang/vllm); 'client' is
+        engine-agnostic. 'agentic_server' builds the standalone SGLang server
+        command used by the new sglang agent_cap.agents path.
+        """
         engine = parameters.get('inference_engine')
-        
-        # Handle server vs client config paths
+
+        # Handle server vs client vs agentic config paths
         if cmd_type == "server":
             flags_def = config["variables_defaults"]["server_flags"][engine]
             cmd_cfg = config["variables_defaults"]["server_command"][engine]
             rule_key = "server_flags"
+        elif cmd_type == "agentic_server":
+            flags_def = config["variables_defaults"]["agentic_server_flags"]
+            cmd_cfg = config["variables_defaults"]["agentic_server_command"][engine]
+            rule_key = "agentic_server_flags"
+        elif cmd_type == "agentic":
+            flags_def = config["variables_defaults"]["agentic_flags"]
+            cmd_cfg = config["variables_defaults"]["agentic_command"][engine]
+            rule_key = "agentic_flags"
         else:
             flags_def = config["variables_defaults"]["client_flags"]
             cmd_cfg = config["variables_defaults"]["client_command"]
@@ -158,50 +171,95 @@ class Template:
         return cmd.strip(" \\\n")
 
     
-    def get(self, parameters: dict, results_repo: str):
-        with open("configs/config.yaml", "r") as f:
-            config = yaml.safe_load(f)
-
-        rules = config.get("rules", [])
-        matching_rules = self.get_matching_rules(rules, parameters)
-        engine = parameters.get('inference_engine')
-
-        # Resolve complex commands
+    def _moe(self, config, parameters, matching_rules):
+        """MoE family: server+client split, engine-keyed image."""
         server_cmd = self.build_command("server", config, parameters, matching_rules)
         client_cmd = self.build_command("client", config, parameters, matching_rules)
 
-        # Resolve static variables
         extra_env = self.resolve_generic_variable("extra_container_env", config, matching_rules, parameters)
         arena_dl = self.resolve_generic_variable("download_arena_hard_baseline_answers", config, matching_rules, parameters)
-        
+
         # Construct Image Name: base + version + variant
         img_cfg = self.resolve_generic_variable("image", config, matching_rules, parameters)
         img_version = self.resolve_generic_variable("inference_engine_version", config, matching_rules, parameters)
         cuda_variant = img_cfg.get("cuda_variant", "") if isinstance(img_cfg, dict) else ""
         image_name = f"{img_cfg['base']}:v{img_version}{cuda_variant if cuda_variant else ''}"
 
-        teasbench_commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
-        
-        # Prepare replacements for substitution in template.yaml
-        replacements={
-            "@name_k8s@": k8s_friendlify(get_run_name(parameters)),
-            "@inference_engine@": parameters.get('inference_engine'),
+        replacements = {
             "@image_name@": image_name,
             "@extra_container_env@": extra_env,
             "@download_arena_hard_baseline_answers@": arena_dl,
             "@server_start_command@": server_cmd,
             "@client_run_command@": client_cmd,
             "@hf_model_path@": parameters.get("hf_model_path"),
+        }
+        return "templates/template.yaml", replacements
+
+    def _agentic(self, config, parameters, matching_rules):
+        """Agentic family: separate server process + agent_cap.agents for all engines."""
+        return self._agentic_agents(config, parameters, matching_rules)
+
+    def _agentic_agents(self, config, parameters, matching_rules):
+        """sglang agentic path: standalone SGLang server + agent_cap.agents.
+
+        Builds two commands:
+          @agentic_server_command@  -- sglang.launch_server invocation
+          @agentic_client_command@  -- python -m agent_cap.agents --config ...
+        and routes to the agentic-agents.yaml template which starts the server
+        in the background, waits for readiness, then runs the client.
+        """
+        server_cmd = self.build_command("agentic_server", config, parameters, matching_rules)
+        client_cmd = self.build_command("agentic", config, parameters, matching_rules)
+
+        image_name = self.resolve_generic_variable("agentcap_image", config, matching_rules, parameters)
+        agentcap_repo = self.resolve_generic_variable("agentcap_repo", config, matching_rules, parameters)
+        agentcap_ref = self.resolve_generic_variable("agentcap_ref", config, matching_rules, parameters)
+
+        env_setup_path = self.resolve_generic_variable("agentic_env_setup_script", config, matching_rules, parameters)
+        with open(env_setup_path, "r") as f:
+            env_setup = f.read().strip()
+
+        replacements = {
+            "@image_name@": image_name,
+            "@agentic_server_command@": server_cmd,
+            "@agentic_client_command@": client_cmd,
+            "@agentic_env_setup@": env_setup,
+            "@agentcap_repo@": agentcap_repo,
+            "@agentcap_ref@": agentcap_ref,
+            "@model@": parameters.get("model"),
+            "@hf_model_path@": parameters.get("hf_model_path"),
+        }
+        return "templates/agentic-agents.yaml", replacements
+
+    def get(self, parameters: dict, results_repo: str):
+        with open("configs/config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+
+        rules = config.get("rules", [])
+        matching_rules = self.get_matching_rules(rules, parameters)
+
+        teasbench_commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+
+        # Substitutions common to every family
+        replacements = {
+            "@name_k8s@": k8s_friendlify(get_run_name(parameters)),
+            "@inference_engine@": parameters.get('inference_engine'),
             "@num_gpu@": str(parameters.get("num_gpu")),
             "@gpu_product@": str(parameters.get("gpu_product")),
             "@results_repo@": results_repo,
             "@output_repo_dir@": results_repo_dir(parameters),
-            "@teasbench_commit@": teasbench_commit
+            "@teasbench_commit@": teasbench_commit,
         }
 
+        if benchmark_family(parameters) == "agentic":
+            template_path, family_replacements = self._agentic(
+                config, parameters, matching_rules)
+        else:
+            template_path, family_replacements = self._moe(
+                config, parameters, matching_rules)
+        replacements.update(family_replacements)
 
         # Load the job template
-        template_path = os.path.join("templates/template.yaml")
         with open(template_path, "r") as f:
             template = f.read()
 

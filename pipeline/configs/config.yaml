@@ -112,7 +112,7 @@ variables_defaults:
         - expert_recording
         - tensor_parallel_size
 
-  # Base settings 
+  # Base settings
   client_command:
     base_command: "python3 -m moe_cap.runner.openai_api_profile"
     flags:
@@ -125,6 +125,276 @@ variables_defaults:
       - output_dir
       - input_length
       - output_length
+
+
+  ###################
+  # AGENTIC FAMILY  #
+  ###################
+  # sglang path: the pipeline launches SGLang as a separate background server
+  # (agentic_server_command) and then runs agent_cap.agents --config
+  # (agentic_command.sglang). The config file is versioned in TEASBench at
+  # pipeline/configs/agents/imo_gptoss_sglang.yaml and committed into AgentCAP
+  # at configs/agents_imo_gptoss120b_sglang.yaml so it is available inside the
+  # container at /dev/shm/AgentCAP/configs/agents_imo_gptoss120b_sglang.yaml.
+  #
+  # Both sglang and vllm now use agent_cap.agents with a separate server process.
+  # agentic_server_flags contains entries for both engines; each engine's
+  # agentic_server_command.flags list selects only the relevant ones.
+
+  agentic_server_flags:
+    # --- Shared ---
+    hf_model_path:
+      flag: "--model-path"       # sglang: --model-path <hf_id>
+    model_id:
+      flag: "--model"
+      from_parameter: hf_model_path   # vllm: --model <hf_id>
+    host:
+      flag: "--host"
+      value: "127.0.0.1"
+    port:
+      flag: "--port"
+      value: "8000"
+    served_model_name:
+      flag: "--served-model-name"
+      value: "gpt-oss"
+    tensor_parallel_size:
+      flag: "--tensor-parallel-size"
+    trust_remote_code:
+      flag: "--trust-remote-code"
+      value: true
+    dtype:
+      flag: "--dtype"
+      value: "auto"
+    kv_cache_dtype:
+      flag: "--kv-cache-dtype"
+      # value supplied per-GPU by rules below (A100 -> auto, H100/H200 -> fp8_e4m3)
+    # --- SGLang-specific ---
+    log_level:
+      flag: "--log-level"
+      value: "warning"
+    context_length:
+      flag: "--context-length"
+      value: "131072"
+    mem_fraction_static:
+      flag: "--mem-fraction-static"
+      value: "0.85"
+    random_seed:
+      flag: "--random-seed"
+      value: "42"
+    chunked_prefill_size:
+      flag: "--chunked-prefill-size"
+      value: "16384"
+    cuda_graph_max_bs:
+      flag: "--cuda-graph-max-bs"
+      value: "8"
+    allow_auto_truncate:
+      flag: "--allow-auto-truncate"
+      value: true
+    # --- vllm-specific ---
+    seed:
+      flag: "--seed"
+      value: "42"
+    max_num_seqs:
+      flag: "--max-num-seqs"
+      value: "256"
+    gpu_memory_utilization:
+      flag: "--gpu-memory-utilization"
+      value: "0.85"
+    max_model_len:
+      flag: "--max-model-len"
+      value: "131072"
+    stream_interval:
+      flag: "--stream-interval"
+      value: "1"
+    tool_call_parser:
+      flag: "--tool-call-parser"
+      value: "openai"
+    async_scheduling:
+      flag: "--async-scheduling"
+      value: true
+    disable_log_stats:
+      flag: "--disable-log-stats"
+      value: true
+    enable_prefix_caching:
+      flag: "--enable-prefix-caching"
+      value: true
+
+  agentic_server_command:
+    sglang:
+      base_command: "TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 python -m sglang.launch_server"
+      flags:
+        - hf_model_path
+        - host
+        - port
+        - log_level
+        - served_model_name
+        - context_length
+        - mem_fraction_static
+        - tensor_parallel_size
+        - random_seed
+        - trust_remote_code
+        - dtype
+        - kv_cache_dtype
+        - chunked_prefill_size
+        - cuda_graph_max_bs
+        - allow_auto_truncate
+    vllm:
+      base_command: "python -m vllm.entrypoints.openai.api_server"
+      flags:
+        - model_id
+        - host
+        - port
+        - served_model_name
+        - tensor_parallel_size
+        - seed
+        - max_num_seqs
+        - gpu_memory_utilization
+        - max_model_len
+        - dtype
+        - kv_cache_dtype
+        - stream_interval
+        - tool_call_parser
+        - async_scheduling
+        - disable_log_stats
+        - enable_prefix_caching
+        - trust_remote_code
+
+  # Flags shared across agentic commands (sglang client + vllm all-in-one).
+  agentic_flags:
+    run_model:
+      flag: "--model"
+      value: "gpt-oss"
+    num_tasks:
+      flag: "--num-tasks"
+      value: "25"
+    seed:
+      flag: "--seed"
+      value: "42"
+    max_turns:
+      flag: "--max-turns"
+      value: "128"
+    max_tokens:
+      flag: "--max-tokens"
+      value: "131072"
+    temperature:
+      flag: "--temperature"
+      value: "1.0"
+    top_p:
+      flag: "--top-p"
+      value: "1.0"
+    startup_timeout:
+      flag: "--startup-timeout"
+      value: "30"
+    exec_timeout:
+      flag: "--exec-timeout"
+      value: "5"
+    preload:
+      flag: "--preload"
+      value: "minimal"
+    auto_print_last_expr:
+      flag: "--auto-print-last-expr"
+      value: true
+    port:
+      flag: "--port"
+      value: "8000"
+    host:
+      flag: "--host"
+      value: "127.0.0.1"
+    served_model_name:
+      flag: "--served-model-name"
+      value: "gpt-oss"
+    hf_model_path:
+      flag: "--model-path"
+    kv_cache_dtype:
+      flag: "--kv-cache-dtype"
+      # value supplied per-GPU by rules below (A100 -> auto, H100/H200 -> fp8_e4m3)
+    dtype:
+      flag: "--dtype"
+      value: "auto"
+    stream_interval:
+      flag: "--stream-interval"
+      value: "1"
+    context_tokens:
+      flag: "--context-tokens"
+      value: "131072"
+    gpu_memory_utilization:
+      flag: "--gpu-memory-utilization"
+      value: "0.85"
+    mem_fraction_static:        # sglang only
+      flag: "--mem-fraction-static"
+      value: "0.85"
+    run_batch_size:             # vllm only (--batch-size); not the MoE batch_size
+      flag: "--batch-size"
+      value: "256"
+    tensor_parallel_size:
+      flag: "--tensor-parallel-size"
+    server_timeout:
+      flag: "--server-timeout"
+      value: "3600"
+    preload_workers:
+      flag: "--preload-workers"
+      value: "8"
+    chunked_prefill_size:
+      flag: "--chunked-prefill-size"
+      value: "16384"
+    cuda_graph_max_bs:
+      flag: "--cuda-graph-max-bs"
+      value: "8"
+    log_level:
+      flag: "--log-level"
+      value: "warning"
+    judge_model:
+      flag: "--judge-model"
+      value: "google/gemini-3.1-flash-lite-preview"
+    # agent_cap.agents --config path (engine-specific config files)
+    agents_config_file_sglang:
+      flag: "--config"
+      value: "/dev/shm/AgentCAP/configs/agents_imo_gptoss120b_sglang.yaml"
+    agents_config_file_vllm:
+      flag: "--config"
+      value: "/dev/shm/AgentCAP/configs/agents_imo_gptoss120b_vllm.yaml"
+    output_dir:
+      flag: "--output-dir"
+      value: "$OUTPUT_ROOT"
+
+  # Both engines now use agent_cap.agents with a separate server process.
+  # Sampling params live in the per-engine config file; num_tasks and
+  # output_dir are the only per-row overrides passed on the CLI.
+  agentic_command:
+    sglang:
+      base_command: "python -m agent_cap.agents"
+      flags:
+        - agents_config_file_sglang
+        - num_tasks
+        - output_dir
+    vllm:
+      base_command: "python -m agent_cap.agents"
+      flags:
+        - agents_config_file_vllm
+        - num_tasks
+        - output_dir
+
+  # AgentCAP image + checkout coordinates for the agentic family. Centralised
+  # here so they are no longer baked into the job YAML. Pin agentcap_ref to a
+  # commit/tag (not a moving branch) for reproducibility; recommend moving the
+  # image + repo to project-owned (Auto-CAP) infrastructure.
+  agentcap_image:
+    sglang:
+      value: "ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312"
+    vllm:
+      value: "ghcr.io/yufan196884/imo-answerbench-env:latest"   # TODO: pin to a digest/tag
+
+  # Per-engine environment-setup script (inlined into the job at generation time).
+  # sglang needs a torch/torchvision repair; vllm only needs a sanity import check.
+  agentic_env_setup_script:
+    sglang:
+      value: "scripts/setup_sglang_env.sh"
+    vllm:
+      value: "scripts/setup_vllm_env.sh"
+  agentcap_repo:
+    value: "github.com/Auto-CAP/AgentCAP.git"
+  agentcap_ref:
+    value: "yufan/single-agent-vllm-bench"
 
 
   # Other variables needed to make up substitutions for template.yaml
@@ -239,6 +509,29 @@ rules:
         - "H200"
       image:
         cuda_variant: "-cu130"
+
+
+# Agentic: KV-cache dtype depends on GPU memory headroom.
+# A100 runs in full precision; H100/H200 quantise the KV cache to fp8.
+# Both sglang and vllm now run a separate server process, so the dtype
+# is always set in agentic_server_flags (never in agentic_flags).
+
+  - match:
+      benchmark:
+        - "imo-answerbench"
+      gpu:
+        - "A100"
+    agentic_server_flags:
+      kv_cache_dtype: "auto"
+
+  - match:
+      benchmark:
+        - "imo-answerbench"
+      gpu:
+        - "H100"
+        - "H200"
+    agentic_server_flags:
+      kv_cache_dtype: "fp8_e4m3"
 
 
 # Rules based on model and inference engine
