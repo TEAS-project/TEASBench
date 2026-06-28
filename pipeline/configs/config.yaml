@@ -389,6 +389,8 @@ variables_defaults:
       value: "scripts/setup_vllm_env.sh"
   agentcap_repo:
     value: "github.com/Auto-CAP/AgentCAP.git"
+  agentcap_ref:
+    value: "arno/gemini-judge-endpoint"
 
   # Other variables needed to make up substitutions for template.yaml
   

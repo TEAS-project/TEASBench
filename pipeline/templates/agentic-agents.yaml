@@ -51,7 +51,7 @@ spec:
             valueFrom:
               secretKeyRef:
                 name: gemini-api-key
-                key: GEMINI_API_KEY
+                key: key
           - name: GITHUB_RESULTS_TOKEN
             valueFrom:
               secretKeyRef:
@@ -87,10 +87,9 @@ spec:
 
             rm -rf AgentCAP
             git clone "https://@@agentcap_repo@" /dev/shm/AgentCAP
-            cd AgentCAP
-            git remote set-url origin "https://@agentcap_repo@"
-            AGENTCAP_COMMIT=$(git rev-parse --short HEAD)
-            echo "AgentCAP main at (commit $AGENTCAP_COMMIT)"
+            git -C /dev/shm/AgentCAP checkout @agentcap_ref@
+            AGENTCAP_COMMIT=$(git -C /dev/shm/AgentCAP rev-parse --short HEAD)
+            echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
 
             TEASBENCH_TOKEN="${TEASBENCH_TOKEN%$'\n'}"
             rm -rf /dev/shm/TEASBench
