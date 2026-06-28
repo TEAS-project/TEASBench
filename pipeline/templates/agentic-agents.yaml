@@ -83,8 +83,6 @@ spec:
             ###################################
             env_start_time=$(date +%s)
             cd /dev/shm
-            GITHUB_AGENTCAP_TOKEN="${GITHUB_AGENTCAP_TOKEN%$'\n'}"
-
             rm -rf AgentCAP
             git clone "https://@agentcap_repo@" /dev/shm/AgentCAP
             git -C /dev/shm/AgentCAP checkout @agentcap_ref@
