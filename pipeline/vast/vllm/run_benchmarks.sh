@@ -109,6 +109,40 @@ push_results() {
     # echo "Would be pushing to results repo here, but skipping for now."
 }
 
+# Build server extra arguments from the CSV row using our defined rules.
+# More rules can be added as needed (see config.yaml).
+build_server_extra_args() {
+    local row_name="$1"
+    declare -n r="$row_name"
+
+    server_extra_args=()
+
+    # Example rule: if batch_size is 1, limit sequences server-side
+    if [[ "${r[batch_size]}" == "1" ]]; then
+        server_extra_args=("--max_num_seqs" "1")
+    fi
+}
+
+# Build client extra arguments from the CSV row using our defined rules.
+# More rules can be added as needed (see config.yaml).
+build_client_extra_args() {
+    local row_name="$1"
+    declare -n r="$row_name"
+
+    client_extra_args=()
+
+    if [[ "${r[batch_size]}" != "default" ]]; then
+        client_extra_args+=(--server-batch-size "${r[batch_size]}")
+    fi
+
+    if [[ "${r[dataset]}" == "arena-hard" ]]; then
+        client_extra_args+=(--judge-api-url https://api.openai.com/v1/chat/completions)
+        client_extra_args+=(--judge-model openai/gpt-4.1)
+        client_extra_args+=(--judge-api-key "${OPENAI_API_KEY}")
+        client_extra_args+=(--baseline-answers-path "${BASE_DIR}/gpt-4-0613.jsonl")
+    fi
+}
+
 # Get MoE-CAP commit hash for reproducibility.
 cd /dev/shm/MoE-CAP
 MOE_CAP_COMMIT=$(git rev-parse --short HEAD)
@@ -188,15 +222,10 @@ while IFS=',' read -r -a VALUES; do
     mkdir -p "$RUN_DIR"
     cd "$RUN_DIR"
 
-    # Extra arguments for the server.
-    if [[ "${row[batch_size]}" == "1" ]]; then
-        server_extra_args=("--max_num_seqs" "1")
-    else
-        server_extra_args=()
-    fi
+    # Build server extra args from the CSV row (centralised rules)
+    build_server_extra_args row
 
-    echo "Starting server..."
-    echo "with extra arguments: ${server_extra_args[@]}"
+    echo "Starting server with extra arguments: ${server_extra_args[*]}"
     echo "${row[model]}"
     server_init_start_time=$(date +%s)
     python3 -m moe_cap.systems.vllm \
@@ -239,18 +268,9 @@ while IFS=',' read -r -a VALUES; do
             curl -L --output-dir "$BASE_DIR" -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl
         fi
 
-        # Determine the extra arguments to the client.
-        client_extra_args=()
-        if [[ "${row[batch_size]}" != "default" ]]; then
-            client_extra_args+=(--server-batch-size "${row[batch_size]}")
-        fi
-        if [[ "${row[dataset]}" == "arena-hard" ]]; then
-            client_extra_args+=(--judge-api-url https://api.openai.com/v1/chat/completions)
-            client_extra_args+=(--judge-model openai/gpt-4.1)
-            client_extra_args+=(--judge-api-key "$OPENAI_API_KEY")
-            client_extra_args+=(--baseline-answers-path "$BASE_DIR/gpt-4-0613.jsonl")
-        fi
-        echo "Benchmarking with extra arguments: ${client_extra_args[@]}"
+        # Determine the extra arguments to the client using the helper (array)
+        build_client_extra_args row
+        echo "Benchmarking with extra arguments: ${client_extra_args[*]}"
         run_benchmark "$RUN_DIR" "${row[model]}" "${row[dataset]}" "${row[num_samples]}" "${client_extra_args[@]}"
         RUN_SUCCESS=$?
 
