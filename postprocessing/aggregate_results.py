@@ -311,6 +311,9 @@ OPTIONAL_DESCRIPTOR_COLS = ["num_samples", "input_length", "output_length"]
 ACCURACY_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
 PERFORMANCE_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
 COST_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
+# Fixed-length CSVs omit batch_size (always "default") and lead with input_length
+# / output_length instead (handled separately by write_fixed_length_per_permutation_csvs).
+FIXED_LENGTH_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "platform"]
 
 
 def sanitize_filename_part(value):
@@ -397,6 +400,128 @@ def write_metric_per_permutation_csvs(df, output_dir, value_specs,
     return written
 
 
+def is_fixed_length(df):
+    """True for rows from fixed-length runs (batch-size-default_input<N>_output<N>),
+    i.e. rows where input_length or output_length is set. Standard runs (batch-size-N
+    or bare batch-size-default) have both as NA."""
+    return df["input_length"].notna() | df["output_length"].notna()
+
+
+def write_fixed_length_per_permutation_csvs(df_standard, df_fixed, output_dir,
+                                             value_specs, descriptor_order=None,
+                                             filename_fn=None):
+    """Write per-(model, dataset) CSVs for fixed-length runs.
+
+    Each CSV combines:
+      - every fixed-length run for that (model, dataset) from df_fixed
+        (batch-size-default_input<N>_output<N>, one row each)
+      - the standard batch-size-default rows from df_standard for the same
+        (model, dataset) (input_length and output_length are blank)
+
+    Column layout: input_length, output_length, then descriptor_order columns
+    (defaulting to FIXED_LENGTH_DESCRIPTOR_ORDER; batch_size is always "default"
+    for every row so it is omitted), then num_samples if present, then metrics.
+
+    Rows sort by (input_length, output_length) numerically with the standard rows
+    (blank input/output) first, then by the remaining descriptor columns.
+    """
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if descriptor_order is None:
+        descriptor_order = FIXED_LENGTH_DESCRIPTOR_ORDER
+
+    # Resolve value specs against the fixed-length frame's columns (both frames
+    # come from the same file types, so columns are the same).
+    resolved_specs = []
+    for out_name, source_metric, transform in value_specs:
+        src = find_metric_column(df_fixed.columns, source_metric)
+        if src is None:
+            print(f"Warning: metric '{source_metric}' not found; column "
+                  f"'{out_name}' will be NaN.")
+        resolved_specs.append((out_name, src, transform))
+
+    def fl_sort_key(col):
+        """Numeric sort for input/output length (None → -1, sorts first); GPU
+        ordering for gpu_type x num_gpu; natural sort for everything else."""
+        if col.name in ("input_length", "output_length"):
+            def to_int(v):
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return -1
+            return col.map(to_int)
+        return descriptor_sort_key(col)
+
+    written = []
+    for keys, fixed_group in df_fixed.groupby(["model", "dataset"], dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        model, dataset = keys
+
+        # Pull the standard batch-size-default rows for this (model, dataset),
+        # restricted to configurations (inference_engine, gpu_type x num_gpu,
+        # platform) that have at least one fixed-length run -- so only rows with
+        # a direct fixed-length counterpart appear in the CSV.
+        config_cols = [c for c in descriptor_order if c in fixed_group.columns]
+        fixed_configs = set(
+            map(tuple, fixed_group[config_cols].drop_duplicates().values)
+        )
+        std_mask = (
+            (df_standard["model"] == model) &
+            (df_standard["dataset"] == dataset) &
+            (df_standard["batch_size"] == "default") &
+            ~is_fixed_length(df_standard)
+        )
+        std_rows = df_standard[std_mask]
+        std_rows = std_rows[
+            std_rows[config_cols].apply(lambda r: tuple(r) in fixed_configs, axis=1)
+        ]
+
+        combined = pd.concat([std_rows, fixed_group], ignore_index=True)
+
+        # Column order: descriptor cols, num_samples, input_length, output_length,
+        # then metrics. input_length/output_length sit just before the metrics so
+        # that standard and fixed-length rows for the same configuration are
+        # adjacent and easy to compare.
+        desc_cols = [c for c in descriptor_order if c in combined.columns]
+        has_num_samples = (
+            "num_samples" in combined.columns and combined["num_samples"].notna().any()
+        )
+        optional = ["num_samples"] if has_num_samples else []
+        fl_cols = ["input_length", "output_length"]
+
+        table = combined[desc_cols + optional + fl_cols].copy()
+
+        for out_name, src, transform in resolved_specs:
+            if src is None:
+                table[out_name] = pd.NA
+            elif transform is not None:
+                table[out_name] = combined[src].apply(transform)
+            else:
+                table[out_name] = combined[src]
+
+        # Sort by descriptor cols first so standard and fixed-length rows for the
+        # same configuration are grouped together, then by input/output length
+        # (None sorts first, placing the standard row above the fixed-length ones).
+        sort_by = desc_cols + fl_cols
+        table = table.sort_values(by=sort_by, kind="stable",
+                                  key=fl_sort_key, ignore_index=True)
+
+        if filename_fn is not None:
+            stem = filename_fn({"model": model, "dataset": dataset})
+        else:
+            stem = f"{sanitize_filename_part(model)}_{sanitize_filename_part(dataset)}"
+
+        out_path = output_dir / f"{stem}.csv"
+        table.to_csv(out_path, index=False)
+        written.append(out_path)
+        print(f"  wrote {out_path} "
+              f"({len(fixed_group)} fixed-length + {len(std_rows)} standard run(s))")
+
+    return written
+
+
 def write_accuracy_per_permutation_csvs(df, output_dir):
     """Per (model, dataset) CSVs whose final column is accuracy ("acc"),
     truncated to a fixed ACC_DECIMALS decimal places for aligned display.
@@ -461,6 +586,26 @@ def write_performance_per_permutation_csvs(df, output_dir):
     )
 
 
+def write_fixed_length_performance_per_permutation_csvs(df_standard, df_fixed,
+                                                         output_dir):
+    """Fixed-length performance CSVs under batch-size-default_fixed-length/.
+
+    Same metrics as the standard performance CSVs (PERFORMANCE_VALUE_SPECS with
+    per-column PERF_DECIMALS), preceded by input_length and output_length columns."""
+    return write_fixed_length_per_permutation_csvs(
+        df_standard, df_fixed, output_dir,
+        value_specs=[
+            (label, src, trunc_fixed(PERF_DECIMALS.get(label, PERF_DECIMALS_DEFAULT)))
+            for label, src in PERFORMANCE_VALUE_SPECS
+        ],
+        descriptor_order=FIXED_LENGTH_DESCRIPTOR_ORDER,
+        filename_fn=lambda k: "_".join([
+            sanitize_filename_part(k["model"]),
+            sanitize_filename_part(k["dataset"]),
+        ]),
+    )
+
+
 def write_cost_per_permutation_csvs(df, output_dir):
     """Per (model, dataset, batch_size) CSVs whose final columns are the cost
     metrics, each truncated to a fixed COST_DECIMALS decimal places:
@@ -485,6 +630,26 @@ def write_cost_per_permutation_csvs(df, output_dir):
     )
 
 
+def write_fixed_length_cost_per_permutation_csvs(df_standard, df_fixed, output_dir):
+    """Fixed-length cost CSVs under batch-size-default_fixed-length/.
+
+    Same metrics as the standard cost CSVs, preceded by input_length and
+    output_length columns."""
+    fmt = trunc_fixed(COST_DECIMALS)
+    return write_fixed_length_per_permutation_csvs(
+        df_standard, df_fixed, output_dir,
+        value_specs=[
+            ("avg_cost_per_request_usd", "avg_cost_per_request_usd", fmt),
+            ("avg_cost_per_1M_output_tokens_usd", "avg_cost_per_1M_output_tokens_usd", fmt),
+        ],
+        descriptor_order=FIXED_LENGTH_DESCRIPTOR_ORDER,
+        filename_fn=lambda k: "_".join([
+            sanitize_filename_part(k["model"]),
+            sanitize_filename_part(k["dataset"]),
+        ]),
+    )
+
+
 def main(results_dir, output_dir):
 
     df = get_results(results_dir, pattern="metrics*")
@@ -494,35 +659,57 @@ def main(results_dir, output_dir):
     df.to_csv(os.path.join(output_dir, "all_metrics.csv"), index=False)
     print(f"Combined results collected in {output_dir}.")
 
-    accuracy_per_permutation_dir = pathlib.Path(output_dir) / "accuracy/by_model_dataset"
+    # Split into standard runs (no fixed context length) and fixed-length runs
+    # (batch-size-default_input<N>_output<N>). Fixed-length rows are written to
+    # separate CSVs and must not pollute the standard per-batch-size CSVs.
+    df_std = df[~is_fixed_length(df)].copy()
+    df_fl  = df[ is_fixed_length(df)].copy()
 
+    accuracy_per_permutation_dir = pathlib.Path(output_dir) / "accuracy/by_model_dataset"
     print(f"Writing accuracy per model-dataset CSVs to {accuracy_per_permutation_dir} ...")
-    write_accuracy_per_permutation_csvs(df, accuracy_per_permutation_dir)
+    write_accuracy_per_permutation_csvs(df_std, accuracy_per_permutation_dir)
 
     performance_per_permutation_dir = pathlib.Path(output_dir) / "performance/by_model_dataset"
 
     # Sparsity metrics live in separate sibling files ("sparsity.json" or
     # "sparsity_<dataset>_<ts>.json"), present only for a subset of runs, so they
     # are collected in their own pass and joined onto the metrics rows by run
-    # identity. Absent (e.g. for the agentic runs) the performance CSVs are still
-    # written, with the sparsity columns left blank.
+    # identity. The merge uses RUN_KEY_COLS (which includes input_length /
+    # output_length) so sparsity is matched correctly for both standard and
+    # fixed-length rows.
     performance_df = df
     sparsity_df = get_results(results_dir, pattern="sparsity*.json", required=False)
     if sparsity_df is not None:
         performance_df = merge_run_metrics(
             df, sparsity_df, [src for _, src in SPARSITY_VALUE_SPECS])
 
+    perf_std = performance_df[~is_fixed_length(performance_df)].copy()
+    perf_fl  = performance_df[ is_fixed_length(performance_df)].copy()
+
     print(f"Writing performance per model-dataset CSVs to {performance_per_permutation_dir} ...")
-    write_performance_per_permutation_csvs(performance_df, performance_per_permutation_dir)
+    write_performance_per_permutation_csvs(perf_std, performance_per_permutation_dir)
+
+    if not perf_fl.empty:
+        fl_perf_dir = performance_per_permutation_dir / "batch-size-default_fixed-length"
+        print(f"Writing fixed-length performance CSVs to {fl_perf_dir} ...")
+        write_fixed_length_performance_per_permutation_csvs(perf_std, perf_fl, fl_perf_dir)
 
     # Cost lives in separate cost files ("cost.json" or "cost_<dataset>_<ts>.json"),
     # present only for a subset of runs, so it is collected in its own pass and is
     # non-fatal when absent (e.g. the agentic runs carry no cost files).
     cost_df = get_results(results_dir, pattern="*cost*.json", required=False)
     if cost_df is not None:
+        cost_std = cost_df[~is_fixed_length(cost_df)].copy()
+        cost_fl  = cost_df[ is_fixed_length(cost_df)].copy()
+
         cost_per_permutation_dir = pathlib.Path(output_dir) / "cost/by_model_dataset"
         print(f"Writing cost per model-dataset CSVs to {cost_per_permutation_dir} ...")
-        write_cost_per_permutation_csvs(cost_df, cost_per_permutation_dir)
+        write_cost_per_permutation_csvs(cost_std, cost_per_permutation_dir)
+
+        if not cost_fl.empty:
+            fl_cost_dir = cost_per_permutation_dir / "batch-size-default_fixed-length"
+            print(f"Writing fixed-length cost CSVs to {fl_cost_dir} ...")
+            write_fixed_length_cost_per_permutation_csvs(cost_std, cost_fl, fl_cost_dir)
 
     print("Done.")
 
