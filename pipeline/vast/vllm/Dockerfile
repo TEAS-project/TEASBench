@@ -1,7 +1,15 @@
+# Build with:
+# docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t teas/vllm-bench:latest .
+
 # Base the image on vLLM v0.16.0, as on the EIDF.
-FROM --platform=linux/amd64 vllm/vllm-openai:v0.16.0
+FROM vllm/vllm-openai:v0.16.0
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Passing the current commit of TEASBench through is a bit clunky. I've added an extra argument here, which
+# should be used at build time (see above).
+ARG TEASBENCH_COMMIT=unknown
+ENV TEASBENCH_COMMIT=${TEASBENCH_COMMIT}
 
 # Install git and jq, then clean up apt lists to keep the image small.
 RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update \
