@@ -1,17 +1,29 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# This runs outside the container.
+set -euo pipefail
 
-# Encode CSV contents with base64.
-csv_file="smoke_tests_vllm_simple.csv"
-CONTAINER_CSV=$(base64 -w 0 $csv_file)
-echo "Contents of $csv_file:"
-echo "$CONTAINER_CSV"
+# Check required environment variables.
+if [ -z "${BENCHMARK_CSV:-}" ]; then
+  echo "ERROR: BENCHMARK_CSV environment variable is not set" >&2
+  exit 1
+fi
 
-# Now heading into container.
+if [ -z "${GIT_TOKEN:-}" ]; then
+  echo "ERROR: GIT_TOKEN environment variable is not set" >&2
+  exit 1
+fi
 
-set -e
+if [ -z "${HF_TOKEN:-}" ]; then
+  echo "ERROR: HF_TOKEN environment variable is not set" >&2
+  exit 1
+fi
 
+if [ -z "${OPENAI_API_KEY:-}" ]; then
+  echo "ERROR: OPENAI_API_KEY environment variable is not set" >&2
+  exit 1
+fi
+
+# Start benchmarking.
 start_timestamp=$( date +%Y%m%d-%H%M )
 BASE_DIR=/dev/shm/$start_timestamp
 mkdir -p "$BASE_DIR"
@@ -152,7 +164,7 @@ REQUIRED_HEADERS=("inference_engine" "model" "dataset" "num_samples" "gpu" "num_
 ALLOWED_ENGINE="vllm" # Change to SGLang for that container, or whatever else we may have in the future.
 
 # Decode the CSV and grab the header line
-IFS=',' read -r -a HEADERS < <(echo "$CONTAINER_CSV" | base64 -d | head -n 1)
+IFS=',' read -r -a HEADERS < <(echo "$BENCHMARK_CSV" | base64 -d | head -n 1)
 
 # Verify that we have all the column headers we're expecting.
 for req in "${REQUIRED_HEADERS[@]}"; do
@@ -295,7 +307,7 @@ while IFS=',' read -r -a VALUES; do
 
     sleep 5  # short break between benchmarks
 
-done < <(echo "$CONTAINER_CSV" | base64 -d | tail -n +2)
+done < <(echo "$BENCHMARK_CSV" | base64 -d | tail -n +2)
 
 benchmark_end_timestamp=$( date +%Y%m%d-%H%M )
 echo "-----------------------------------------"
