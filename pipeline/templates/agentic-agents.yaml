@@ -74,7 +74,7 @@ spec:
             exec &> $RUN_DIR/stdout_stderr.log
 
             # save the log if the script exits — success or failure — so it can be inspected even if the job is gone
-            trap 'cp $RUN_DIR/stdout_stderr.log ${TEAS_OUTPUT_DIR}/debug_${timestamp}.log 2>/dev/null || true' ERR
+            trap 'if [ $? -ne 0 ]; then mkdir -p ${TEAS_OUTPUT_DIR}/@name_k8s@_${timestamp} && cp $RUN_DIR/*.log ${TEAS_OUTPUT_DIR}/@name_k8s@_${timestamp}/ 2>/dev/null || true; fi' EXIT
 
             echo "Running on node $k8s_node_name"
 
@@ -95,6 +95,7 @@ spec:
             git -C /dev/shm/AgentCAP checkout @agentcap_ref@
             AGENTCAP_COMMIT=$(git -C /dev/shm/AgentCAP rev-parse --short HEAD)
             echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
+            pip install -e /dev/shm/AgentCAP
 
             TEASBENCH_TOKEN="${TEASBENCH_TOKEN%$'\n'}"
             rm -rf /dev/shm/TEASBench
@@ -130,7 +131,7 @@ spec:
             for i in $(seq 1 3600); do
               if ! kill -0 $SERVER_PID 2>/dev/null; then
                 echo "SGLang server died unexpectedly. Logs:" >&2
-                cat $RUN_DIRserver.log >&2
+                cat $RUN_DIR/server.log >&2
                 exit 1
               fi
               if curl -sf http://127.0.0.1:8000/v1/models > /dev/null 2>&1; then
