@@ -85,8 +85,10 @@ push_results() {
     local run_dir=$1
     local run_subdir=$2
     local job_description=$3
-    local model_name=$4
-    local job_duration=$5
+    local job_duration=$4
+    local row_name=$5
+    declare -n r="$row_name"
+    local model_name="${r[model]}"
 
     # Tidy up - gather MoE-CAP generated results from subdir
     cd "$run_dir"
@@ -116,7 +118,7 @@ push_results() {
 
     # Commit and push data to results repository
     git add "$output_dir/metrics*.json" "$output_dir/metadata*.json" "$output_dir/timings.json"
-    git commit -m "auto: ${INFERENCE_ENGINE}-${MODEL_NAME}-${dataset}-${NUM_SAMPLES}-${GPU}x${NUM_GPUS}-bs${BATCH_SIZE}"
+    git commit -m "auto: ${r[inference_engine]}-${model_name}-${r[dataset]}-${r[num_samples]}-${r[gpu]}x${r[num_gpu]}-bs${r[batch_size]}"
     git push "https://oauth2:${GIT_TOKEN}@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
     # echo "Would be pushing to results repo here, but skipping for now."
 }
@@ -292,7 +294,7 @@ while IFS=',' read -r -a VALUES; do
             job_duration=$((job_end_time - job_start_time))
             job_description="{row[inference_engine]}-${row[model]}-${row[dataset]}-${row[num_samples]}-${row[gpu]}x${row[num_gpu]}-bs${row[batch_size]}"
             echo "Benchmark run completed, pushing results to repo..."
-            push_results "$RUN_DIR" "$RUN_SUBDIR" "$job_description" "${row[model]}" "$job_duration"
+            push_results "$RUN_DIR" "$RUN_SUBDIR" "$job_description" "$job_duration" row
             echo "Push complete."
         else
             echo "Benchmark run failed, skipping pushing results."
