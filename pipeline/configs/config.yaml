@@ -229,7 +229,6 @@ variables_defaults:
         - context_length
         - mem_fraction_static
         - tensor_parallel_size
-        - random_seed
         - trust_remote_code
         - dtype
         - kv_cache_dtype
@@ -244,7 +243,6 @@ variables_defaults:
         - port
         - served_model_name
         - tensor_parallel_size
-        - seed
         - max_num_seqs
         - gpu_memory_utilization
         - max_model_len
