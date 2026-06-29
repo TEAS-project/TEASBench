@@ -73,15 +73,22 @@ spec:
             mkdir -p $RUN_DIR
             exec &> $RUN_DIR/stdout_stderr.log
 
+            # save the log if the script exits — success or failure — so it can be inspected even if the job is gone
+            trap 'cp $RUN_DIR/stdout_stderr.log ${TEAS_OUTPUT_DIR}/debug_${timestamp}.log 2>/dev/null || true' ERR
+
             echo "Running on node $k8s_node_name"
+
+            env_start_time=$(date +%s)
 
             mkdir -p /mnt/input/hf_cache \
                      /mnt/input/pip_cache
 
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" -y install git
+
             ###################################
             # Check out AgentCAP and TEASBench #
             ###################################
-            env_start_time=$(date +%s)
             cd /dev/shm
             rm -rf AgentCAP
             git clone "https://@agentcap_repo@" /dev/shm/AgentCAP
@@ -100,6 +107,8 @@ spec:
 
             # Repair torch/torchvision (inlined from pipeline/scripts/setup_sglang_env.sh)
             @agentic_env_setup@
+
+            apt-get -y install jq
 
             env_end_time=$(date +%s)
             env_duration=$((env_end_time - env_start_time))
