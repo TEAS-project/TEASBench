@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# This general purpose script runs benchmarks for all vLLM and SGLang configurations, based on the
+# rules in pipeline/configs/config.yml as of TEASBench main branch commit 2d3d02f.
+
 set -euo pipefail
 
 # Check required environment variables.
@@ -59,7 +62,6 @@ run_benchmark() {
       --api-url http://localhost:30000/v1/completions \
       --use-chat-api \
       --output_dir "$run_dir" \
-      --backend vllm \
       "${extra_args[@]}" \
       &> "$run_dir/client_$dataset.log"
     CLIENT_SUCCESS=$?  # not 100% robust, could be failed redirection
@@ -124,36 +126,101 @@ push_results() {
 }
 
 # Build server extra arguments from the CSV row using our defined rules.
-# More rules can be added as needed (see config.yaml).
+# Rules mirror pipeline/configs/config.yaml (server_flags section).
 build_server_extra_args() {
     local row_name="$1"
     declare -n r="$row_name"
 
     server_extra_args=()
 
-    # Example rule: if batch_size is 1, limit sequences server-side
+    # batch_size=1 → limit concurrent sequences
     if [[ "${r[batch_size]}" == "1" ]]; then
-        server_extra_args=("--max_num_seqs" "1")
+        if [[ "${r[inference_engine]}" == "vllm" ]]; then
+            server_extra_args+=("--max_num_seqs" "1")
+        elif [[ "${r[inference_engine]}" == "sglang" ]]; then
+            server_extra_args+=("--max-running-requests" "1")
+        fi
+    fi
+
+    # Model-specific reasoning parsers
+    if [[ "${r[model]}" == "DeepSeek-R1" ]]; then
+        server_extra_args+=("--reasoning-parser" "deepseek_r1")
+    elif [[ "${r[model]}" == "Kimi-K2.5" ]]; then
+        server_extra_args+=("--reasoning-parser" "kimi_k2")
+    elif [[ "${r[model]}" == "gpt-oss-20b" || "${r[model]}" == "gpt-oss-120b" ]]; then
+        if [[ "${r[inference_engine]}" == "vllm" ]]; then
+            server_extra_args+=("--reasoning-parser" "openai_gptoss")
+        elif [[ "${r[inference_engine]}" == "sglang" ]]; then
+            server_extra_args+=("--reasoning-parser" "gpt-oss")
+        fi
+    fi
+
+    # Qwen3 model load timeout (sglang --dist-timeout; no vllm equivalent)
+    if [[ "${r[model]}" == "Qwen3-235B-A22B-Instruct-2507-FP8" || "${r[model]}" == "Qwen3-235B-A22B-Instruct-2507" ]]; then
+        if [[ "${r[inference_engine]}" == "sglang" ]]; then
+            server_extra_args+=("--dist-timeout" "3600")
+        fi
+    fi
+
+    # Memory tweaks for gpt-oss-120b on a single H100 at default batch size
+    if [[ "${r[model]}" == "gpt-oss-120b" && "${r[gpu]}" == "H100" \
+       && "${r[num_gpu]}" == "1" && "${r[batch_size]}" == "default" ]]; then
+        if [[ "${r[inference_engine]}" == "sglang" ]]; then
+            server_extra_args+=("--mem-fraction-static" "0.9")
+        elif [[ "${r[inference_engine]}" == "vllm" ]]; then
+            if [[ "${r[dataset]}" == "gsm8k" || "${r[dataset]}" == "arena-hard" ]]; then
+                server_extra_args+=("--gpu_memory_utilization" "0.92")
+            elif [[ "${r[dataset]}" == "longbench_v1" ]]; then
+                server_extra_args+=("--gpu_memory_utilization" "0.94")
+            fi
+        fi
+    fi
+
+    # Qwen3 on H100 with vllm → increase max context length
+    if [[ ( "${r[model]}" == "Qwen3-235B-A22B-Instruct-2507-FP8" \
+         || "${r[model]}" == "Qwen3-235B-A22B-Instruct-2507" ) \
+       && "${r[inference_engine]}" == "vllm" && "${r[gpu]}" == "H100" ]]; then
+        server_extra_args+=("--max-model-len" "200k")
     fi
 }
 
 # Build client extra arguments from the CSV row using our defined rules.
-# More rules can be added as needed (see config.yaml).
+# Rules mirror pipeline/configs/config.yaml (client_flags section).
 build_client_extra_args() {
     local row_name="$1"
     declare -n r="$row_name"
 
     client_extra_args=()
 
+    # Backend mapping (inference_engine → --backend)
+    if [[ "${r[inference_engine]}" == "vllm" ]]; then
+        client_extra_args+=(--backend "vllm")
+    elif [[ "${r[inference_engine]}" == "sglang" ]]; then
+        client_extra_args+=(--backend "sglang")
+    fi
+
+    # batch_size (non-default) → --server-batch-size
     if [[ "${r[batch_size]}" != "default" ]]; then
         client_extra_args+=(--server-batch-size "${r[batch_size]}")
     fi
 
+    # arena-hard → set judge flags + baseline answers
     if [[ "${r[dataset]}" == "arena-hard" ]]; then
-        client_extra_args+=(--judge-api-url https://api.openai.com/v1/chat/completions)
-        client_extra_args+=(--judge-model openai/gpt-4.1)
+        client_extra_args+=(--judge-api-url "https://api.openai.com/v1/chat/completions")
+        client_extra_args+=(--judge-model "gpt-4.1")
         client_extra_args+=(--judge-api-key "${OPENAI_API_KEY}")
         client_extra_args+=(--baseline-answers-path "${BASE_DIR}/gpt-4-0613.jsonl")
+    fi
+
+    # Fixed-length mode (optional CSV columns; absent rows are treated as unset)
+    if [[ -n "${r[input_length]:-}" || -n "${r[output_length]:-}" ]]; then
+        client_extra_args+=(--fixed-length-mode)
+    fi
+    if [[ -n "${r[input_length]:-}" ]]; then
+        client_extra_args+=(--target-input-tokens "${r[input_length]}")
+    fi
+    if [[ -n "${r[output_length]:-}" ]]; then
+        client_extra_args+=(--target-output-tokens "${r[output_length]}")
     fi
 }
 
@@ -163,7 +230,6 @@ MOE_CAP_COMMIT=$(git rev-parse --short HEAD)
 
 # Configuration
 REQUIRED_HEADERS=("inference_engine" "model" "dataset" "num_samples" "gpu" "num_gpu" "batch_size")
-ALLOWED_ENGINE="vllm" # Change to SGLang for that container, or whatever else we may have in the future.
 
 # Decode the CSV and grab the header line
 IFS=',' read -r -a HEADERS < <(echo "$BENCHMARK_CSV" | base64 -d | head -n 1)
@@ -208,9 +274,8 @@ while IFS=',' read -r -a VALUES; do
     current_engine=$(echo "${row[inference_engine]}" | xargs | tr -d '\r')
     # then check it's the engine we've said is allowed.
     if [[ "$current_engine" != "$ALLOWED_ENGINE" ]]; then
-        echo "ERROR on line $line_number: Invalid inference_engine '$current_engine'." >&2
-        echo "   This container only accepts benchmarks for '$ALLOWED_ENGINE'." >&2
-        exit 1
+        echo "WARNING on line $line_number: inference_engine '$current_engine' does not match '$ALLOWED_ENGINE'; skipping." >&2
+        continue
     fi
 
     # Also raise error if any value in the row is a blank.
@@ -248,8 +313,7 @@ while IFS=',' read -r -a VALUES; do
       --host 0.0.0.0 \
       --enable-expert-distribution-metrics \
       --tensor-parallel-size 1 \
-      "${server_extra_args[@]}" \
-      --reasoning-parser openai_gptoss &> "$RUN_DIR/server.log" &
+      "${server_extra_args[@]}" &> "$RUN_DIR/server.log" &
     SERVER_PID=$!
 
     # Wait until the /health endpoint returns HTTP 200

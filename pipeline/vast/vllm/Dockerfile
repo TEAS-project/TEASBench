@@ -11,6 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG TEASBENCH_COMMIT=unknown
 ENV TEASBENCH_COMMIT=${TEASBENCH_COMMIT}
 
+ENV ALLOWED_ENGINE=vllm
+
 # Install git and jq, then clean up apt lists to keep the image small.
 RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update \
  && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" install -y --no-install-recommends \
