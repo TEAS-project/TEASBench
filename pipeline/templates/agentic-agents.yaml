@@ -73,7 +73,7 @@ spec:
             mkdir -p $RUN_DIR
             exec &> $RUN_DIR/stdout_stderr.log
 
-            # save the log if the script exits — success or failure — so it can be inspected even if the job is gone
+            # save the log if the script exits with any signal other than 0 (success) so it can be inspected even if the job is gone
             trap 'if [ $? -ne 0 ]; then mkdir -p ${TEAS_OUTPUT_DIR}/@name_k8s@_${timestamp} && cp $RUN_DIR/*.log ${TEAS_OUTPUT_DIR}/failed/agentic/@name_k8s@_${timestamp}/ 2>/dev/null || true; fi' EXIT
 
             echo "Running on node $k8s_node_name"
