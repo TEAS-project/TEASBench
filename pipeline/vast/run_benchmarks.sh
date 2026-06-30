@@ -55,6 +55,10 @@ run_benchmark() {
 
     echo "Starting to run benchmark (sending http requests)..."
     client_start_time=$(date +%s)
+    # Briefly turn off set -e so that a non-zero exit from python3 doesn't kill the
+    # script before we can capture it. Once we've done so, just below, set -e again
+    set +e
+    # and benchmark:
     python3 -m moe_cap.runner.openai_api_profile \
       --model_name unsloth/"$model_name" \
       --datasets "$dataset" \
@@ -64,7 +68,8 @@ run_benchmark() {
       --output_dir "$run_dir" \
       "${extra_args[@]}" \
       &> "$run_dir/client_$dataset.log"
-    CLIENT_SUCCESS=$?  # not 100% robust, could be failed redirection
+    CLIENT_SUCCESS=$?
+    set -e
 
     if [[ $CLIENT_SUCCESS -eq 0 ]]; then
         echo "$dataset benchmark run finished"
