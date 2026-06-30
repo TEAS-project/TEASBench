@@ -1,8 +1,9 @@
-# Build with:
-# docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t teas/vllm-bench:latest .
+# Build with the following, from the repo root directory:
+# docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t teas/vllm-bench:latest -f pipeline/vast/vllm/Dockerfile pipeline/vast/
+# (or podman)
 
 # Base the image on vLLM v0.16.0, as on the EIDF.
-FROM vllm/vllm-openai:v0.16.0
+FROM docker.io/vllm/vllm-openai:v0.16.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -14,10 +15,9 @@ ENV TEASBENCH_COMMIT=${TEASBENCH_COMMIT}
 ENV ALLOWED_ENGINE=vllm
 
 # Install git and jq, then clean up apt lists to keep the image small.
-RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update \
- && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" install -y --no-install-recommends \
-	git jq ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update && \
+    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" install -y --no-install-recommends git jq ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 # Clone MoE-CAP into /opt at build time so it's available in the image. Although we'll be using it in
 # /dev/shm the runtime may mount it as empty, so instead we clone it into /opt and the entrypoint script
@@ -26,12 +26,12 @@ RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update \
 RUN git clone https://github.com/Auto-CAP/MoE-CAP.git /opt/MoE-CAP
 
 # Set global git config used by automated pushes from the container
-RUN git config --global user.name "Pipeline Autopush" \
- && git config --global user.email ""
+RUN git config --global user.name "Pipeline Autopush" && \
+    git config --global user.email ""
 
 # Copy the run_benchmarks.sh and entrypoint.sh scripts into the image.
-COPY ../run_benchmarks.sh /root/run_benchmarks.sh
-COPY entrypoint.sh /root/entrypoint.sh
+COPY run_benchmarks.sh /root/run_benchmarks.sh
+COPY vllm/entrypoint.sh /root/entrypoint.sh
 RUN chmod +x /root/run_benchmarks.sh /root/entrypoint.sh
 
 WORKDIR /root
