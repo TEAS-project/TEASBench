@@ -2,9 +2,10 @@
 set -euo pipefail
 
 # Copy MoE-CAP into /dev/shm from its build-time location in /opt.
-echo "MoE-CAP from /opt/MoE-CAP into /dev/shm..."
+echo "Copying MoE-CAP from /opt/MoE-CAP into /dev/shm and installing it..."
 cp -a /opt/MoE-CAP /dev/shm/
-echo "Copied /opt/MoE-CAP to /dev/shm/MoE-CAP"
+python3 -m pip install -e /dev/shm/MoE-CAP
+echo "Finished copying and installing MoE-CAP."
 
 # We're running in an SGLang-based container, so specify for run_benchmarks.sh
 # that we should only run parameter sets from the CSV for SGLang.

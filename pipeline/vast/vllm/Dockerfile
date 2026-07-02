@@ -1,5 +1,5 @@
 # Build with the following, from the repo root directory:
-# docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t teas/vllm-bench:latest -f pipeline/vast/vllm/Dockerfile pipeline/vast/
+# docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t ghcr.io/teas-project/vllm-bench:latest -f pipeline/vast/vllm/Dockerfile pipeline/vast/
 # (or podman)
 
 # Base the image on vLLM v0.16.0, as on the EIDF.
