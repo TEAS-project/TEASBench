@@ -32,7 +32,8 @@ BASE_DIR=/dev/shm/$start_timestamp
 mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
 
-exec &> "$BASE_DIR/stdout_stderr.log"
+# For now, leave output unredirected so we can see it in the logs on the Vast.ai. console.
+#exec &> "$BASE_DIR/stdout_stderr.log"
 
 RESULTS_REPO="TEASBench-container-dev-results"
 RESULTS_REPO_USER="welucas2"
