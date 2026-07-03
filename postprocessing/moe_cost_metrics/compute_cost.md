@@ -61,8 +61,14 @@ Let `num_gpus = N`, `num_cpus = M`.
 total_hourly_rate_$/h = price_per_GPU_per_hour × N
 price_per_second_$/s  = total_hourly_rate_$/h / 3600
 
-avg_cost_per_request_usd          = e2e_s          × price_per_second_$/s
-avg_cost_per_1M_output_tokens_usd = tpot × 1e6     × price_per_second_$/s
+if batch_token_profile is available:
+  prefill_seconds_per_request = ttft / prefill_avg_batch_size
+  decode_seconds_per_request  = tpot × decode_generated_tokens_per_request / decode_avg_batch_size
+  avg_cost_per_request_usd          = (prefill_seconds_per_request + decode_seconds_per_request) × price_per_second_$/s
+  avg_cost_per_1M_output_tokens_usd = (tpot / decode_avg_batch_size) × 1e6 × price_per_second_$/s
+else fallback:
+  avg_cost_per_request_usd          = e2e_s      × price_per_second_$/s
+  avg_cost_per_1M_output_tokens_usd = tpot × 1e6 × price_per_second_$/s
 ```
 
 ### Buy (`buy` block, MoE-CAP Eqs. 1-3)
@@ -77,9 +83,17 @@ energy_$/h              = (power_W / 1000) × electricity_$_per_kWh
 effective_$/h    = amortized_$/h + energy_$/h
 effective_$/s    = effective_$/h / 3600
 
-avg_cost_per_request_usd          = e2e_s          × effective_$/s
-avg_cost_per_1M_output_tokens_usd = tpot × 1e6     × effective_$/s
+if batch_token_profile is available:
+  prefill_seconds_per_request = ttft / prefill_avg_batch_size
+  decode_seconds_per_request  = tpot × decode_generated_tokens_per_request / decode_avg_batch_size
+  avg_cost_per_request_usd          = (prefill_seconds_per_request + decode_seconds_per_request) × effective_$/s
+  avg_cost_per_1M_output_tokens_usd = (tpot / decode_avg_batch_size) × 1e6 × effective_$/s
+else fallback:
+  avg_cost_per_request_usd          = e2e_s      × effective_$/s
+  avg_cost_per_1M_output_tokens_usd = tpot × 1e6 × effective_$/s
 ```
+
+For continuous-batched MoE runs, `tpot` is per decode step, not exclusive per-output-token GPU time. The default path therefore divides by `batch_token_profile.decode_avg_batch_size`. This prevents default-batch runs on slower/older GPUs from being overcharged by ignoring simultaneous token generation across active requests.
 
 `scale_other_capital` (default **1.2**, from MoE-CAP) inflates the GPU+CPU bill-of-materials to approximate motherboard + DRAM + SSD overhead.
 

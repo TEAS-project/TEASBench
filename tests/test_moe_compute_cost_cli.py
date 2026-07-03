@@ -17,7 +17,43 @@ def make_run(root: Path) -> Path:
     return run
 
 
+def make_batched_run(root: Path) -> Path:
+    run = root / "moe" / "vastai" / "sglang" / "gpt-oss-120b" / "gsm8k_256samples" / "b200x1" / "batch-size-default" / "20260101-0000"
+    run.mkdir(parents=True)
+    (run / "metrics.json").write_text(json.dumps({
+        "performance": {"e2e_s": 10.0, "ttft": 0.2, "tpot": 0.01},
+        "batch_token_profile": {
+            "prefill_tokens": 2000,
+            "prefill_tokens_per_request": 20.0,
+            "prefill_avg_batch_size": 10.0,
+            "decode_generated_tokens": 5000,
+            "decode_generated_tokens_per_request": 50.0,
+            "decode_avg_batch_size": 20.0,
+        },
+    }))
+    (run / "metadata.json").write_text(json.dumps({"system_environment": {"inference_engine_version": "test"}}))
+    return run
+
+
 class MoeComputeCostCliTests(unittest.TestCase):
+
+    def test_cost_per_output_token_uses_decode_batch_size(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = make_batched_run(root)
+
+            subprocess.run([
+                sys.executable, str(SCRIPT),
+                "--root", str(root / "moe"),
+                "--rent-price", "b200=3.6",
+            ], check=True, cwd=REPO, text=True, capture_output=True)
+
+            cost = json.loads((run / "cost.json").read_text())
+            self.assertEqual(cost["rent"]["cost"]["avg_cost_per_1M_output_tokens_usd"], 0.5)
+            self.assertEqual(cost["rent"]["cost"]["decode_avg_batch_size"], 20.0)
+            self.assertAlmostEqual(cost["rent"]["cost"]["avg_cost_per_request_usd"], 0.000045)
+            self.assertEqual(cost["rent"]["cost"]["method"], "batch_token_profile")
+
     def test_buy_price_json_files_override_gpu_and_cpu_specs(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

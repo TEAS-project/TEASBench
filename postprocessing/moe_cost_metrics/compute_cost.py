@@ -275,11 +275,59 @@ def need_rent_prices_message(needed: list[str], have: dict[str, float]) -> str:
     return "\n".join(lines)
 
 
+
+def build_cost_metrics(
+    *,
+    price_per_s: float,
+    e2e_s: float,
+    ttft: Optional[float],
+    tpot: float,
+    batch_profile: dict,
+) -> dict:
+    """Return cost metrics, using measured batch profile when available.
+
+    TPOT is a per-decode-step latency. In continuous batching, one decode step
+    emits roughly decode_avg_batch_size output tokens across active requests, so
+    cost per output token must divide TPOT by that average decode batch size.
+    Per-request cost similarly uses the measured prefill/decode batch sizes
+    rather than treating each request latency as exclusive accelerator time.
+    """
+    decode_avg_batch_size = batch_profile.get("decode_avg_batch_size")
+    decode_tokens_per_request = batch_profile.get("decode_generated_tokens_per_request")
+    prefill_avg_batch_size = batch_profile.get("prefill_avg_batch_size")
+
+    if (
+        isinstance(ttft, (int, float))
+        and isinstance(decode_avg_batch_size, (int, float)) and decode_avg_batch_size > 0
+        and isinstance(decode_tokens_per_request, (int, float)) and decode_tokens_per_request >= 0
+        and isinstance(prefill_avg_batch_size, (int, float)) and prefill_avg_batch_size > 0
+    ):
+        prefill_seconds_per_request = ttft / prefill_avg_batch_size
+        decode_seconds_per_request = (tpot * decode_tokens_per_request) / decode_avg_batch_size
+        request_seconds = prefill_seconds_per_request + decode_seconds_per_request
+        output_token_seconds = tpot / decode_avg_batch_size
+        return {
+            "avg_cost_per_request_usd": request_seconds * price_per_s,
+            "avg_cost_per_1M_output_tokens_usd": output_token_seconds * 1_000_000 * price_per_s,
+            "method": "batch_token_profile",
+            "prefill_avg_batch_size": float(prefill_avg_batch_size),
+            "decode_avg_batch_size": float(decode_avg_batch_size),
+            "decode_generated_tokens_per_request": float(decode_tokens_per_request),
+        }
+
+    return {
+        "avg_cost_per_request_usd": e2e_s * price_per_s,
+        "avg_cost_per_1M_output_tokens_usd": tpot * 1_000_000 * price_per_s,
+        "method": "latency_tpot_no_batch_profile",
+    }
+
 def build_buy_block(
     gpu_key: str,
     num_gpus: int,
     e2e_s: float,
+    ttft: Optional[float],
     tpot: float,
+    batch_profile: dict,
     *,
     gpu_specs: dict[str, dict],
     cpu_specs: dict[str, dict],
@@ -337,10 +385,13 @@ def build_buy_block(
         "amortized_capital_usd_per_hour": amort_per_h,
         "energy_usd_per_hour": energy_per_h,
         "effective_hourly_rate_usd": effective_per_h,
-        "cost": {
-            "avg_cost_per_request_usd": e2e_s * effective_per_s,
-            "avg_cost_per_1M_output_tokens_usd": tpot * 1_000_000 * effective_per_s,
-        },
+        "cost": build_cost_metrics(
+            price_per_s=effective_per_s,
+            e2e_s=e2e_s,
+            ttft=ttft,
+            tpot=tpot,
+            batch_profile=batch_profile,
+        ),
     }
 
 
@@ -549,6 +600,7 @@ def main() -> int:
             skipped += 1
             continue
         perf = metrics.get("performance") or {}
+        batch_profile = metrics.get("batch_token_profile") or {}
         e2e_s = perf.get("e2e_s")
         tpot = perf.get("tpot")
         ttft = perf.get("ttft")
@@ -584,14 +636,17 @@ def main() -> int:
                 "total_hourly_rate_usd": hourly_rate,
                 "price_per_second_usd": price_per_s,
                 "price_source": rent_price_sources.get(gpu_key, DEFAULT_RENT_PRICE_SOURCE),
-                "cost": {
-                    "avg_cost_per_request_usd": e2e_s * price_per_s,
-                    "avg_cost_per_1M_output_tokens_usd": tpot * 1_000_000 * price_per_s,
-                },
+                "cost": build_cost_metrics(
+                    price_per_s=price_per_s,
+                    e2e_s=e2e_s,
+                    ttft=ttft,
+                    tpot=tpot,
+                    batch_profile=batch_profile,
+                ),
             }
 
         buy = build_buy_block(
-            gpu_key, num_gpus, e2e_s, tpot,
+            gpu_key, num_gpus, e2e_s, ttft, tpot, batch_profile,
             gpu_specs=gpu_specs, cpu_specs=cpu_specs, gpu_host_cpu=gpu_host_cpu,
             lifetime_hours=effective_lifetime_hours,
             base_lifetime_hours=args.buy_lifetime_hours,
