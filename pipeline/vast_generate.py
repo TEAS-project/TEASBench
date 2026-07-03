@@ -56,8 +56,8 @@ def _generate_script(engine, gpu, num_gpu, encoded_csv, registry_login: tuple | 
         login_line = f"\n          --login '-u {username} -p {password} {registry}' \\"
 
     # Otherwise, just return the contents of the script.
-    # The onstart command is needed to ensure that the secrets set in Vast.ai propagate through
-    # to the container here once it's running.
+    # The --args (with nothing following) argument is required to put the instance into args/entrypoint launch mode;
+    # without it, vastai defaults to injecting its own SSH server instead of going to the image's ENTRYPOINT.
     return textwrap.dedent(f"""\
         #!/usr/bin/env bash
         # Vast.ai launch script — {engine} on {gpu}x{num_gpu}
@@ -84,7 +84,8 @@ def _generate_script(engine, gpu, num_gpu, encoded_csv, registry_login: tuple | 
         vastai create instance "$OFFER_ID" \\
           --image "{image}" \\
           --disk 50 \\{login_line}
-          --env "BENCHMARK_CSV=${{BENCHMARK_CSV}}"
+          --env "-e BENCHMARK_CSV=${{BENCHMARK_CSV}}" \\
+          --args
     """)
 
 
