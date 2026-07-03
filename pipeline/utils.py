@@ -41,6 +41,12 @@ EIDF_GPU_MAP={
     "H200":"NVIDIA-H200"
 }
 
+VAST_GPU_MAP={
+    "A100": "A100_SXM4_80GB",
+    "H100": "H100_SXM",
+    "H200": "H200_SXM",
+}
+
 def get_run_name(p: dict):
     name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
 
