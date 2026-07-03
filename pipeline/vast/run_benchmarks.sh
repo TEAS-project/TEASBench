@@ -80,6 +80,9 @@ run_benchmark() {
         jq -n --arg client_duration $client_duration '{client: $client_duration}'  >> "$run_dir/timings.json"
     else
         echo "Client crashed"
+        echo "----- client_$dataset.log -----"
+        cat "$run_dir/client_$dataset.log"
+        echo "----- end client_$dataset.log -----"
     fi
     return $CLIENT_SUCCESS
 }
@@ -329,6 +332,9 @@ while IFS=',' read -r -a VALUES; do
         # Check if the server has crashed (if so the health check will never succeed)
         if ! kill -0 "$SERVER_PID" 2> /dev/null; then
             echo -e "\n[ERROR] Server process died before becoming ready to use."
+            echo "----- server.log -----"
+            cat "$RUN_DIR/server.log"
+            echo "----- end server.log -----"
             SERVER_STATUS="dead"
             break
         fi
