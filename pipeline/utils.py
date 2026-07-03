@@ -42,7 +42,7 @@ EIDF_GPU_MAP={
 }
 
 VAST_GPU_MAP={
-    "A100": "A100_SXM4_80GB",
+    "A100": "A100_SXM4",
     "H100": "H100_SXM",
     "H200": "H200_SXM",
 }
