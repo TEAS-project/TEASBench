@@ -235,6 +235,7 @@ variables_defaults:
         - chunked_prefill_size
         - cuda_graph_max_bs
         - allow_auto_truncate
+
     vllm:
       base_command: "python -m vllm.entrypoints.openai.api_server"
       flags:
@@ -254,6 +255,49 @@ variables_defaults:
         - disable_log_stats
         - enable_prefix_caching
         - trust_remote_code
+
+  agentic_server_sidecar_command:
+    sglang:
+      base_command: "TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 python -m sglang.launch_server"
+      flags:
+        - hf_model_path
+        - host
+        - port
+        - log_level
+        - served_model_name
+        - context_length
+        - mem_fraction_static
+        - tensor_parallel_size
+        - trust_remote_code
+        - dtype
+        - kv_cache_dtype
+        - chunked_prefill_size
+        - cuda_graph_max_bs
+        - allow_auto_truncate
+        - tool_call_parser
+        - reasoning_parser
+        - enable_cache_report
+
+    vllm:
+      base_command: "vllm serve"
+      flags:
+        - model_id
+        - host
+        - port
+        - served_model_name
+        - tensor_parallel_size
+        - max_num_seqs
+        - gpu_memory_utilization
+        - max_model_len
+        - dtype
+        - kv_cache_dtype
+        - stream_interval
+        - tool_call_parser
+        - async_scheduling
+        - disable_log_stats
+        - enable_prefix_caching
+        - trust_remote_code
+        - reasoning_parser
 
   # Flags shared across agentic commands (sglang client + vllm all-in-one).
   agentic_flags:
@@ -369,6 +413,21 @@ variables_defaults:
         - agents_config_file_vllm
         - num_tasks
         - output_dir
+
+  agentic_sidecar_command:
+    sglang:
+      base_command: "python -m agent_cap.agents"
+      flags:
+        - agents_config_file_sglang
+        - num_tasks
+        - output_dir
+    vllm:
+      base_command: "python -m agent_cap.agents"
+      flags:
+        - agents_config_file_vllm
+        - num_tasks
+        - output_dir          
+
 
   agentcap_image:
     sglang:

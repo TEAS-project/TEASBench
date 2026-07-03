@@ -145,6 +145,14 @@ class Template:
             flags_def = config["variables_defaults"]["agentic_flags"]
             cmd_cfg = config["variables_defaults"]["agentic_command"][engine]
             rule_key = "agentic_flags"
+        elif cmd_type == "agentic_server_sidecar":
+            flags_def = config["variables_defaults"]["agentic_server_flags"]
+            cmd_cfg = config["variables_defaults"]["agentic_server_sidecar_command"][engine]
+            rule_key = "agentic_server_flags"
+        elif cmd_type == "agentic_sidecar":
+            flags_def = config["variables_defaults"]["agentic_flags"]
+            cmd_cfg = config["variables_defaults"]["agentic_sidecar_command"][engine]
+            rule_key = "agentic_flags"
         else:
             flags_def = config["variables_defaults"]["client_flags"]
             cmd_cfg = config["variables_defaults"]["client_command"]
@@ -199,6 +207,40 @@ class Template:
         """Agentic family: separate server process + agent_cap.agents for all engines."""
         return self._agentic_agents(config, parameters, matching_rules)
 
+    def _agentic_mcp(self, config, parameters, matching_rules):
+        """sglang agentic path: standalone SGLang server + agent_cap.agents.
+
+        Builds four commands:
+          @agentic_server_command@  -- sglang.launch_server invocation
+          @agentic_client_command@  -- python -m agent_cap.agents --config ...
+          @side_car@ -- additional container
+          @side_car_ready@ -- check side car ready to benchmark
+        and routes to the agentic-agents.yaml template which starts the server
+        in the background, waits for readiness, then runs the client.
+        """
+        server_cmd = self.build_command("agentic_server_sidecar", config, parameters, matching_rules)
+        client_cmd = self.build_command("agentic_sidecar", config, parameters, matching_rules)
+
+        image_name = self.resolve_generic_variable("agentcap_image", config, matching_rules, parameters)
+        agentcap_repo = self.resolve_generic_variable("agentcap_repo", config, matching_rules, parameters)
+        agentcap_ref = self.resolve_generic_variable("agentcap_ref", config, matching_rules, parameters)
+
+        env_setup_path = self.resolve_generic_variable("agentic_env_setup_script", config, matching_rules, parameters)
+        with open(env_setup_path, "r") as f:
+            env_setup = f.read().strip()
+
+        replacements = {
+            "@image_name@": image_name,
+            "@agentic_server_command@": server_cmd,
+            "@agentic_client_command@": client_cmd,
+            "@agentic_env_setup@": env_setup,
+            "@agentcap_repo@": agentcap_repo,
+            "@agentcap_ref@": agentcap_ref,
+            "@model@": parameters.get("model"),
+            "@hf_model_path@": parameters.get("hf_model_path"),
+        }
+        return "templates/agentic-sidecar.yaml", replacements
+
     def _agentic_agents(self, config, parameters, matching_rules):
         """sglang agentic path: standalone SGLang server + agent_cap.agents.
 
@@ -227,7 +269,7 @@ class Template:
             "@agentcap_repo@": agentcap_repo,
             "@agentcap_ref@": agentcap_ref,
             "@model@": parameters.get("model"),
-            "@hf_model_path@": parameters.get("hf_model_path"),
+            "@hf_model_path@": parameters.get("hf_model_path")
         }
         return "templates/agentic-agents.yaml", replacements
 
@@ -252,7 +294,12 @@ class Template:
         }
 
         if benchmark_family(parameters) == "agentic":
+            print("test1")
             template_path, family_replacements = self._agentic(
+                config, parameters, matching_rules)
+        elif benchmark_family(parameters) == "agentic-sidecar":
+            print("test2")
+            template_path, family_replacements = self._agentic_mcp(
                 config, parameters, matching_rules)
         else:
             template_path, family_replacements = self._moe(

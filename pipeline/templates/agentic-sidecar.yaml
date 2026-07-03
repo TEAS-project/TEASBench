@@ -1,0 +1,312 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: @name_k8s@-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+spec:
+  completions: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 2000
+      @side_car@
+      containers:
+      - name: @inference_engine@-agentic
+        image: @image_name@
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: k8s_job_name
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['job-name']
+          - name: k8s_node_name
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+
+          - name: HF_HOME
+            value: /mnt/input/hf_cache
+          - name: PIP_CACHE_DIR
+            value: /mnt/input/pip_cache
+          - name: PYTORCH_NVML_BASED_MEMORY_STATS
+            value: "0"
+
+          # Runner metadata / behaviour
+          - name: INFERENCE_ENGINE
+            value: @inference_engine@
+          - name: IS_LOCAL
+            value: "true"
+          - name: MODEL_NAME_FOR_METADATA
+            value: @model@
+
+          # Where the results push happens
+          - name: TEAS_OUTPUT_DIR
+            value: /mnt/develop/outputs
+
+          # --- Secrets -----------------------------------------------------
+          - name: GEMINI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: gemini-api-key
+                key: key
+          - name: GITHUB_RESULTS_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: teas-develop-results-private-ap
+                key: token
+          - name: TEASBENCH_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: teasbench-pat
+                key: token
+
+      # --- sidecar: MCP-ATLAS tool server (no GPU) ---
+      initContainers: []
+
+      containers:
+        # ---- Container 1: MCP tool server sidecar ----
+        - name: mcp-server
+          image: ghcr.io/scaleapi/mcp-atlas:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              cd /dev/shm
+              rm -rf AgentCAP
+              git clone "https://@agentcap_repo@" /dev/shm/AgentCAP
+              git -C /dev/shm/AgentCAP checkout @agentcap_ref@
+              AGENTCAP_COMMIT=$(git -C /dev/shm/AgentCAP rev-parse --short HEAD)
+              echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
+              pip install -e /dev/shm/AgentCAP
+
+              nohup bash /workspace/AgentCAP/mcp-server/start.sh > /root/mcp_server.log 2>&1 &
+          ports:
+            - containerPort: 1984
+          env:
+            - name: ENABLED_SERVERS
+              value: "arxiv,brave-search,calculator,cli-mcp-server,clinicaltrialsgov-mcp-server,context7,ddg-search,desktop-commander,fetch,filesystem,git,github,mcp-code-executor,mcp-server-code-runner,memory,met-museum,open-library,osm-mcp-server,pubmed,weather,whois,wikipedia"
+            - name: MCP_ATLAS_DIR
+              value: "/dev/shm/AgentCAP/third_party/mcp_atlas"
+            - name: MCP_DATA_DIR
+              value: "/dev/shm/data"
+            - name: MCP_PORT
+              value: "1984"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            job_start_time=$(date +%s)
+
+            timestamp=$( date +%Y%m%d-%H%M )
+            RUN_DIR=/dev/shm/$timestamp
+            mkdir -p $RUN_DIR
+            exec &> $RUN_DIR/stdout_stderr.log
+
+            # save the log if the script exits with any signal other than 0 (success) so it can be inspected even if the job is gone
+            trap 'if [ $? -ne 0 ]; then mkdir -p ${TEAS_OUTPUT_DIR}/@name_k8s@_${timestamp} && cp $RUN_DIR/*.log ${TEAS_OUTPUT_DIR}/failed/agentic/@name_k8s@_${timestamp}/ 2>/dev/null || true; fi' EXIT
+
+            echo "Running on node $k8s_node_name"
+
+            env_start_time=$(date +%s)
+
+            mkdir -p /mnt/input/hf_cache \
+                     /mnt/input/pip_cache
+
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" -y install git
+
+            ###################################
+            # Check out AgentCAP and TEASBench #
+            ###################################
+            cd /dev/shm
+            rm -rf AgentCAP
+            git clone "https://@agentcap_repo@" /dev/shm/AgentCAP
+            git -C /dev/shm/AgentCAP checkout @agentcap_ref@
+            AGENTCAP_COMMIT=$(git -C /dev/shm/AgentCAP rev-parse --short HEAD)
+            echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
+            pip install -e /dev/shm/AgentCAP
+
+            TEASBENCH_TOKEN="${TEASBENCH_TOKEN%$'\n'}"
+            rm -rf /dev/shm/TEASBench
+            git clone "https://x-access-token:${TEASBENCH_TOKEN}@github.com/TEAS-project/TEASBench.git" /dev/shm/TEASBench
+            git -C /dev/shm/TEASBench checkout @teasbench_commit@
+            echo "TEASBench at commit @teasbench_commit@"
+
+            which python
+            python -V
+
+            # Repair torch/torchvision (inlined from pipeline/scripts/setup_sglang_env.sh)
+            @agentic_env_setup@
+
+            apt-get -y install jq
+
+            env_end_time=$(date +%s)
+            env_duration=$((env_end_time - env_start_time))
+            echo "Environment setup took $env_duration seconds"
+            jq -n --arg env_duration $env_duration '{environment_setup: $env_duration}' >> $RUN_DIR/timings.json
+
+            ###############################
+            # Start SGLang server         #
+            ###############################
+            cd /dev/shm/AgentCAP
+            echo "Starting server..."
+            (
+              @agentic_server_command@
+            ) > $RUN_DIR/server.log 2>&1 &
+            SERVER_PID=$!
+
+            echo "Waiting for server (PID $SERVER_PID)..."
+            server_ready=0
+            for i in $(seq 1 3600); do
+              if ! kill -0 $SERVER_PID 2>/dev/null; then
+                echo "Server died unexpectedly. Logs:" >&2
+                cat $RUN_DIR/server.log >&2
+                exit 1
+              fi
+              if curl -sf http://127.0.0.1:8000/v1/models > /dev/null 2>&1; then
+                echo "Server ready after ${i}s"
+                server_ready=1
+                break
+              fi
+              sleep 1
+            done
+            if [ $server_ready -eq 0 ]; then
+              echo "Server did not become ready within 3600s. Logs:" >&2
+              cat $RUN_DIR/server.log >&2
+              exit 1
+            fi
+
+            echo "Waiting for server sidecar"
+            server_sidecar_ready=0
+            for i in $(seq 1 60); do
+              if bash -c "echo > /dev/tcp/localhost/1984" 2>/dev/null; then
+                echo "MCP server ready after ${i}s"
+                break
+              fi
+              sleep 1
+            done
+            if [ $server_sidecar_ready -eq 0 ]; then
+              echo "Server sidecar did not become ready within 60s. Logs:" >&2
+              exit 1
+            fi
+
+
+            ##########################
+            # Run agent_cap.agents   #
+            ##########################
+            cd $RUN_DIR
+            export OUTPUT_ROOT=$RUN_DIR/agentic
+            mkdir -p $OUTPUT_ROOT
+
+            client_start_time=$(date +%s)
+            if @agentic_client_command@ ; then
+                echo "Benchmark run finished"
+                CLIENT_SUCCESS=0
+            else
+                echo "Benchmark run crashed"
+                CLIENT_SUCCESS=1
+            fi
+            client_end_time=$(date +%s)
+            client_duration=$((client_end_time - client_start_time))
+            echo "Client took $client_duration seconds"
+            jq -n --arg client_duration $client_duration '{client: $client_duration}' >> $RUN_DIR/timings.json
+
+            # Stop the server and collect its log
+            kill $SERVER_PID 2>/dev/null || true
+            wait $SERVER_PID 2>/dev/null || true
+
+            ##################
+            # Saving results #
+            ##################
+            if [ ! -f "$OUTPUT_ROOT/results.jsonl" ]; then
+                echo "[ERROR] No results.jsonl produced - nothing to save."
+                exit 1
+            fi
+
+            cd $RUN_DIR
+            cp "$OUTPUT_ROOT"/results.jsonl \
+               "$OUTPUT_ROOT"/output-data.jsonl . 2>/dev/null || true
+
+            # Copy data out to the PVC before any git operations
+            RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/$timestamp
+            mkdir -p $RUN_OUTPUT_DIR
+            cp -R $RUN_DIR/* $RUN_OUTPUT_DIR/
+            if [ -f /mnt/shared/job-configs/${k8s_job_name}.yaml ]; then
+                cp /mnt/shared/job-configs/${k8s_job_name}.yaml $RUN_OUTPUT_DIR/
+                rm /mnt/shared/job-configs/${k8s_job_name}.yaml
+            fi
+
+            exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
+            cd $RUN_OUTPUT_DIR
+            echo "Files copied to pvc at $RUN_OUTPUT_DIR"
+
+            job_end_time=$(date +%s)
+            job_duration=$((job_end_time - job_start_time))
+            jq -n --arg job_duration $job_duration '{job: $job_duration}' >> $RUN_OUTPUT_DIR/timings.json
+
+            # Write provenance (TEASBench + AgentCAP commits + timings)
+            jq -n \
+              --arg teasbench_commit "@teasbench_commit@" \
+              --arg agentcap_commit "$AGENTCAP_COMMIT" \
+              --slurpfile timings $RUN_OUTPUT_DIR/timings.json \
+              '{teasbench_commit: $teasbench_commit, agentcap_commit: $agentcap_commit, timings: ($timings | add)}' \
+              > $RUN_OUTPUT_DIR/provenance.json
+
+            #########################
+            # Push to results repo  #
+            #########################
+            GITHUB_RESULTS_TOKEN="${GITHUB_RESULTS_TOKEN%$'\n'}"
+            git pull "https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git" || true
+            git config user.email "autopush@eidf"
+            git config user.name "Pipeline Autopush"
+            git add results.jsonl output-data.jsonl provenance.json *.yaml timings.json
+            git commit -m "auto: @name_k8s@"
+            git push "https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+
+            echo "Finalising container"
+            exit $CLIENT_SUCCESS
+        resources:
+          requests:
+            cpu: "8"
+            memory: "64Gi"
+            nvidia.com/gpu: @num_gpu@
+          limits:
+            cpu: "8"
+            memory: "64Gi"
+            nvidia.com/gpu: @num_gpu@
+        volumeMounts:
+          - mountPath: /mnt/develop
+            name: develop
+          - mountPath: /mnt/input
+            name: inputs
+          - mountPath: /dev/shm
+            name: dshm
+          - mountPath: /mnt/shared
+            name: shared
+      volumes:
+        - name: inputs
+          persistentVolumeClaim:
+            claimName: inputs-pvc
+        - name: develop
+          persistentVolumeClaim:
+            claimName: develop-pvc
+        - name: shared
+          persistentVolumeClaim:
+            claimName: eidf230shared
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      nodeSelector:
+        nvidia.com/gpu.product: @gpu_product@

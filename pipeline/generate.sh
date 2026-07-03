@@ -5,7 +5,7 @@ source venv/bin/activate
 pip install pandas pyyaml
 
 python3 generate.py \
-    --csv_file=../experiments/smoke_test.csv \
+    --csv_file=../experiments/mcp-atlas-eidf.csv \
     --target_dir=./ \
 
 

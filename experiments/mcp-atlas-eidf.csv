@@ -1,0 +1,5 @@
+benchmark,inference_engine,model,gpu,num_gpu,num_tasks
+mcp-atlas,sglang,gpt-oss-120b,A100,2,25
+mcp-atlas,sglang,gpt-oss-120b,H100,2,25
+mcp-atlas,vllm,gpt-oss-120b,A100,2,25
+mcp-atlas,vllm,gpt-oss-120b,H100,2,25
