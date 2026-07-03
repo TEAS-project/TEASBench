@@ -335,6 +335,10 @@ while IFS=',' read -r -a VALUES; do
             echo "----- server.log -----"
             cat "$RUN_DIR/server.log"
             echo "----- end server.log -----"
+            if grep -q "unsupported display driver / cuda driver combination" "$RUN_DIR/server.log"; then
+                echo "[HINT] This looks like a host-level GPU driver/kernel-module mismatch on this specific Vast.ai machine."
+                echo "Destroy this instance and try a different offer."
+            fi
             SERVER_STATUS="dead"
             break
         fi
