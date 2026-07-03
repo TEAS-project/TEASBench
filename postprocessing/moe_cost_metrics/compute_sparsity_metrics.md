@@ -85,7 +85,7 @@ Metadata `gpu_type` strings normalized to the keys above; raw variants seen and 
 
 ## 5. Per-dataset token defaults
 
-Used to materialize the KV-cache term (S-MBU) and to derive `prefill_tokens_per_s = avg_prefill_len / ttft` when the metrics file lacks it. Override globally with `--avg-prefill-len` / `--avg-decode-ctx-len`.
+Used only as a fallback when `metrics.json` lacks `batch_token_profile`. Prefer the measured profile: `prefill_tokens_per_s = batch_token_profile.prefill_tokens_per_request / ttft`; decode SMFU throughput is `batch_token_profile.decode_avg_batch_size / tpot`. Override context lengths globally with `--avg-prefill-len` / `--avg-decode-ctx-len`.
 
 | dataset prefix | avg prefill | avg decode ctx = prefill + output/2 |
 |---|---:|---:|
@@ -102,7 +102,7 @@ vllm metrics files have `expert_activation = 0` (only sglang's runner emits the 
 2. For any run with zero activation, looks up that key and borrows the activation values (keeping its own `ttft`/`tpot`).
 3. Records the donor path in `sparsity.activation.source` (e.g. `amd/sglang/.../mi355xx4/batch-size-1/20260501-2342`).
 
-Same-key combinations across vllm and sglang are well-correlated because activation is a property of the model + dataset + batch policy, not the runner.
+Same-key combinations across vllm and sglang are well-correlated because activation is a property of the model + dataset + batch policy, not the runner. Throughput and timing remain runner-specific: the borrowing path keeps each run's own `ttft`, `tpot`, and `batch_token_profile` values.
 
 ## 7. Output schema (`sparsity_*.json`)
 
@@ -146,22 +146,23 @@ Same-key combinations across vllm and sglang are well-correlated because activat
       "source": "this run | <donor path>"
     },
     "context_assumption": {
-      "avg_prefill_len_tokens": 10000.0,
-      "avg_decode_ctx_len_tokens": 10110.0,
-      "kv_size_prefill_TB": 3.69e-4,
-      "kv_size_decode_TB": 3.73e-4,
+      "avg_prefill_len_tokens": 11725.35,
+      "avg_decode_ctx_len_tokens": 12168.26,
+      "decode_batch_size": 13.51,
+      "kv_size_prefill_TB": 4.33e-4,
+      "kv_size_decode_TB": 4.49e-4,
       "attention_score_TB": 0.0,
       "note": "..."
     },
     "prefill": {
       "ttft_s": 0.079,
-      "prefill_tokens_per_s": 126428.15,
+      "prefill_tokens_per_s": 148422.15,
       "S_MBU": 0.0544,
       "S_MFU": 0.1151
     },
     "decode": {
       "tpot_s": 0.00518,
-      "output_tokens_per_s": 193.11,
+      "output_tokens_per_s": 2608.10,
       "S_MBU": 0.0594,
       "S_MFU": 0.00021
     }

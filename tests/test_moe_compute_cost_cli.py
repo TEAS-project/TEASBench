@@ -41,6 +41,19 @@ class MoeComputeCostCliTests(unittest.TestCase):
             self.assertEqual(cost["buy"]["cpu"]["price_per_unit_usd"], 678.0)
             self.assertEqual(cost["buy"]["cpu"]["price_source"], "user-supplied-json")
 
+
+    def test_default_buy_gpu_prices_order_a100_below_blackwell(self):
+        from postprocessing.moe_cost_metrics.compute_cost import GPU_SPECS
+
+        self.assertLess(
+            GPU_SPECS["a100"]["price_per_unit_usd"],
+            GPU_SPECS["b200"]["price_per_unit_usd"],
+        )
+        self.assertLess(
+            GPU_SPECS["a100"]["price_per_unit_usd"],
+            GPU_SPECS["b300"]["price_per_unit_usd"],
+        )
+
     def test_utilisation_scales_effective_lifetime_hours(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
