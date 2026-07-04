@@ -142,16 +142,7 @@ Same-key combinations across vllm and sglang are well-correlated because activat
     },
     "activation": {
       "avg_expert_activation_prefill": 75.39,
-      "avg_expert_activation_decode": 4.00,
-      "source": "this run | <donor path>"
-    },
-    "context_assumption": {
-      "avg_prefill_len_tokens": 10000.0,
-      "avg_decode_ctx_len_tokens": 10110.0,
-      "kv_size_prefill_TB": 3.69e-4,
-      "kv_size_decode_TB": 3.73e-4,
-      "attention_score_TB": 0.0,
-      "note": "..."
+      "avg_expert_activation_decode": 4.00
     },
     "prefill": {
       "ttft_s": 0.079,

@@ -336,9 +336,8 @@ def compute_for_run(
     ea = metrics.get("expert_activation") or {}
     prefill_act = ea.get("avg_expert_activation_prefill") or 0
     decode_act = ea.get("avg_expert_activation_decode") or 0
-    activation_source = "this run"
     if prefill_act <= 0 and decode_act <= 0 and borrowed_activation is not None:
-        prefill_act, decode_act, activation_source = borrowed_activation
+        prefill_act, decode_act, _activation_source = borrowed_activation
     ttft = perf.get("ttft")
     tpot = perf.get("tpot")
     prefill_tps = perf.get("prefill_tokens_per_s") or 0
@@ -466,21 +465,6 @@ def compute_for_run(
         "activation": {
             "avg_expert_activation_prefill": prefill_act,
             "avg_expert_activation_decode": decode_act,
-            "source": activation_source,
-        },
-        "context_assumption": {
-            "avg_prefill_len_tokens": avg_prefill_len,
-            "avg_decode_ctx_len_tokens": avg_decode_ctx_len,
-            "kv_size_prefill_TB": kv_size_prefill_TB,
-            "kv_size_decode_TB": kv_size_decode_TB,
-            "attention_score_TB": 0.0,
-            "note": (
-                "avg_prefill_len / avg_decode_ctx_len default to per-dataset "
-                "values (GSM8K=60/210, Arena-Hard=110/580, LongBench-v1=10000/"
-                "10110); override with --avg-prefill-len / --avg-decode-ctx-len. "
-                "attention_score (Q@K^T / V) FLOPs are still set to 0 — S-MFU "
-                "omits that term."
-            ),
         },
         "prefill": {
             "ttft_s": ttft,
