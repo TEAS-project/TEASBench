@@ -35,12 +35,78 @@ from typing import Optional
 
 sys.path.insert(0, "/home/sicheng/MoE-CAP")
 
-from moe_cap.utils.hardware_utils import (  # noqa: E402
-    MEM_BW_DICT,
-    PEAK_FLOPS_DICT,
-    get_peak_bw,
-    get_peak_flops,
-)
+try:
+    from moe_cap.utils.hardware_utils import (  # noqa: E402
+        MEM_BW_DICT,
+        PEAK_FLOPS_DICT,
+        get_peak_bw,
+        get_peak_flops,
+    )
+except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
+    MEM_BW_DICT = {
+        "NVIDIA-A100-SXM4-80GB": 2.04e12,
+        "NVIDIA-H100-HBM3-80GB": 3.35e12,
+        "NVIDIA-H200-141GB": 4.8e12,
+        "NVIDIA-B200-183GB": 8.0e12,
+        "NVIDIA-B300-269GB": 8.0e12,
+        "AMD-Instinct-MI355X-288GB": 8.0e12,
+    }
+    PEAK_FLOPS_DICT = {
+        "bfloat16": {
+            "NVIDIA-A100-SXM4-80GB": 624e12,
+            "NVIDIA-H100-HBM3-80GB": 1979e12,
+            "NVIDIA-H200-141GB": 1979e12,
+            "NVIDIA-B200-183GB": 4500e12,
+            "NVIDIA-B300-269GB": 5000e12,
+            "AMD-Instinct-MI355X-288GB": 2500e12,
+        },
+        "float16": {
+            "NVIDIA-A100-SXM4-80GB": 624e12,
+            "NVIDIA-H100-HBM3-80GB": 1979e12,
+            "NVIDIA-H200-141GB": 1979e12,
+            "NVIDIA-B200-183GB": 4500e12,
+            "NVIDIA-B300-269GB": 5000e12,
+            "AMD-Instinct-MI355X-288GB": 2500e12,
+        },
+        "fp8": {
+            "NVIDIA-A100-SXM4-80GB": 1248e12,
+            "NVIDIA-H100-HBM3-80GB": 3958e12,
+            "NVIDIA-H200-141GB": 3958e12,
+            "NVIDIA-B200-183GB": 9000e12,
+            "NVIDIA-B300-269GB": 10000e12,
+            "AMD-Instinct-MI355X-288GB": 5050e12,
+        },
+        "int8": {
+            "NVIDIA-A100-SXM4-80GB": 1248e12,
+            "NVIDIA-H100-HBM3-80GB": 3958e12,
+            "NVIDIA-H200-141GB": 3958e12,
+            "NVIDIA-B200-183GB": 9000e12,
+            "NVIDIA-B300-269GB": 10000e12,
+            "AMD-Instinct-MI355X-288GB": 5050e12,
+        },
+        "fp4": {
+            "NVIDIA-A100-SXM4-80GB": 1248e12,
+            "NVIDIA-H100-HBM3-80GB": 3958e12,
+            "NVIDIA-H200-141GB": 3958e12,
+            "NVIDIA-B200-183GB": 18000e12,
+            "NVIDIA-B300-269GB": 20000e12,
+            "AMD-Instinct-MI355X-288GB": 10100e12,
+        },
+        "int4": {
+            "NVIDIA-A100-SXM4-80GB": 2496e12,
+            "NVIDIA-H100-HBM3-80GB": 3958e12,
+            "NVIDIA-H200-141GB": 3958e12,
+            "NVIDIA-B200-183GB": 18000e12,
+            "NVIDIA-B300-269GB": 20000e12,
+            "AMD-Instinct-MI355X-288GB": 10100e12,
+        },
+    }
+
+    def get_peak_bw(gpu_key):
+        return MEM_BW_DICT.get(gpu_key, 0)
+
+    def get_peak_flops(gpu_key, precision="bfloat16"):
+        return PEAK_FLOPS_DICT.get((precision or "").lower(), {}).get(gpu_key, 0)
 
 
 DATASET_TOKEN_PROFILE = {
@@ -340,8 +406,22 @@ def compute_for_run(
         prefill_act, decode_act, _activation_source = borrowed_activation
     ttft = perf.get("ttft")
     tpot = perf.get("tpot")
+    batch_profile = metrics.get("batch_token_profile") or {}
     prefill_tps = perf.get("prefill_tokens_per_s") or 0
     output_tps = perf.get("output_tokens_per_s") or 0
+
+    profile_prefill_len = batch_profile.get("prefill_tokens_per_request")
+    profile_prefill_bs = batch_profile.get("prefill_avg_batch_size")
+    profile_decode_tokens = batch_profile.get("decode_generated_tokens_per_request")
+    profile_decode_bs = batch_profile.get("decode_avg_batch_size")
+
+    if isinstance(profile_prefill_len, (int, float)) and profile_prefill_len > 0:
+        avg_prefill_len = float(profile_prefill_len)
+    if (
+        isinstance(profile_prefill_len, (int, float)) and profile_prefill_len > 0
+        and isinstance(profile_decode_tokens, (int, float)) and profile_decode_tokens > 0
+    ):
+        avg_decode_ctx_len = float(profile_prefill_len) + float(profile_decode_tokens) / 2.0
 
     if prefill_act <= 0 and decode_act <= 0:
         return {"skipped": "expert_activation missing or zero"}
@@ -425,11 +505,20 @@ def compute_for_run(
         flops_per_s = flops_per_token * throughput_tok_s
         return flops_per_s / (num_gpus * peak_flops / 2)
 
-    prefill_tp = prefill_tps or (avg_prefill_len / ttft if avg_prefill_len else 0)
+    if (
+        isinstance(profile_prefill_len, (int, float)) and profile_prefill_len > 0
+        and isinstance(profile_prefill_bs, (int, float)) and profile_prefill_bs > 0
+    ):
+        prefill_tp = float(profile_prefill_len) * float(profile_prefill_bs) / ttft
+    else:
+        prefill_tp = prefill_tps or (avg_prefill_len / ttft if avg_prefill_len else 0)
     prefill_smbu = smbu(prefill_act, ttft, kv_size_prefill_TB) if prefill_act > 0 else None
     prefill_smfu = smfu(prefill_tp) if prefill_tp > 0 else None
 
-    decoding_tp = output_tps or (1.0 / tpot)
+    if isinstance(profile_decode_bs, (int, float)) and profile_decode_bs > 0:
+        decoding_tp = float(profile_decode_bs) / tpot
+    else:
+        decoding_tp = output_tps or (1.0 / tpot)
     decode_smbu = smbu(decode_act, tpot, kv_size_decode_TB) if decode_act > 0 else None
     decode_smfu = smfu(decoding_tp) if decoding_tp > 0 else None
 

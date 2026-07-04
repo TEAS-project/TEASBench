@@ -85,7 +85,7 @@ Metadata `gpu_type` strings normalized to the keys above; raw variants seen and 
 
 ## 5. Per-dataset token defaults
 
-Used to materialize the KV-cache term (S-MBU) and to derive `prefill_tokens_per_s = avg_prefill_len / ttft` when the metrics file lacks it. Override globally with `--avg-prefill-len` / `--avg-decode-ctx-len`.
+Used as fallbacks to materialize the KV-cache term (S-MBU) and derive throughput when `batch_token_profile` is absent. When present, `batch_token_profile` is authoritative: `prefill_tokens_per_s = prefill_tokens_per_request × prefill_avg_batch_size / ttft`, and `decode output_tokens_per_s = decode_avg_batch_size / tpot`. Override fallback lengths globally with `--avg-prefill-len` / `--avg-decode-ctx-len`.
 
 | dataset prefix | avg prefill | avg decode ctx = prefill + output/2 |
 |---|---:|---:|
