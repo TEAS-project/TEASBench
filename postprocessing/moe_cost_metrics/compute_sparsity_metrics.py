@@ -397,6 +397,7 @@ def compute_for_run(
     metrics: dict, hf_cfg, gpu_key: str, num_gpus: int, prec_str: str,
     avg_prefill_len: float, avg_decode_ctx_len: float,
     borrowed_activation: Optional[tuple[float, float, str]] = None,
+    force_batch_size_one: bool = False,
 ) -> dict:
     perf = metrics.get("performance") or {}
     ea = metrics.get("expert_activation") or {}
@@ -414,6 +415,10 @@ def compute_for_run(
     profile_prefill_bs = batch_profile.get("prefill_avg_batch_size")
     profile_decode_tokens = batch_profile.get("decode_generated_tokens_per_request")
     profile_decode_bs = batch_profile.get("decode_avg_batch_size")
+
+    if force_batch_size_one:
+        profile_prefill_bs = 1.0
+        profile_decode_bs = 1.0
 
     if isinstance(profile_prefill_len, (int, float)) and profile_prefill_len > 0:
         avg_prefill_len = float(profile_prefill_len)
@@ -678,6 +683,7 @@ def main() -> int:
             metrics, hf_cfg, gpu_key, meta_num_gpus, prec_str,
             prefill_len, decode_ctx_len,
             borrowed_activation=borrowed,
+            force_batch_size_one=info["batch_size_dir"].startswith("batch-size-1"),
         )
         if "skipped" in result:
             skipped += 1
