@@ -542,7 +542,11 @@ def main() -> int:
         hw = meta.get("hardware") or {}
         mc = meta.get("model_config") or {}
         meta_gpu = hw.get("gpu_type", "")
-        meta_num_gpus = hw.get("num_gpus") or info["num_gpus_path"] or 1
+        # TEAS result paths encode the benchmark hardware shape (for example
+        # h200x8). Some compact metadata files were backfilled with
+        # hardware.num_gpus=1; do not let stale metadata collapse xN runs to
+        # single-GPU peak bandwidth/FLOP denominators.
+        meta_num_gpus = info["num_gpus_path"] or hw.get("num_gpus") or 1
         prec_str = mc.get("precision") or "bfloat16"
         model_name_meta = mc.get("model_name") or ""
 
