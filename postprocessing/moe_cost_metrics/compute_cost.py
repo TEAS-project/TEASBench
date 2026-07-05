@@ -2,9 +2,19 @@
 """
 Compute rent + buy cost for MoE-CAP TEAS_Development MoE results.
 
-Two metrics (identical for rent and buy):
-  - avg_cost_per_request_usd       = e2e_s          * effective_$/s
-  - avg_cost_per_1M_output_tokens  = tpot * 1_000_000 * effective_$/s
+Two top-level metrics (identical schema for rent and buy):
+  - avg_cost_per_request_usd
+  - avg_cost_per_1M_output_tokens_usd
+
+When batch_token_profile is available, continuous-batching cost is amortized as:
+  - prefill_seconds_per_request = TTFT / prefill_avg_batch_size
+  - decode_seconds_per_request  = TPOT * decode_tokens_per_request / decode_avg_batch_size
+  - effective_output_tokens_per_s = decode_avg_batch_size / TPOT
+  - avg_cost_per_1M_output_tokens_usd = effective_$/s / effective_output_tokens_per_s * 1e6
+
+Each cost block also includes a breakdown with pricing, latency, batch profile,
+throughput, request-seconds, request-cost, and output-token-cost fields so the
+reported cost can be audited and explained.
 
 RENT (vast.ai etc.):
   effective_$/s = (price_per_GPU_per_hour * num_gpus) / 3600
@@ -284,17 +294,25 @@ def build_cost_metrics(
     tpot: float,
     batch_profile: dict,
 ) -> dict:
-    """Return cost metrics, using measured batch profile when available.
+    """Return cost metrics plus an auditable throughput/cost breakdown.
 
     TPOT is a per-decode-step latency. In continuous batching, one decode step
     emits roughly decode_avg_batch_size output tokens across active requests, so
     cost per output token must divide TPOT by that average decode batch size.
     Per-request cost similarly uses the measured prefill/decode batch sizes
     rather than treating each request latency as exclusive accelerator time.
+
+    The returned ``breakdown`` block intentionally duplicates the formula inputs
+    and derived values. This makes apparent hardware-cost inversions auditable:
+    a higher-priced accelerator can have lower cost/token when its measured
+    effective decode throughput (decode_avg_batch_size / TPOT) improves more
+    than its price premium.
     """
     decode_avg_batch_size = batch_profile.get("decode_avg_batch_size")
     decode_tokens_per_request = batch_profile.get("decode_generated_tokens_per_request")
     prefill_avg_batch_size = batch_profile.get("prefill_avg_batch_size")
+    prefill_tokens_per_request = batch_profile.get("prefill_tokens_per_request")
+    price_per_hour = price_per_s * 3600.0
 
     if (
         isinstance(ttft, (int, float))
@@ -306,19 +324,104 @@ def build_cost_metrics(
         decode_seconds_per_request = (tpot * decode_tokens_per_request) / decode_avg_batch_size
         request_seconds = prefill_seconds_per_request + decode_seconds_per_request
         output_token_seconds = tpot / decode_avg_batch_size
+        effective_output_tokens_per_s = decode_avg_batch_size / tpot
+        avg_cost_per_request_usd = request_seconds * price_per_s
+        avg_cost_per_1m_output_tokens_usd = output_token_seconds * 1_000_000 * price_per_s
+        prefill_cost_per_request_usd = prefill_seconds_per_request * price_per_s
+        decode_cost_per_request_usd = decode_seconds_per_request * price_per_s
+        prefill_tokens_per_s = None
+        if isinstance(prefill_tokens_per_request, (int, float)) and prefill_tokens_per_request > 0:
+            prefill_tokens_per_s = prefill_tokens_per_request * prefill_avg_batch_size / ttft
         return {
-            "avg_cost_per_request_usd": request_seconds * price_per_s,
-            "avg_cost_per_1M_output_tokens_usd": output_token_seconds * 1_000_000 * price_per_s,
+            "avg_cost_per_request_usd": avg_cost_per_request_usd,
+            "avg_cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
             "method": "batch_token_profile",
             "prefill_avg_batch_size": float(prefill_avg_batch_size),
             "decode_avg_batch_size": float(decode_avg_batch_size),
             "decode_generated_tokens_per_request": float(decode_tokens_per_request),
+            "effective_output_tokens_per_s": effective_output_tokens_per_s,
+            "formula": "price_per_second_usd * tpot_s / decode_avg_batch_size * 1e6",
+            "breakdown": {
+                "pricing": {
+                    "price_per_hour_usd": price_per_hour,
+                    "price_per_second_usd": price_per_s,
+                },
+                "latency": {
+                    "e2e_s": e2e_s,
+                    "ttft_s": ttft,
+                    "tpot_s": tpot,
+                },
+                "batch_profile": {
+                    "prefill_avg_batch_size": float(prefill_avg_batch_size),
+                    "decode_avg_batch_size": float(decode_avg_batch_size),
+                    "prefill_tokens_per_request": (
+                        float(prefill_tokens_per_request)
+                        if isinstance(prefill_tokens_per_request, (int, float))
+                        else None
+                    ),
+                    "decode_generated_tokens_per_request": float(decode_tokens_per_request),
+                },
+                "throughput": {
+                    "effective_output_tokens_per_s": effective_output_tokens_per_s,
+                    "prefill_tokens_per_s": prefill_tokens_per_s,
+                    "formula": "decode_avg_batch_size / tpot_s",
+                },
+                "request_seconds": {
+                    "prefill_seconds_per_request": prefill_seconds_per_request,
+                    "decode_seconds_per_request": decode_seconds_per_request,
+                    "total_seconds_per_request": request_seconds,
+                },
+                "request_cost_usd": {
+                    "prefill_cost_per_request_usd": prefill_cost_per_request_usd,
+                    "decode_cost_per_request_usd": decode_cost_per_request_usd,
+                    "total_cost_per_request_usd": avg_cost_per_request_usd,
+                },
+                "output_token_cost": {
+                    "seconds_per_output_token": output_token_seconds,
+                    "cost_per_output_token_usd": output_token_seconds * price_per_s,
+                    "cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
+                    "formula": "price_per_second_usd / effective_output_tokens_per_s * 1e6",
+                },
+            },
         }
 
+    seconds_per_output_token = tpot
+    effective_output_tokens_per_s = 1.0 / tpot
+    avg_cost_per_request_usd = e2e_s * price_per_s
+    avg_cost_per_1m_output_tokens_usd = seconds_per_output_token * 1_000_000 * price_per_s
     return {
-        "avg_cost_per_request_usd": e2e_s * price_per_s,
-        "avg_cost_per_1M_output_tokens_usd": tpot * 1_000_000 * price_per_s,
+        "avg_cost_per_request_usd": avg_cost_per_request_usd,
+        "avg_cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
         "method": "latency_tpot_no_batch_profile",
+        "effective_output_tokens_per_s": effective_output_tokens_per_s,
+        "formula": "price_per_second_usd * tpot_s * 1e6",
+        "breakdown": {
+            "pricing": {
+                "price_per_hour_usd": price_per_hour,
+                "price_per_second_usd": price_per_s,
+            },
+            "latency": {
+                "e2e_s": e2e_s,
+                "ttft_s": ttft,
+                "tpot_s": tpot,
+            },
+            "throughput": {
+                "effective_output_tokens_per_s": effective_output_tokens_per_s,
+                "formula": "1 / tpot_s (fallback; no measured batch profile)",
+            },
+            "request_seconds": {
+                "total_seconds_per_request": e2e_s,
+            },
+            "request_cost_usd": {
+                "total_cost_per_request_usd": avg_cost_per_request_usd,
+            },
+            "output_token_cost": {
+                "seconds_per_output_token": seconds_per_output_token,
+                "cost_per_output_token_usd": seconds_per_output_token * price_per_s,
+                "cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
+                "formula": "price_per_second_usd / effective_output_tokens_per_s * 1e6",
+            },
+        },
     }
 
 def build_buy_block(

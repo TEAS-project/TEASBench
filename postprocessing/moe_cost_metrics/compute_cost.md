@@ -95,6 +95,15 @@ else fallback:
 
 For continuous-batched MoE runs, `tpot` is per decode step, not exclusive per-output-token GPU time. The default path therefore divides by `batch_token_profile.decode_avg_batch_size`. This prevents default-batch runs on slower/older GPUs from being overcharged by ignoring simultaneous token generation across active requests.
 
+The cost block also emits an audit-friendly decomposition:
+
+```text
+effective_output_tokens_per_s = decode_avg_batch_size / tpot
+cost_per_1M_output_tokens_usd = price_per_second_usd / effective_output_tokens_per_s × 1e6
+```
+
+This is the key sanity check for hardware comparisons. A newer accelerator can have a higher hourly price but lower cost/token when its measured effective decode throughput improves more than its price premium. Therefore reports should present `price_per_gpu_hour_usd`, `num_gpus`, `total_hourly_rate_usd`, `tpot`, `decode_avg_batch_size`, `effective_output_tokens_per_s`, and `avg_cost_per_1M_output_tokens_usd` together rather than showing only the final cost.
+
 `scale_other_capital` (default **1.2**, from MoE-CAP) inflates the GPU+CPU bill-of-materials to approximate motherboard + DRAM + SSD overhead.
 
 `lifetime_hours` default **26,280** = 3 yr × 365 × 24 calendar hours.
@@ -210,8 +219,52 @@ One file per metrics file, written to the same directory. Naming:
     "price_per_second_usd": 0.0007361,
     "price_source": "https://www.vultr.com/products/cloud-gpu/amd-mi355x/",
     "cost": {
-      "avg_cost_per_request_usd": 0.001354,
-      "avg_cost_per_1M_output_tokens_usd": 4.376
+      "avg_cost_per_request_usd": 0.00003731,
+      "avg_cost_per_1M_output_tokens_usd": 0.0684,
+      "method": "batch_token_profile",
+      "prefill_avg_batch_size": 8.0,
+      "decode_avg_batch_size": 64.0,
+      "decode_generated_tokens_per_request": 512.0,
+      "effective_output_tokens_per_s": 10765.3,
+      "formula": "price_per_second_usd * tpot_s / decode_avg_batch_size * 1e6",
+      "breakdown": {
+        "pricing": {
+          "price_per_hour_usd": 2.65,
+          "price_per_second_usd": 0.0007361
+        },
+        "latency": {
+          "e2e_s": 1.84,
+          "ttft_s": 0.024846,
+          "tpot_s": 0.005945
+        },
+        "batch_profile": {
+          "prefill_avg_batch_size": 8.0,
+          "decode_avg_batch_size": 64.0,
+          "prefill_tokens_per_request": 1024.0,
+          "decode_generated_tokens_per_request": 512.0
+        },
+        "throughput": {
+          "effective_output_tokens_per_s": 10765.3,
+          "prefill_tokens_per_s": 329831.8,
+          "formula": "decode_avg_batch_size / tpot_s"
+        },
+        "request_seconds": {
+          "prefill_seconds_per_request": 0.00310575,
+          "decode_seconds_per_request": 0.04756,
+          "total_seconds_per_request": 0.05067
+        },
+        "request_cost_usd": {
+          "prefill_cost_per_request_usd": 0.00000229,
+          "decode_cost_per_request_usd": 0.00003502,
+          "total_cost_per_request_usd": 0.00003731
+        },
+        "output_token_cost": {
+          "seconds_per_output_token": 0.00009289,
+          "cost_per_output_token_usd": 0.0000000684,
+          "cost_per_1M_output_tokens_usd": 0.0684,
+          "formula": "price_per_second_usd / effective_output_tokens_per_s * 1e6"
+        }
+      }
     }
   },
   "buy": {

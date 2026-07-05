@@ -49,10 +49,22 @@ class MoeComputeCostCliTests(unittest.TestCase):
             ], check=True, cwd=REPO, text=True, capture_output=True)
 
             cost = json.loads((run / "cost.json").read_text())
-            self.assertEqual(cost["rent"]["cost"]["avg_cost_per_1M_output_tokens_usd"], 0.5)
-            self.assertEqual(cost["rent"]["cost"]["decode_avg_batch_size"], 20.0)
-            self.assertAlmostEqual(cost["rent"]["cost"]["avg_cost_per_request_usd"], 0.000045)
-            self.assertEqual(cost["rent"]["cost"]["method"], "batch_token_profile")
+            rent_cost = cost["rent"]["cost"]
+            self.assertEqual(rent_cost["avg_cost_per_1M_output_tokens_usd"], 0.5)
+            self.assertEqual(rent_cost["decode_avg_batch_size"], 20.0)
+            self.assertAlmostEqual(rent_cost["avg_cost_per_request_usd"], 0.000045)
+            self.assertEqual(rent_cost["method"], "batch_token_profile")
+            self.assertEqual(rent_cost["effective_output_tokens_per_s"], 2000.0)
+            self.assertEqual(
+                rent_cost["formula"],
+                "price_per_second_usd * tpot_s / decode_avg_batch_size * 1e6",
+            )
+            self.assertEqual(rent_cost["breakdown"]["pricing"]["price_per_hour_usd"], 3.6)
+            self.assertEqual(rent_cost["breakdown"]["throughput"]["effective_output_tokens_per_s"], 2000.0)
+            self.assertEqual(rent_cost["breakdown"]["throughput"]["prefill_tokens_per_s"], 1000.0)
+            self.assertEqual(rent_cost["breakdown"]["request_seconds"]["prefill_seconds_per_request"], 0.02)
+            self.assertEqual(rent_cost["breakdown"]["request_seconds"]["decode_seconds_per_request"], 0.025)
+            self.assertEqual(rent_cost["breakdown"]["output_token_cost"]["cost_per_1M_output_tokens_usd"], 0.5)
 
     def test_buy_price_json_files_override_gpu_and_cpu_specs(self):
         with tempfile.TemporaryDirectory() as td:
