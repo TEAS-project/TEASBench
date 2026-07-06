@@ -13,5 +13,8 @@ export ALLOWED_ENGINE="vllm"
 
 # Potentially set anything else specific for vLLM benchmarks here.
 
+# Ensure that the host CUDA driver is picked up, not the compat library.
+export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+
 # Run the benchmarks.
 exec /root/run_benchmarks.sh
