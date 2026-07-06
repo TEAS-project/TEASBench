@@ -508,6 +508,15 @@ def main() -> int:
         if avg_e2e is None or ttft is None or tpot is None or out_tok is None:
             skipped += 1
             continue
+        if avg_e2e <= 0 or out_tok <= 0 or (ttft <= 0 and tpot <= 0):
+            print(
+                f"  [warn] skip invalid timing/token metrics for {f.relative_to(root)}: "
+                f"avg_e2e={avg_e2e}, ttft={ttft}, tpot={tpot}, "
+                f"avg_total_output_tokens={out_tok}",
+                file=sys.stderr,
+            )
+            skipped += 1
+            continue
 
         llm_active_s = (num_req or 0) * ttft + out_tok * tpot
         tool_wait_s = max(0.0, avg_e2e - llm_active_s)
