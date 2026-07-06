@@ -395,3 +395,8 @@ benchmark_end_timestamp=$( date +%Y%m%d-%H%M )
 echo "-----------------------------------------"
 echo "Benchmarking completed at $benchmark_end_timestamp."
 echo "-----------------------------------------"
+
+# Self-destruct the instance or else Vast.ai will restart at the entrypoint until the instance is externally destroyed.
+# The instance ID and API key are made available inside the environment by the Vast.ai launch. Use an API call through
+# curl to avoid having to bake the CLI into the image.
+curl -X DELETE "https://console.vast.ai/api/v0/instances/$CONTAINER_ID/" -H "Authorization: Bearer $CONTAINER_API_KEY"

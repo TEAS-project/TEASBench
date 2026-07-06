@@ -16,7 +16,7 @@ ENV ALLOWED_ENGINE=sglang
 
 # Install git and jq, then clean up apt lists to keep the image small.
 RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update && \
-    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" install -y --no-install-recommends git jq ca-certificates && \
+    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" install -y --no-install-recommends git curl jq ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Clone MoE-CAP into /opt at build time so it's available in the image. Although we'll be using it in
