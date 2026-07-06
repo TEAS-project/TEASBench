@@ -13,7 +13,43 @@ spec:
       restartPolicy: Never
       securityContext:
         fsGroup: 2000
-      @side_car@
+
+      # --- sidecar: MCP-ATLAS tool server (no GPU) ---
+      initContainers: []
+      containers:
+      # ---- Container 1: MCP tool server sidecar ----
+      - name: mcp-server
+        image: ghcr.io/scaleapi/mcp-atlas:latest
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+           cd /dev/shm
+           rm -rf AgentCAP
+           git clone "https://@agentcap_repo@" /dev/shm/AgentCAP
+           git -C /dev/shm/AgentCAP checkout @agentcap_ref@
+           AGENTCAP_COMMIT=$(git -C /dev/shm/AgentCAP rev-parse --short HEAD)
+           echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
+           pip install -e /dev/shm/AgentCAP
+
+           nohup bash /dev/shm/AgentCAP/mcp-server/start.sh > /root/mcp_server.log 2>&1 &
+        ports:
+        - containerPort: 1984
+          env:
+          - name: ENABLED_SERVERS 
+            value: "arxiv,brave-search,calculator,cli-mcp-server,clinicaltrialsgov-mcp-server,context7,ddg-search,desktop-commander,fetch,filesystem,git,github,mcp-code-executor,mcp-server-code-runner,memory,met-museum,open-library,osm-mcp-server,pubmed,weather,whois,wikipedia"
+            - name: MCP_ATLAS_DIR
+              value: "/dev/shm/AgentCAP/third_party/mcp_atlas"
+            - name: MCP_DATA_DIR
+              value: "/dev/shm/data"
+            - name: MCP_PORT
+              value: "1984"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
       containers:
       - name: @inference_engine@-agentic
         image: @image_name@
@@ -63,45 +99,6 @@ spec:
               secretKeyRef:
                 name: teasbench-pat
                 key: token
-
-      # --- sidecar: MCP-ATLAS tool server (no GPU) ---
-      initContainers: []
-
-      containers:
-        # ---- Container 1: MCP tool server sidecar ----
-        - name: mcp-server
-          image: ghcr.io/scaleapi/mcp-atlas:latest
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              cd /dev/shm
-              rm -rf AgentCAP
-              git clone "https://@agentcap_repo@" /dev/shm/AgentCAP
-              git -C /dev/shm/AgentCAP checkout @agentcap_ref@
-              AGENTCAP_COMMIT=$(git -C /dev/shm/AgentCAP rev-parse --short HEAD)
-              echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
-              pip install -e /dev/shm/AgentCAP
-
-              nohup bash /workspace/AgentCAP/mcp-server/start.sh > /root/mcp_server.log 2>&1 &
-          ports:
-            - containerPort: 1984
-          env:
-            - name: ENABLED_SERVERS
-              value: "arxiv,brave-search,calculator,cli-mcp-server,clinicaltrialsgov-mcp-server,context7,ddg-search,desktop-commander,fetch,filesystem,git,github,mcp-code-executor,mcp-server-code-runner,memory,met-museum,open-library,osm-mcp-server,pubmed,weather,whois,wikipedia"
-            - name: MCP_ATLAS_DIR
-              value: "/dev/shm/AgentCAP/third_party/mcp_atlas"
-            - name: MCP_DATA_DIR
-              value: "/dev/shm/data"
-            - name: MCP_PORT
-              value: "1984"
-          resources:
-            requests:
-              cpu: "2"
-              memory: 8Gi
-            limits:
-              cpu: "4"
-              memory: 16Gi
-
         command: ["/bin/bash", "-c"]
         args:
           - |
@@ -191,7 +188,7 @@ spec:
             server_sidecar_ready=0
             for i in $(seq 1 60); do
               if bash -c "echo > /dev/tcp/localhost/1984" 2>/dev/null; then
-                echo "MCP server ready after ${i}s"
+                echo "sidecar server ready after ${i}s"
                 break
               fi
               sleep 1
