@@ -45,34 +45,40 @@ DEFAULT_SCALE_OTHER_CAPITAL = 1.2
 
 GPU_SPECS: dict[str, dict] = {
     "a100": {
-        "price_per_unit_usd": 18000.0,
-        "price_source": "https://modal.com/blog/nvidia-a100-price-article",
+        "price_per_unit_usd": 15000.0,
+        "price_source": "https://www.trgdatacenters.com/resource/h100-vs-a100/",
         "tdp_w": 400,
         "tdp_source": "https://lenovopress.lenovo.com/lp1734-thinksystem-nvidia-a100-pcie-40-gpu",
     },
     "h100": {
-        "price_per_unit_usd": 25000.0,
-        "price_source": "https://modal.com/blog/nvidia-h100-price-article",
+        "price_per_unit_usd": 27000.0,
+        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h100-price/",
         "tdp_w": 700,
         "tdp_source": "https://lenovopress.lenovo.com/lp1732-thinksystem-nvidia-h100-pcie-gen5-gpu",
     },
     "h200": {
-        "price_per_unit_usd": 30000.0,
-        "price_source": "https://modal.com/blog/nvidia-h200-price-article",
+        "price_per_unit_usd": 31000.0,
+        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h200-price/",
         "tdp_w": 700,
         "tdp_source": "https://lenovopress.lenovo.com/lp1944-nvidia-h200-141gb-gpu",
     },
     "b200": {
-        "price_per_unit_usd": 35000.0,
-        "price_source": "https://modal.com/blog/nvidia-b200-pricing",
+        "price_per_unit_usd": 40000.0,
+        "price_source": "https://epoch.ai/blog/how-much-does-it-cost-to-train-frontier-ai-models",
         "tdp_w": 1000,
         "tdp_source": "https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf",
     },
     "b300": {
-        "price_per_unit_usd": 42500.0,
+        "price_per_unit_usd": 37500.0,
         "price_source": "https://tech-insider.org/nvidia-blackwell-gpu-pricing/",
         "tdp_w": 1400,
         "tdp_source": "https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-data-sheet",
+    },
+    "gb10": {
+        "price_per_unit_usd": 3999.0,
+        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
+        "tdp_w": 140,
+        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
     },
     "mi355x": {
         "price_per_unit_usd": 30000.0,
@@ -83,6 +89,13 @@ GPU_SPECS: dict[str, dict] = {
 }
 
 CPU_SPECS: dict[str, dict] = {
+    "gb10-soc": {
+        "model": "Arm Cortex-X925/A725 integrated in NVIDIA GB10",
+        "price_per_unit_usd": 0.0,
+        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
+        "tdp_w": 0,
+        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
+    },
     "epyc-7713p": {
         "model": "AMD EPYC 7713P",
         "price_per_unit_usd": 5010.0,
@@ -112,6 +125,7 @@ GPU_HOST_CPU: dict[str, tuple[int, str]] = {
     "h200": (2, "xeon-8468"),
     "b200": (2, "xeon-8468"),
     "b300": (2, "xeon-8558"),
+    "gb10": (1, "gb10-soc"),
     "mi355x": (2, "epyc-7713p"),
 }
 
