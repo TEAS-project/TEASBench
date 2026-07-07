@@ -455,6 +455,7 @@ def build_buy_block(
     utilisation: float,
     electricity_usd_per_kwh: float,
     scale_other_capital: float,
+    buy_price_quote_time: Optional[str] = None,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
     host = gpu_host_cpu.get(gpu_key)
@@ -486,6 +487,7 @@ def build_buy_block(
             "num": num_gpus,
             "price_per_unit_usd": gpu["price_per_unit_usd"],
             "price_source": gpu.get("price_source", "user-supplied"),
+            "price_quote_time": buy_price_quote_time,
             "tdp_w": gpu["tdp_w"],
             "tdp_source": gpu.get("tdp_source", "user-supplied"),
         },
@@ -495,6 +497,7 @@ def build_buy_block(
             "num": num_cpus,
             "price_per_unit_usd": cpu["price_per_unit_usd"],
             "price_source": cpu.get("price_source", "user-supplied"),
+            "price_quote_time": buy_price_quote_time,
             "tdp_w": cpu["tdp_w"],
             "tdp_source": cpu.get("tdp_source", "user-supplied"),
         },
@@ -598,6 +601,10 @@ def main() -> int:
         help=f"Capital scaling for motherboard/DRAM/SSD/etc. (default: "
              f"{DEFAULT_SCALE_OTHER_CAPITAL}, from MoE-CAP)",
     )
+    parser.add_argument(
+        "--buy-price-quote-time", default=None,
+        help="ISO time when buy prices were quoted (default: now, UTC)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -673,6 +680,7 @@ def main() -> int:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     recorded_at = now.isoformat().replace("+00:00", "Z")
     rent_quote_time = args.rent_price_quote_time or recorded_at
+    buy_price_quote_time = args.buy_price_quote_time or recorded_at
 
     print(f"\nRent prices ($/GPU/h):")
     for k in gpu_keys:
@@ -771,6 +779,7 @@ def main() -> int:
             utilisation=args.utilisation,
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
+            buy_price_quote_time=buy_price_quote_time,
         )
         if buy is not None:
             payload["buy"] = buy

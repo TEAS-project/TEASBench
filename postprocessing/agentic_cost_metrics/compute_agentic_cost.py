@@ -15,8 +15,8 @@ mixing conventions:
                    single-task/exclusive-worker upper bound.
 
 For transparency the cost JSON also reports an estimated time breakdown:
-  llm_active_s_est = ttft * avg_num_requests + tpot * avg_total_output_tokens
-  tool_wait_s_est  = max(0, avg_e2e_latency_s - llm_active_s_est)
+  llm_active_s = ttft * avg_num_requests + tpot * avg_total_output_tokens
+  tool_wait_s  = max(0, avg_e2e_latency_s - llm_active_s)
 
 Output: a sibling JSON (`cost.json` / `cost_<suffix>.json`) is written next
 to each `metrics.json` / `metrics_<suffix>.json` in the input tree.
@@ -251,6 +251,7 @@ def build_buy_pricing(
     gpu_key: str, num_gpus: int,
     *, gpu_specs, cpu_specs, gpu_host_cpu,
     lifetime_hours, electricity_usd_per_kwh, scale_other_capital,
+    buy_price_quote_time=None,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
     host = gpu_host_cpu.get(gpu_key)
@@ -280,6 +281,7 @@ def build_buy_pricing(
             "key": gpu_key, "num": num_gpus,
             "price_per_unit_usd": gpu["price_per_unit_usd"],
             "price_source": gpu.get("price_source", "user-supplied"),
+            "price_quote_time": buy_price_quote_time,
             "tdp_w": gpu["tdp_w"],
             "tdp_source": gpu.get("tdp_source", "user-supplied"),
             "capital_usd": gpu_capital,
@@ -291,6 +293,7 @@ def build_buy_pricing(
             "key": cpu_key, "model": cpu.get("model", cpu_key), "num": num_cpus,
             "price_per_unit_usd": cpu["price_per_unit_usd"],
             "price_source": cpu.get("price_source", "user-supplied"),
+            "price_quote_time": buy_price_quote_time,
             "tdp_w": cpu["tdp_w"],
             "tdp_source": cpu.get("tdp_source", "user-supplied"),
             "capital_usd": cpu_capital,
@@ -432,6 +435,8 @@ def main() -> int:
     parser.add_argument("--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS)
     parser.add_argument("--buy-electricity-usd-per-kwh", type=float, default=DEFAULT_ELECTRICITY_USD_PER_KWH)
     parser.add_argument("--buy-scale-other-capital", type=float, default=DEFAULT_SCALE_OTHER_CAPITAL)
+    parser.add_argument("--buy-price-quote-time", default=None,
+                        help="ISO time when buy prices were quoted (default: now, UTC)")
     parser.add_argument("--buy-cost-mode", choices=("active-resource", "reserved-worker"), default="active-resource",
                         help="Which buy-cost accounting mode to mirror at buy.cost top level. "
                              "Both modes are always reported: active-resource charges GPU for LLM-active time "
@@ -490,6 +495,7 @@ def main() -> int:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     recorded_at = now.isoformat().replace("+00:00", "Z")
     rent_quote_time = args.rent_price_quote_time or recorded_at
+    buy_price_quote_time = args.buy_price_quote_time or recorded_at
 
     written = 0
     skipped = 0
@@ -556,10 +562,10 @@ def main() -> int:
                 "avg_num_requests": num_req,
                 "avg_tool_call_count": tool_calls,
                 "avg_total_output_tokens": out_tok,
-                "llm_active_s_est": llm_active_s,
-                "tool_wait_s_est": tool_wait_s,
-                "p99_llm_active_s_est": p99_llm_active_s,
-                "p99_tool_wait_s_est": p99_tool_wait_s,
+                "llm_active_s": llm_active_s,
+                "tool_wait_s": tool_wait_s,
+                "p99_llm_active_s": p99_llm_active_s,
+                "p99_tool_wait_s": p99_tool_wait_s,
             },
         }
 
@@ -583,6 +589,7 @@ def main() -> int:
             lifetime_hours=args.buy_lifetime_hours,
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
+            buy_price_quote_time=buy_price_quote_time,
         )
         if buy_pricing is not None:
             buy = dict(buy_pricing)
