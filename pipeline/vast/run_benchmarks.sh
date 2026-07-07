@@ -371,14 +371,21 @@ while IFS=',' read -r -a VALUES; do
         # get going.
         if [[ "${row[dataset]}" == "arena-hard" ]]; then
             echo "Downloading sample answers for arena-hard..."
-            curl -L --output-dir "$BASE_DIR" -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl
+            if ! curl -L --output-dir "$BASE_DIR" -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl; then
+                echo "WARNING: failed to download arena-hard sample answers. This benchmark will likely fail." >&2
+            fi
         fi
 
         # Determine the extra arguments to the client using the helper (array)
         build_client_extra_args row
         echo "Benchmarking with extra arguments: ${client_extra_args[*]}"
-        run_benchmark "$RUN_DIR" "${row[model]}" "${row[dataset]}" "${row[num_samples]}" "${client_extra_args[@]}"
-        RUN_SUCCESS=$?
+        # Try to get the error code without triggering set -e so we can handle it properly below
+        # without killing the whole process.
+        if run_benchmark "$RUN_DIR" "${row[model]}" "${row[dataset]}" "${row[num_samples]}" "${client_extra_args[@]}"; then
+            RUN_SUCCESS=0
+        else
+            RUN_SUCCESS=$?
+        fi
 
         # If run is successful, stage results and push to repo. Otherwise, skip.
         if [[ $RUN_SUCCESS -eq 0 ]]; then
@@ -386,15 +393,23 @@ while IFS=',' read -r -a VALUES; do
             job_duration=$((job_end_time - job_start_time))
             job_description="{row[inference_engine]}-${row[model]}-${row[dataset]}-${row[num_samples]}-${row[gpu]}x${row[num_gpu]}-bs${row[batch_size]}"
             echo "Benchmark run completed, pushing results to repo..."
-            push_results "$RUN_DIR" "$RUN_SUBDIR" "$job_description" "$job_duration" row
-            echo "Push complete."
+            if push_results "$RUN_DIR" "$RUN_SUBDIR" "$job_description" "$job_duration" row; then
+                PUSH_SUCCESS=0
+            else
+                PUSH_SUCCESS=$?
+            fi
+            if [[ $PUSH_SUCCESS -eq 0 ]]; then
+                echo "Push complete."
+            else
+                echo "Push failed, results may not have been saved to the repo."
+            fi
         else
             echo "Benchmark run failed, skipping pushing results."
         fi
 
         echo "Shutting down server..."  # regardless of client success
-        kill $SERVER_PID
-        wait $SERVER_PID
+        kill $SERVER_PID 2>/dev/null || true
+        wait $SERVER_PID 2>/dev/null || true
     else
         echo "Not starting client because server is not available"
     fi
