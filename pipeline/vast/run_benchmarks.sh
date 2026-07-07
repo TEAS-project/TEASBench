@@ -313,15 +313,27 @@ while IFS=',' read -r -a VALUES; do
     # Build server extra args from the CSV row (centralised rules)
     build_server_extra_args row
 
+    # Build the base server args.
+    server_base_args=(--port 30000)
+    if [[ "${row[inference_engine]}" == "vllm" ]]; then
+        server_base_args+=(
+            --model "unsloth/${row[model]}"
+            --host 0.0.0.0
+            --enable-expert-distribution-metrics
+            --tensor-parallel-size "${row[num_gpu]}"
+        )
+    elif [[ "${row[inference_engine]}" == "sglang" ]]; then
+        server_base_args+=(
+            --model-path "unsloth/${row[model]}"
+            --expert-distribution-recorder-mode stat
+            --tp-size "${row[num_gpu]}"
+        )
+    fi
+
     echo "Starting server with extra arguments: ${server_extra_args[*]}"
-    echo "${row[model]}"
     server_init_start_time=$(date +%s)
-    python3 -m moe_cap.systems.vllm \
-      --model "unsloth/${row[model]}" \
-      --port 30000 \
-      --host 0.0.0.0 \
-      --enable-expert-distribution-metrics \
-      --tensor-parallel-size 1 \
+    python3 -m moe_cap.systems."${row[inference_engine]}" \
+      "${server_base_args[@]}" \
       "${server_extra_args[@]}" &> "$RUN_DIR/server.log" &
     SERVER_PID=$!
 
