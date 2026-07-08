@@ -28,6 +28,19 @@ if [ -z "${OPENAI_API_KEY:-}" ]; then
   exit 1
 fi
 
+# In normal use the container ID (identifying the current instance) and the container API key
+# (granting access to the Vast.ai API) should have been injected into the container by Vast.ai
+# itself. If something's gone wrong, `exit 1` now, as this is our only way of automating the
+# destruction of the instance once the benchmarks are complete.
+if [ -z "${CONTAINER_ID:-}" ]; then
+  echo "ERROR: CONTAINER_ID environment variable is not set (should be injected by Vast.ai)" >&2
+  exit 1
+fi
+if [ -z "${CONTAINER_API_KEY:-}" ]; then
+  echo "ERROR: CONTAINER_API_KEY environment variable is not set (should be injected by Vast.ai)" >&2
+  exit 1
+fi
+
 # Start benchmarking.
 start_timestamp=$( date +%Y%m%d-%H%M )
 BASE_DIR=/dev/shm/$start_timestamp
@@ -318,7 +331,22 @@ echo "-----------------------------------------"
 echo "Benchmarking completed at $benchmark_end_timestamp."
 echo "-----------------------------------------"
 
-# Self-destruct the instance or else Vast.ai will restart at the entrypoint until the instance is externally destroyed.
-# The instance ID and API key are made available inside the environment by the Vast.ai launch. Use an API call through
-# curl to avoid having to bake the CLI into the image.
-curl -X DELETE "https://console.vast.ai/api/v0/instances/$CONTAINER_ID/" -H "Authorization: Bearer $CONTAINER_API_KEY"
+# Self-destruct the instance or else Vast.ai will restart at the entrypoint until the instance is
+# externally destroyed. Use an API call through curl to avoid having to bake the Vast.ai CLI into
+# the image. We also need to retry on failure, and as a last resort, sleep forever instead of exiting.
+# If the script were to exit instead, without the instance being destroyed, Vast.ai would just
+# start the container up again and loop it indefinitely.
+echo "Destroying this instance..."
+destroyed=0
+for attempt in 1 2 3 4 5; do
+    if curl -sf -X DELETE "https://console.vast.ai/api/v0/instances/$CONTAINER_ID/" -H "Authorization: Bearer $CONTAINER_API_KEY"; then
+        destroyed=1
+        break
+    fi
+    echo "WARNING: failed to destroy instance (attempt $attempt/5), retrying in 30s..." >&2
+    sleep 30
+done
+if [[ $destroyed -eq 0 ]]; then
+    echo "ERROR: could not destroy this instance via the Vast.ai API. Idling so the benchmarks don't re-run on container restart. Please destroy this instance manually." >&2
+    sleep infinity
+fi
