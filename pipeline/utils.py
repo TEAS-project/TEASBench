@@ -34,6 +34,19 @@ HF_MODEL_MAP={
     "Kimi-K2.5": "moonshotai/Kimi-K2.5"
 }
 
+# Container disc space to request per model on Vast.ai (--disk, in GB).
+# Require space for full Python, CUDA, inference engine installation but also
+# the model which varies quite a bit across those we use.
+# Verify model requirement with `hf download --dry-run <model name>`
+# and add some extra as buffer for the rest of the software.
+MODEL_DISK_GB_MAP={
+    "gpt-oss-20b": 60,                          # model = 27.5 GB
+    "gpt-oss-120b": 160,                        # model = 130.5 GB
+    "Qwen3-235B-A22B-Instruct-2507": 550,       # model = 470.2 GB
+    "Qwen3-235B-A22B-Instruct-2507-FP8": 280,   # model = 236.4 GB
+    "DeepSeek-R1": 800,                         # model = 688.6 GB
+    "Kimi-K2.5": 700                            # model = 595.2 GB
+}
 
 EIDF_GPU_MAP={
     "A100":"NVIDIA-A100-SXM4-80GB",

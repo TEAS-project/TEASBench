@@ -7,7 +7,7 @@ import textwrap
 
 import pandas as pd
 
-from utils import VAST_GPU_MAP
+from utils import MODEL_DISK_GB_MAP, VAST_GPU_MAP
 
 # A rented Vast.ai host's driver must support a minimum CUDA version that is compatible with
 # the version in the base images in pipeline/vast/*/Dockerfile (currently vllm/vllm-openai:v0.16.0, which uses 12.9).
@@ -36,7 +36,7 @@ def _encode_csv_group(group_df, all_columns):
     return base64.b64encode(buf.getvalue().encode()).decode()
 
 
-def _generate_script(engine, gpu, num_gpu, encoded_csv, registry_login: tuple | None = None):
+def _generate_script(engine, gpu, num_gpu, disk_gb, encoded_csv, registry_login: tuple | None = None):
     """
     Generate a bash script for launching a Vast.ai instance with the specified engine, GPU, and number of GPUs.
     We pass the encoded CSV containing the benchmarks to run through to it as a environment variable.
@@ -83,7 +83,7 @@ def _generate_script(engine, gpu, num_gpu, encoded_csv, registry_login: tuple | 
         # 3. Launch the instance.
         vastai create instance "$OFFER_ID" \\
           --image "{image}" \\
-          --disk 50 \\{login_line}
+          --disk {disk_gb} \\{login_line}
           --env "-e BENCHMARK_CSV=${{BENCHMARK_CSV}}" \\
           --args
     """)
@@ -104,10 +104,14 @@ def generate_vast_scripts(csv_file, target_dir, registry_login: tuple | None = N
                 f"GPU {gpu!r} not in VAST_GPU_MAP. Add it to pipeline/utils.py."
             )
 
+        # Size the instance's disk to the largest model in this group, since the model
+        # weights are downloaded onto it (into the HF cache).
+        disk_gb = max(MODEL_DISK_GB_MAP[model] for model in group["model"].unique())
+
         # Generate the encoded CSV for this engine-gpu-num_gpu triplet and then write the
         # script to submit this to a Vast.ai instance.
         encoded_csv = _encode_csv_group(group, all_columns)
-        script = _generate_script(engine, gpu, num_gpu, encoded_csv,
+        script = _generate_script(engine, gpu, num_gpu, disk_gb, encoded_csv,
                                   registry_login=registry_login)
 
         # Write the script and for convenience make it executable right away.
