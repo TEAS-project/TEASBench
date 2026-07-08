@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 
-# This general purpose script runs benchmarks for all vLLM and SGLang configurations, based on the
-# rules in pipeline/configs/config.yml as of TEASBench main branch commit 2d3d02f.
+# This general purpose script runs benchmarks for all vLLM and SGLang configurations from the
+# experiment CSV passed in $BENCHMARK_CSV. The server and client commands for each row are built
+# at runtime by /opt/teasbench/pipeline/vast/resolve_commands.py, which applies the rules in the
+# config.yaml in /opt/teasbench/pipeline/configs.
 
 set -euo pipefail
 
@@ -41,34 +43,22 @@ RESULTS_REPO_URL="https://oauth2:$GIT_TOKEN@github.com/$RESULTS_REPO_USER/$RESUL
 echo "Cloning results repo $RESULTS_REPO"
 git clone "$RESULTS_REPO_URL"
 
-# Function to run single benchmark with given options. Extra arguments might be
-# judge arguments for arena-hard or set the batch size, but for others this
-# argument might just be empty.
+# Function to run a single benchmark. Takes the run directory, the dataset name,
+# and the row's client command (base64-encoded, as printed by resolve_commands.py).
 run_benchmark() {
     local run_dir=$1
-    local model_name=$2
-    local dataset=$3
-    local num_samples=$4
-    # Move the first four args out of the way and store the remainder as the
-    # extra arguments to the MoE-CAP client.
-    shift 4
-    local extra_args=("$@")
+    local dataset=$2
+    local client_command
+    client_command=$(echo "$3" | base64 -d)
 
     echo "Starting to run benchmark (sending http requests)..."
+    echo "Client command: $client_command"
     client_start_time=$(date +%s)
-    # Briefly turn off set -e so that a non-zero exit from python3 doesn't kill the
-    # script before we can capture it. Once we've done so, just below, set -e again
+    # Briefly turn off set -e so that a non-zero exit from the client doesn't kill
+    # the script before we can capture it. Once we've done so, just below, set -e again
     set +e
-    # and benchmark:
-    python3 -m moe_cap.runner.openai_api_profile \
-      --model_name unsloth/"$model_name" \
-      --datasets "$dataset" \
-      --num-samples "$num_samples" \
-      --api-url http://localhost:30000/v1/completions \
-      --use-chat-api \
-      --output_dir "$run_dir" \
-      "${extra_args[@]}" \
-      &> "$run_dir/client_$dataset.log"
+    # and benchmark.
+    eval "$client_command" &> "$run_dir/client_$dataset.log"
     CLIENT_SUCCESS=$?
     set -e
 
@@ -101,10 +91,12 @@ push_results() {
     declare -n r="$row_name"
     local model_name="${r[model]}"
 
-    # Tidy up - gather MoE-CAP generated results from subdir
+    # Tidy up - gather MoE-CAP generated results from the subdir named after the
+    # HF model path (e.g. Qwen/Qwen3-..., resolved by resolve_commands.py — the
+    # org prefix varies by model).
     cd "$run_dir"
-    cp unsloth/"$model_name"/* .
-    rm -r "$(dirname unsloth/"$model_name")"
+    cp "$HF_MODEL_PATH"/* .
+    rm -r "$(dirname "$HF_MODEL_PATH")"
     mv metadata*.json metadata.json
     mv metrics*.json metrics.json
     mv detailed_results* detailed_results.jsonl
@@ -132,105 +124,6 @@ push_results() {
     git commit -m "auto: ${r[inference_engine]}-${model_name}-${r[dataset]}-${r[num_samples]}-${r[gpu]}x${r[num_gpu]}-bs${r[batch_size]}"
     git push "https://oauth2:${GIT_TOKEN}@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
     # echo "Would be pushing to results repo here, but skipping for now."
-}
-
-# Build server extra arguments from the CSV row using our defined rules.
-# Rules mirror pipeline/configs/config.yaml (server_flags section).
-build_server_extra_args() {
-    local row_name="$1"
-    declare -n r="$row_name"
-
-    server_extra_args=()
-
-    # batch_size=1 → limit concurrent sequences
-    if [[ "${r[batch_size]}" == "1" ]]; then
-        if [[ "${r[inference_engine]}" == "vllm" ]]; then
-            server_extra_args+=("--max_num_seqs" "1")
-        elif [[ "${r[inference_engine]}" == "sglang" ]]; then
-            server_extra_args+=("--max-running-requests" "1")
-        fi
-    fi
-
-    # Model-specific reasoning parsers
-    if [[ "${r[model]}" == "DeepSeek-R1" ]]; then
-        server_extra_args+=("--reasoning-parser" "deepseek_r1")
-    elif [[ "${r[model]}" == "Kimi-K2.5" ]]; then
-        server_extra_args+=("--reasoning-parser" "kimi_k2")
-    elif [[ "${r[model]}" == "gpt-oss-20b" || "${r[model]}" == "gpt-oss-120b" ]]; then
-        if [[ "${r[inference_engine]}" == "vllm" ]]; then
-            server_extra_args+=("--reasoning-parser" "openai_gptoss")
-        elif [[ "${r[inference_engine]}" == "sglang" ]]; then
-            server_extra_args+=("--reasoning-parser" "gpt-oss")
-        fi
-    fi
-
-    # Qwen3 model load timeout (sglang --dist-timeout; no vllm equivalent)
-    if [[ "${r[model]}" == "Qwen3-235B-A22B-Instruct-2507-FP8" || "${r[model]}" == "Qwen3-235B-A22B-Instruct-2507" ]]; then
-        if [[ "${r[inference_engine]}" == "sglang" ]]; then
-            server_extra_args+=("--dist-timeout" "3600")
-        fi
-    fi
-
-    # Memory tweaks for gpt-oss-120b on a single H100 at default batch size
-    if [[ "${r[model]}" == "gpt-oss-120b" && "${r[gpu]}" == "H100" \
-       && "${r[num_gpu]}" == "1" && "${r[batch_size]}" == "default" ]]; then
-        if [[ "${r[inference_engine]}" == "sglang" ]]; then
-            server_extra_args+=("--mem-fraction-static" "0.9")
-        elif [[ "${r[inference_engine]}" == "vllm" ]]; then
-            if [[ "${r[dataset]}" == "gsm8k" || "${r[dataset]}" == "arena-hard" ]]; then
-                server_extra_args+=("--gpu_memory_utilization" "0.92")
-            elif [[ "${r[dataset]}" == "longbench_v1" ]]; then
-                server_extra_args+=("--gpu_memory_utilization" "0.94")
-            fi
-        fi
-    fi
-
-    # Qwen3 on H100 with vllm → increase max context length
-    if [[ ( "${r[model]}" == "Qwen3-235B-A22B-Instruct-2507-FP8" \
-         || "${r[model]}" == "Qwen3-235B-A22B-Instruct-2507" ) \
-       && "${r[inference_engine]}" == "vllm" && "${r[gpu]}" == "H100" ]]; then
-        server_extra_args+=("--max-model-len" "200k")
-    fi
-}
-
-# Build client extra arguments from the CSV row using our defined rules.
-# Rules mirror pipeline/configs/config.yaml (client_flags section).
-build_client_extra_args() {
-    local row_name="$1"
-    declare -n r="$row_name"
-
-    client_extra_args=()
-
-    # Backend mapping (inference_engine → --backend)
-    if [[ "${r[inference_engine]}" == "vllm" ]]; then
-        client_extra_args+=(--backend "vllm")
-    elif [[ "${r[inference_engine]}" == "sglang" ]]; then
-        client_extra_args+=(--backend "sglang")
-    fi
-
-    # batch_size (non-default) → --server-batch-size
-    if [[ "${r[batch_size]}" != "default" ]]; then
-        client_extra_args+=(--server-batch-size "${r[batch_size]}")
-    fi
-
-    # arena-hard → set judge flags + baseline answers
-    if [[ "${r[dataset]}" == "arena-hard" ]]; then
-        client_extra_args+=(--judge-api-url "https://api.openai.com/v1/chat/completions")
-        client_extra_args+=(--judge-model "gpt-4.1")
-        client_extra_args+=(--judge-api-key "${OPENAI_API_KEY}")
-        client_extra_args+=(--baseline-answers-path "${BASE_DIR}/gpt-4-0613.jsonl")
-    fi
-
-    # Fixed-length mode (optional CSV columns; absent rows are treated as unset)
-    if [[ -n "${r[input_length]:-}" || -n "${r[output_length]:-}" ]]; then
-        client_extra_args+=(--fixed-length-mode)
-    fi
-    if [[ -n "${r[input_length]:-}" ]]; then
-        client_extra_args+=(--target-input-tokens "${r[input_length]}")
-    fi
-    if [[ -n "${r[output_length]:-}" ]]; then
-        client_extra_args+=(--target-output-tokens "${r[output_length]}")
-    fi
 }
 
 # Get MoE-CAP commit hash for reproducibility.
@@ -310,31 +203,35 @@ while IFS=',' read -r -a VALUES; do
     mkdir -p "$RUN_DIR"
     cd "$RUN_DIR"
 
-    # Build server extra args from the CSV row (centralised rules)
-    build_server_extra_args row
-
-    # Build the base server args.
-    server_base_args=(--port 30000)
-    if [[ "${row[inference_engine]}" == "vllm" ]]; then
-        server_base_args+=(
-            --model "unsloth/${row[model]}"
-            --host 0.0.0.0
-            --enable-expert-distribution-metrics
-            --tensor-parallel-size "${row[num_gpu]}"
-        )
-    elif [[ "${row[inference_engine]}" == "sglang" ]]; then
-        server_base_args+=(
-            --model-path "unsloth/${row[model]}"
-            --expert-distribution-recorder-mode stat
-            --tp-size "${row[num_gpu]}"
-        )
+    # Resolve the server and client commands for this row from the config.yaml
+    # baked into the image, via template.py's rule engine. resolve_commands.py
+    # prints three lines: the HF model path, then the server and client commands
+    # (base64-encoded, since they contain line continuations).
+    resolve_args=(
+        --inference-engine "${row[inference_engine]}"
+        --model "${row[model]}"
+        --dataset "${row[dataset]}"
+        --num-samples "${row[num_samples]}"
+        --gpu "${row[gpu]}"
+        --num-gpu "${row[num_gpu]}"
+        --batch-size "${row[batch_size]}"
+    )
+    # input_length/output_length are optional CSV columns; only pass them if present.
+    if [[ -n "${row[input_length]:-}" ]]; then
+        resolve_args+=(--input-length "${row[input_length]}")
     fi
+    if [[ -n "${row[output_length]:-}" ]]; then
+        resolve_args+=(--output-length "${row[output_length]}")
+    fi
+    resolved=$(python3 /opt/teasbench/pipeline/vast/resolve_commands.py "${resolve_args[@]}")
+    { read -r HF_MODEL_PATH; read -r server_b64; read -r client_b64; } <<< "$resolved"
 
-    echo "Starting server with extra arguments: ${server_extra_args[*]}"
+    server_command=$(echo "$server_b64" | base64 -d)
+    echo "Starting server: $server_command"
     server_init_start_time=$(date +%s)
-    python3 -m moe_cap.systems."${row[inference_engine]}" \
-      "${server_base_args[@]}" \
-      "${server_extra_args[@]}" &> "$RUN_DIR/server.log" &
+    # eval is needed for the command's embedded line continuations; backgrounding
+    # inside the eval string means $! still captures the server's PID.
+    eval "$server_command &> \"$RUN_DIR/server.log\" &"
     SERVER_PID=$!
 
     # Wait until the /health endpoint returns HTTP 200
@@ -368,20 +265,18 @@ while IFS=',' read -r -a VALUES; do
         jq -n --arg server_init_duration $server_init_duration '{server_initialisation: $server_init_duration}'  >> "$RUN_DIR/timings.json"
 
         # If we'll be benchmarking arena-hard, download the sample answers before we
-        # get going.
+        # get going. The resolved client command's --baseline-answers-path points at
+        # $RUN_DIR (from config.yaml), so download into the run directory.
         if [[ "${row[dataset]}" == "arena-hard" ]]; then
             echo "Downloading sample answers for arena-hard..."
-            if ! curl -L --output-dir "$BASE_DIR" -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl; then
+            if ! curl -L --output-dir "$RUN_DIR" -O https://raw.githubusercontent.com/lmarena/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0613.jsonl; then
                 echo "WARNING: failed to download arena-hard sample answers. This benchmark will likely fail." >&2
             fi
         fi
 
-        # Determine the extra arguments to the client using the helper (array)
-        build_client_extra_args row
-        echo "Benchmarking with extra arguments: ${client_extra_args[*]}"
         # Try to get the error code without triggering set -e so we can handle it properly below
         # without killing the whole process.
-        if run_benchmark "$RUN_DIR" "${row[model]}" "${row[dataset]}" "${row[num_samples]}" "${client_extra_args[@]}"; then
+        if run_benchmark "$RUN_DIR" "${row[dataset]}" "$client_b64"; then
             RUN_SUCCESS=0
         else
             RUN_SUCCESS=$?

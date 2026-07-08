@@ -1,5 +1,6 @@
-# Build with the following, from the repo root directory:
-# docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t ghcr.io/teas-project/vllm-bench:latest -f pipeline/vast/vllm/Dockerfile pipeline/vast/
+# Build with the following, from the repo root directory (note the build context is pipeline/,
+# so that template.py, utils.py and configs/config.yaml can be copied into the image):
+# docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t ghcr.io/teas-project/vllm-bench:latest -f pipeline/vast/vllm/Dockerfile pipeline/
 # (or podman)
 
 # Base the image on vLLM v0.16.0, as on the EIDF.
@@ -30,9 +31,14 @@ RUN git config --global user.name "Pipeline Autopush" && \
     git config --global user.email ""
 
 # Copy the run_benchmarks.sh and entrypoint.sh scripts into the image.
-COPY run_benchmarks.sh /root/run_benchmarks.sh
-COPY vllm/entrypoint.sh /root/entrypoint.sh
+COPY vast/run_benchmarks.sh /root/run_benchmarks.sh
+COPY vast/vllm/entrypoint.sh /root/entrypoint.sh
 RUN chmod +x /root/run_benchmarks.sh /root/entrypoint.sh
+
+# Also copy in the MoE-CAP command resolution infrastructure.
+COPY template.py utils.py /opt/teasbench/pipeline/
+COPY configs/config.yaml /opt/teasbench/pipeline/configs/config.yaml
+COPY vast/resolve_commands.py /opt/teasbench/pipeline/vast/resolve_commands.py
 
 WORKDIR /root
 
