@@ -50,8 +50,8 @@ cd "$BASE_DIR"
 # For now, leave output unredirected so we can see it in the logs on the Vast.ai. console.
 #exec &> "$BASE_DIR/stdout_stderr.log"
 
-RESULTS_REPO="TEASBench-container-dev-results"
-RESULTS_REPO_USER="welucas2"
+RESULTS_REPO="TEAS_Development_Results_Private"
+RESULTS_REPO_USER="TEAS-project"
 RESULTS_REPO_URL="https://oauth2:$GIT_TOKEN@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
 echo "Cloning results repo $RESULTS_REPO"
 git clone "$RESULTS_REPO_URL"
@@ -115,8 +115,8 @@ push_results() {
     mv detailed_results* detailed_results.jsonl
     mv output_data*.jsonl output_data.jsonl
 
-    cd "$BASE_DIR/TEASBench-container-dev-results"
-    output_dir="$BASE_DIR/TEASBench-container-dev-results/$run_subdir"
+    cd "$BASE_DIR/$RESULTS_REPO"
+    output_dir="$BASE_DIR/$RESULTS_REPO/$run_subdir"
     mkdir -p "$output_dir"
     cp -r "$run_dir"/* "$output_dir"/
 
