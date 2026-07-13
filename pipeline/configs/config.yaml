@@ -154,6 +154,8 @@ variables_defaults:
 
 # Rules for conditional inclusion and values of variables depending on experiment parameters.
 # 'match' keys are ANDed together; list values within a key are ORed.
+# A match value can also be {not: [...]} to match when the parameter's value
+# is NOT in the given list (or not equal, if a single scalar is given).
 # server_flags / client_flags name canonical params (as defined above)
 # and supply the value to pass to that flag.
 rules:
@@ -163,12 +165,32 @@ rules:
   - match:
       inference_engine:
         - "sglang"
+    client_flags:
+      backend: "sglang"
+
+# Expert-distribution recording only makes sense for MoE models,
+# so exclude the dense Qwen3.5-4B model here.
+  - match:
+      inference_engine:
+        - "sglang"
+      model:
+        not:
+          - "Qwen3.5-4B"
     extra_container_env:
       value: |
         - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
           value: "/dev/shm/sglang_expert_distribution_recorder"
-    client_flags:
-      backend: "sglang"
+
+# Dense models have no experts to record, so restrict profiling to compute cost only.
+  - match:
+      inference_engine:
+        - "sglang"
+      model:
+        - "Qwen3.5-4B"
+    extra_container_env:
+      value: |
+        - name: MOE_CAP_PROFILING_ONLY
+          value: "1"
 
   - match:
       inference_engine:

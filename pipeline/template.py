@@ -20,6 +20,13 @@ class Template:
                 if experiment_value is None or experiment_value == "":
                     return False
                 continue
+            if isinstance(rule_value, dict) and "not" in rule_value:
+                excluded = rule_value["not"]
+                if not isinstance(excluded, list):
+                    excluded = [excluded]
+                if experiment_value in excluded:
+                    return False
+                continue
             if isinstance(rule_value, list):
                 if experiment_value not in rule_value:
                     return False
