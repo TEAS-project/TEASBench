@@ -56,19 +56,13 @@ if __name__=="__main__":
     parser.add_argument("--target_dir", type=str, default="./", required=False, help="Target directory to save generated files - defaults to current directory")
     parser.add_argument("--results_repo", type=str, default="TEAS_Development_Results_Private", required=False, help="Name of results repository (not the URL) - defaults to TEAS_Development_Results_Private")
     parser.add_argument("--vast", action="store_true", help="Generate Vast.ai launch scripts instead of EIDF YAML configs")
-    registry_group = parser.add_argument_group("Vast.ai registry authentication (all three required together)")
-    registry_group.add_argument("--registry-username", type=str, default=None, help="Username for the image registry")
-    registry_group.add_argument("--registry-password", type=str, default=None, help="Password or PAT for the image registry")
-    registry_group.add_argument("--registry", type=str, default=None, help="Registry host (e.g. ghcr.io, docker.io)")
+    parser.add_argument("--private-image", action="store_true",
+                         help="Add a --login to the generated script (reading GHCR_USERNAME/GHCR_PAT from the "
+                              "environment at run time), since the container image is currently private on ghcr.io.")
     args = parser.parse_args()
-
-    registry_args = [args.registry_username, args.registry_password, args.registry]
-    if any(a is not None for a in registry_args) and not all(a is not None for a in registry_args):
-        parser.error("--registry-username, --registry-password, and --registry must all be provided together")
-    registry_login = (args.registry_username, args.registry_password, args.registry) if all(a is not None for a in registry_args) else None
 
     if args.vast:
         from vast_generate import generate_vast_scripts
-        generate_vast_scripts(args.csv_file, args.target_dir, registry_login=registry_login)
+        generate_vast_scripts(args.csv_file, args.target_dir, private_image=args.private_image)
     else:
         main(args.csv_file, args.target_dir, args.results_repo)
