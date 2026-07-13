@@ -15,8 +15,8 @@ mixing conventions:
                    single-task/exclusive-worker upper bound.
 
 For transparency the cost JSON also reports an estimated time breakdown:
-  llm_active_s_est = ttft * avg_num_requests + tpot * avg_total_output_tokens
-  tool_wait_s_est  = max(0, avg_e2e_latency_s - llm_active_s_est)
+  llm_active_s = ttft * avg_num_requests + tpot * avg_total_output_tokens
+  tool_wait_s  = max(0, avg_e2e_latency_s - llm_active_s)
 
 Output: a sibling JSON (`cost.json` / `cost_<suffix>.json`) is written next
 to each `metrics.json` / `metrics_<suffix>.json` in the input tree.
@@ -45,34 +45,40 @@ DEFAULT_SCALE_OTHER_CAPITAL = 1.2
 
 GPU_SPECS: dict[str, dict] = {
     "a100": {
-        "price_per_unit_usd": 18000.0,
-        "price_source": "https://modal.com/blog/nvidia-a100-price-article",
+        "price_per_unit_usd": 15000.0,
+        "price_source": "https://www.trgdatacenters.com/resource/h100-vs-a100/",
         "tdp_w": 400,
         "tdp_source": "https://lenovopress.lenovo.com/lp1734-thinksystem-nvidia-a100-pcie-40-gpu",
     },
     "h100": {
-        "price_per_unit_usd": 25000.0,
-        "price_source": "https://modal.com/blog/nvidia-h100-price-article",
+        "price_per_unit_usd": 27000.0,
+        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h100-price/",
         "tdp_w": 700,
         "tdp_source": "https://lenovopress.lenovo.com/lp1732-thinksystem-nvidia-h100-pcie-gen5-gpu",
     },
     "h200": {
-        "price_per_unit_usd": 30000.0,
-        "price_source": "https://modal.com/blog/nvidia-h200-price-article",
+        "price_per_unit_usd": 31000.0,
+        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h200-price/",
         "tdp_w": 700,
         "tdp_source": "https://lenovopress.lenovo.com/lp1944-nvidia-h200-141gb-gpu",
     },
     "b200": {
-        "price_per_unit_usd": 35000.0,
-        "price_source": "https://modal.com/blog/nvidia-b200-pricing",
+        "price_per_unit_usd": 40000.0,
+        "price_source": "https://epoch.ai/blog/how-much-does-it-cost-to-train-frontier-ai-models",
         "tdp_w": 1000,
         "tdp_source": "https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf",
     },
     "b300": {
-        "price_per_unit_usd": 42500.0,
+        "price_per_unit_usd": 37500.0,
         "price_source": "https://tech-insider.org/nvidia-blackwell-gpu-pricing/",
         "tdp_w": 1400,
         "tdp_source": "https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-data-sheet",
+    },
+    "gb10": {
+        "price_per_unit_usd": 3999.0,
+        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
+        "tdp_w": 140,
+        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
     },
     "mi355x": {
         "price_per_unit_usd": 30000.0,
@@ -83,6 +89,13 @@ GPU_SPECS: dict[str, dict] = {
 }
 
 CPU_SPECS: dict[str, dict] = {
+    "gb10-soc": {
+        "model": "Arm Cortex-X925/A725 integrated in NVIDIA GB10",
+        "price_per_unit_usd": 0.0,
+        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
+        "tdp_w": 0,
+        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
+    },
     "epyc-7713p": {
         "model": "AMD EPYC 7713P",
         "price_per_unit_usd": 5010.0,
@@ -112,6 +125,7 @@ GPU_HOST_CPU: dict[str, tuple[int, str]] = {
     "h200": (2, "xeon-8468"),
     "b200": (2, "xeon-8468"),
     "b300": (2, "xeon-8558"),
+    "gb10": (1, "gb10-soc"),
     "mi355x": (2, "epyc-7713p"),
 }
 
@@ -237,6 +251,7 @@ def build_buy_pricing(
     gpu_key: str, num_gpus: int,
     *, gpu_specs, cpu_specs, gpu_host_cpu,
     lifetime_hours, electricity_usd_per_kwh, scale_other_capital,
+    buy_price_quote_time=None,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
     host = gpu_host_cpu.get(gpu_key)
@@ -266,6 +281,7 @@ def build_buy_pricing(
             "key": gpu_key, "num": num_gpus,
             "price_per_unit_usd": gpu["price_per_unit_usd"],
             "price_source": gpu.get("price_source", "user-supplied"),
+            "price_quote_time": buy_price_quote_time,
             "tdp_w": gpu["tdp_w"],
             "tdp_source": gpu.get("tdp_source", "user-supplied"),
             "capital_usd": gpu_capital,
@@ -277,6 +293,7 @@ def build_buy_pricing(
             "key": cpu_key, "model": cpu.get("model", cpu_key), "num": num_cpus,
             "price_per_unit_usd": cpu["price_per_unit_usd"],
             "price_source": cpu.get("price_source", "user-supplied"),
+            "price_quote_time": buy_price_quote_time,
             "tdp_w": cpu["tdp_w"],
             "tdp_source": cpu.get("tdp_source", "user-supplied"),
             "capital_usd": cpu_capital,
@@ -418,6 +435,8 @@ def main() -> int:
     parser.add_argument("--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS)
     parser.add_argument("--buy-electricity-usd-per-kwh", type=float, default=DEFAULT_ELECTRICITY_USD_PER_KWH)
     parser.add_argument("--buy-scale-other-capital", type=float, default=DEFAULT_SCALE_OTHER_CAPITAL)
+    parser.add_argument("--buy-price-quote-time", default=None,
+                        help="ISO time when buy prices were quoted (default: now, UTC)")
     parser.add_argument("--buy-cost-mode", choices=("active-resource", "reserved-worker"), default="active-resource",
                         help="Which buy-cost accounting mode to mirror at buy.cost top level. "
                              "Both modes are always reported: active-resource charges GPU for LLM-active time "
@@ -476,6 +495,7 @@ def main() -> int:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     recorded_at = now.isoformat().replace("+00:00", "Z")
     rent_quote_time = args.rent_price_quote_time or recorded_at
+    buy_price_quote_time = args.buy_price_quote_time or recorded_at
 
     written = 0
     skipped = 0
@@ -542,10 +562,10 @@ def main() -> int:
                 "avg_num_requests": num_req,
                 "avg_tool_call_count": tool_calls,
                 "avg_total_output_tokens": out_tok,
-                "llm_active_s_est": llm_active_s,
-                "tool_wait_s_est": tool_wait_s,
-                "p99_llm_active_s_est": p99_llm_active_s,
-                "p99_tool_wait_s_est": p99_tool_wait_s,
+                "llm_active_s": llm_active_s,
+                "tool_wait_s": tool_wait_s,
+                "p99_llm_active_s": p99_llm_active_s,
+                "p99_tool_wait_s": p99_tool_wait_s,
             },
         }
 
@@ -569,6 +589,7 @@ def main() -> int:
             lifetime_hours=args.buy_lifetime_hours,
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
+            buy_price_quote_time=buy_price_quote_time,
         )
         if buy_pricing is not None:
             buy = dict(buy_pricing)

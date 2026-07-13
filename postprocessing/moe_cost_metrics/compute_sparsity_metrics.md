@@ -85,7 +85,7 @@ Metadata `gpu_type` strings normalized to the keys above; raw variants seen and 
 
 ## 5. Per-dataset token defaults
 
-Used to materialize the KV-cache term (S-MBU) and to derive `prefill_tokens_per_s = avg_prefill_len / ttft` when the metrics file lacks it. Override globally with `--avg-prefill-len` / `--avg-decode-ctx-len`.
+Used as fallbacks to materialize the KV-cache term (S-MBU) and derive throughput when `batch_token_profile` is absent. When present, `batch_token_profile` is authoritative for default batching: `prefill_tokens_per_s = prefill_tokens_per_request × prefill_avg_batch_size / ttft`, and `decode output_tokens_per_s = decode_avg_batch_size / tpot`. For `batch-size-1` and `batch-size-1_input..._output...` result directories, the effective prefill/decode batch size is forced to `1` even if a historical profile block contains larger averages. Override fallback lengths globally with `--avg-prefill-len` / `--avg-decode-ctx-len`.
 
 | dataset prefix | avg prefill | avg decode ctx = prefill + output/2 |
 |---|---:|---:|
@@ -142,16 +142,7 @@ Same-key combinations across vllm and sglang are well-correlated because activat
     },
     "activation": {
       "avg_expert_activation_prefill": 75.39,
-      "avg_expert_activation_decode": 4.00,
-      "source": "this run | <donor path>"
-    },
-    "context_assumption": {
-      "avg_prefill_len_tokens": 10000.0,
-      "avg_decode_ctx_len_tokens": 10110.0,
-      "kv_size_prefill_TB": 3.69e-4,
-      "kv_size_decode_TB": 3.73e-4,
-      "attention_score_TB": 0.0,
-      "note": "..."
+      "avg_expert_activation_decode": 4.00
     },
     "prefill": {
       "ttft_s": 0.079,

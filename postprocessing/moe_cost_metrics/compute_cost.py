@@ -2,9 +2,19 @@
 """
 Compute rent + buy cost for MoE-CAP TEAS_Development MoE results.
 
-Two metrics (identical for rent and buy):
-  - avg_cost_per_request_usd       = e2e_s          * effective_$/s
-  - avg_cost_per_1M_output_tokens  = tpot * 1_000_000 * effective_$/s
+Two top-level metrics (identical schema for rent and buy):
+  - avg_cost_per_request_usd
+  - avg_cost_per_1M_output_tokens_usd
+
+When batch_token_profile is available, continuous-batching cost is amortized as:
+  - prefill_seconds_per_request = TTFT / prefill_avg_batch_size
+  - decode_seconds_per_request  = TPOT * decode_tokens_per_request / decode_avg_batch_size
+  - effective_output_tokens_per_s = decode_avg_batch_size / TPOT
+  - avg_cost_per_1M_output_tokens_usd = effective_$/s / effective_output_tokens_per_s * 1e6
+
+Each cost block also includes a breakdown with pricing, latency, batch profile,
+throughput, request-seconds, request-cost, and output-token-cost fields so the
+reported cost can be audited and explained.
 
 RENT (vast.ai etc.):
   effective_$/s = (price_per_GPU_per_hour * num_gpus) / 3600
@@ -47,34 +57,40 @@ DEFAULT_SCALE_OTHER_CAPITAL = 1.2
 
 GPU_SPECS: dict[str, dict] = {
     "a100": {
-        "price_per_unit_usd": 18000.0,
-        "price_source": "https://modal.com/blog/nvidia-a100-price-article",
+        "price_per_unit_usd": 15000.0,
+        "price_source": "https://www.trgdatacenters.com/resource/h100-vs-a100/",
         "tdp_w": 400,
         "tdp_source": "https://lenovopress.lenovo.com/lp1734-thinksystem-nvidia-a100-pcie-40-gpu",
     },
     "h100": {
-        "price_per_unit_usd": 25000.0,
-        "price_source": "https://modal.com/blog/nvidia-h100-price-article",
+        "price_per_unit_usd": 27000.0,
+        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h100-price/",
         "tdp_w": 700,
         "tdp_source": "https://lenovopress.lenovo.com/lp1732-thinksystem-nvidia-h100-pcie-gen5-gpu",
     },
     "h200": {
-        "price_per_unit_usd": 30000.0,
-        "price_source": "https://modal.com/blog/nvidia-h200-price-article",
+        "price_per_unit_usd": 31000.0,
+        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h200-price/",
         "tdp_w": 700,
         "tdp_source": "https://lenovopress.lenovo.com/lp1944-nvidia-h200-141gb-gpu",
     },
     "b200": {
-        "price_per_unit_usd": 35000.0,
-        "price_source": "https://modal.com/blog/nvidia-b200-pricing",
+        "price_per_unit_usd": 40000.0,
+        "price_source": "https://epoch.ai/blog/how-much-does-it-cost-to-train-frontier-ai-models",
         "tdp_w": 1000,
         "tdp_source": "https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf",
     },
     "b300": {
-        "price_per_unit_usd": 42500.0,
+        "price_per_unit_usd": 37500.0,
         "price_source": "https://tech-insider.org/nvidia-blackwell-gpu-pricing/",
         "tdp_w": 1400,
         "tdp_source": "https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-data-sheet",
+    },
+    "gb10": {
+        "price_per_unit_usd": 3999.0,
+        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
+        "tdp_w": 140,
+        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
     },
     "mi355x": {
         "price_per_unit_usd": 30000.0,
@@ -85,6 +101,13 @@ GPU_SPECS: dict[str, dict] = {
 }
 
 CPU_SPECS: dict[str, dict] = {
+    "gb10-soc": {
+        "model": "Arm Cortex-X925/A725 integrated in NVIDIA GB10",
+        "price_per_unit_usd": 0.0,
+        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
+        "tdp_w": 0,
+        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
+    },
     "epyc-7713p": {
         "model": "AMD EPYC 7713P",
         "price_per_unit_usd": 5010.0,
@@ -114,6 +137,7 @@ GPU_HOST_CPU: dict[str, tuple[int, str]] = {
     "h200": (2, "xeon-8468"),
     "b200": (2, "xeon-8468"),
     "b300": (2, "xeon-8558"),
+    "gb10": (1, "gb10-soc"),
     "mi355x": (2, "epyc-7713p"),
 }
 
@@ -275,11 +299,153 @@ def need_rent_prices_message(needed: list[str], have: dict[str, float]) -> str:
     return "\n".join(lines)
 
 
+
+def build_cost_metrics(
+    *,
+    price_per_s: float,
+    e2e_s: float,
+    ttft: Optional[float],
+    tpot: float,
+    batch_profile: dict,
+) -> dict:
+    """Return cost metrics plus an auditable throughput/cost breakdown.
+
+    TPOT is a per-decode-step latency. In continuous batching, one decode step
+    emits roughly decode_avg_batch_size output tokens across active requests, so
+    cost per output token must divide TPOT by that average decode batch size.
+    Per-request cost similarly uses the measured prefill/decode batch sizes
+    rather than treating each request latency as exclusive accelerator time.
+
+    The returned ``breakdown`` block intentionally duplicates the formula inputs
+    and derived values. This makes apparent hardware-cost inversions auditable:
+    a higher-priced accelerator can have lower cost/token when its measured
+    effective decode throughput (decode_avg_batch_size / TPOT) improves more
+    than its price premium.
+    """
+    decode_avg_batch_size = batch_profile.get("decode_avg_batch_size")
+    decode_tokens_per_request = batch_profile.get("decode_generated_tokens_per_request")
+    prefill_avg_batch_size = batch_profile.get("prefill_avg_batch_size")
+    prefill_tokens_per_request = batch_profile.get("prefill_tokens_per_request")
+    price_per_hour = price_per_s * 3600.0
+
+    if (
+        isinstance(ttft, (int, float))
+        and isinstance(tpot, (int, float)) and tpot > 0
+        and isinstance(decode_avg_batch_size, (int, float)) and decode_avg_batch_size > 0
+        and isinstance(decode_tokens_per_request, (int, float)) and decode_tokens_per_request >= 0
+        and isinstance(prefill_avg_batch_size, (int, float)) and prefill_avg_batch_size > 0
+    ):
+        prefill_seconds_per_request = ttft / prefill_avg_batch_size
+        decode_seconds_per_request = (tpot * decode_tokens_per_request) / decode_avg_batch_size
+        request_seconds = prefill_seconds_per_request + decode_seconds_per_request
+        output_token_seconds = tpot / decode_avg_batch_size
+        effective_output_tokens_per_s = decode_avg_batch_size / tpot
+        avg_cost_per_request_usd = request_seconds * price_per_s
+        avg_cost_per_1m_output_tokens_usd = output_token_seconds * 1_000_000 * price_per_s
+        prefill_cost_per_request_usd = prefill_seconds_per_request * price_per_s
+        decode_cost_per_request_usd = decode_seconds_per_request * price_per_s
+        prefill_tokens_per_s = None
+        if isinstance(prefill_tokens_per_request, (int, float)) and prefill_tokens_per_request > 0:
+            prefill_tokens_per_s = prefill_tokens_per_request * prefill_avg_batch_size / ttft
+        return {
+            "avg_cost_per_request_usd": avg_cost_per_request_usd,
+            "avg_cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
+            "method": "batch_token_profile",
+            "prefill_avg_batch_size": float(prefill_avg_batch_size),
+            "decode_avg_batch_size": float(decode_avg_batch_size),
+            "decode_generated_tokens_per_request": float(decode_tokens_per_request),
+            "effective_output_tokens_per_s": effective_output_tokens_per_s,
+            "formula": "price_per_second_usd * tpot_s / decode_avg_batch_size * 1e6",
+            "breakdown": {
+                "pricing": {
+                    "price_per_hour_usd": price_per_hour,
+                    "price_per_second_usd": price_per_s,
+                },
+                "latency": {
+                    "e2e_s": e2e_s,
+                    "ttft_s": ttft,
+                    "tpot_s": tpot,
+                },
+                "batch_profile": {
+                    "prefill_avg_batch_size": float(prefill_avg_batch_size),
+                    "decode_avg_batch_size": float(decode_avg_batch_size),
+                    "prefill_tokens_per_request": (
+                        float(prefill_tokens_per_request)
+                        if isinstance(prefill_tokens_per_request, (int, float))
+                        else None
+                    ),
+                    "decode_generated_tokens_per_request": float(decode_tokens_per_request),
+                },
+                "throughput": {
+                    "effective_output_tokens_per_s": effective_output_tokens_per_s,
+                    "prefill_tokens_per_s": prefill_tokens_per_s,
+                    "formula": "decode_avg_batch_size / tpot_s",
+                },
+                "request_seconds": {
+                    "prefill_seconds_per_request": prefill_seconds_per_request,
+                    "decode_seconds_per_request": decode_seconds_per_request,
+                    "total_seconds_per_request": request_seconds,
+                },
+                "request_cost_usd": {
+                    "prefill_cost_per_request_usd": prefill_cost_per_request_usd,
+                    "decode_cost_per_request_usd": decode_cost_per_request_usd,
+                    "total_cost_per_request_usd": avg_cost_per_request_usd,
+                },
+                "output_token_cost": {
+                    "seconds_per_output_token": output_token_seconds,
+                    "cost_per_output_token_usd": output_token_seconds * price_per_s,
+                    "cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
+                    "formula": "price_per_second_usd / effective_output_tokens_per_s * 1e6",
+                },
+            },
+        }
+
+    seconds_per_output_token = tpot if isinstance(tpot, (int, float)) else 0.0
+    effective_output_tokens_per_s = (1.0 / tpot) if isinstance(tpot, (int, float)) and tpot > 0 else 0.0
+    avg_cost_per_request_usd = e2e_s * price_per_s
+    avg_cost_per_1m_output_tokens_usd = seconds_per_output_token * 1_000_000 * price_per_s
+    return {
+        "avg_cost_per_request_usd": avg_cost_per_request_usd,
+        "avg_cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
+        "method": "latency_tpot_no_batch_profile",
+        "effective_output_tokens_per_s": effective_output_tokens_per_s,
+        "formula": "price_per_second_usd * tpot_s * 1e6",
+        "breakdown": {
+            "pricing": {
+                "price_per_hour_usd": price_per_hour,
+                "price_per_second_usd": price_per_s,
+            },
+            "latency": {
+                "e2e_s": e2e_s,
+                "ttft_s": ttft,
+                "tpot_s": tpot,
+            },
+            "throughput": {
+                "effective_output_tokens_per_s": effective_output_tokens_per_s,
+                "formula": "1 / tpot_s (fallback; no measured batch profile)",
+            },
+            "request_seconds": {
+                "total_seconds_per_request": e2e_s,
+            },
+            "request_cost_usd": {
+                "total_cost_per_request_usd": avg_cost_per_request_usd,
+            },
+            "output_token_cost": {
+                "seconds_per_output_token": seconds_per_output_token,
+                "cost_per_output_token_usd": seconds_per_output_token * price_per_s,
+                "cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
+                "formula": "price_per_second_usd / effective_output_tokens_per_s * 1e6",
+            },
+        },
+    }
+
 def build_buy_block(
     gpu_key: str,
     num_gpus: int,
     e2e_s: float,
+    ttft: Optional[float],
     tpot: float,
+    batch_profile: dict,
     *,
     gpu_specs: dict[str, dict],
     cpu_specs: dict[str, dict],
@@ -289,6 +455,7 @@ def build_buy_block(
     utilisation: float,
     electricity_usd_per_kwh: float,
     scale_other_capital: float,
+    buy_price_quote_time: Optional[str] = None,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
     host = gpu_host_cpu.get(gpu_key)
@@ -320,6 +487,7 @@ def build_buy_block(
             "num": num_gpus,
             "price_per_unit_usd": gpu["price_per_unit_usd"],
             "price_source": gpu.get("price_source", "user-supplied"),
+            "price_quote_time": buy_price_quote_time,
             "tdp_w": gpu["tdp_w"],
             "tdp_source": gpu.get("tdp_source", "user-supplied"),
         },
@@ -329,6 +497,7 @@ def build_buy_block(
             "num": num_cpus,
             "price_per_unit_usd": cpu["price_per_unit_usd"],
             "price_source": cpu.get("price_source", "user-supplied"),
+            "price_quote_time": buy_price_quote_time,
             "tdp_w": cpu["tdp_w"],
             "tdp_source": cpu.get("tdp_source", "user-supplied"),
         },
@@ -337,10 +506,13 @@ def build_buy_block(
         "amortized_capital_usd_per_hour": amort_per_h,
         "energy_usd_per_hour": energy_per_h,
         "effective_hourly_rate_usd": effective_per_h,
-        "cost": {
-            "avg_cost_per_request_usd": e2e_s * effective_per_s,
-            "avg_cost_per_1M_output_tokens_usd": tpot * 1_000_000 * effective_per_s,
-        },
+        "cost": build_cost_metrics(
+            price_per_s=effective_per_s,
+            e2e_s=e2e_s,
+            ttft=ttft,
+            tpot=tpot,
+            batch_profile=batch_profile,
+        ),
     }
 
 
@@ -429,6 +601,10 @@ def main() -> int:
         help=f"Capital scaling for motherboard/DRAM/SSD/etc. (default: "
              f"{DEFAULT_SCALE_OTHER_CAPITAL}, from MoE-CAP)",
     )
+    parser.add_argument(
+        "--buy-price-quote-time", default=None,
+        help="ISO time when buy prices were quoted (default: now, UTC)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -504,6 +680,7 @@ def main() -> int:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     recorded_at = now.isoformat().replace("+00:00", "Z")
     rent_quote_time = args.rent_price_quote_time or recorded_at
+    buy_price_quote_time = args.buy_price_quote_time or recorded_at
 
     print(f"\nRent prices ($/GPU/h):")
     for k in gpu_keys:
@@ -549,6 +726,7 @@ def main() -> int:
             skipped += 1
             continue
         perf = metrics.get("performance") or {}
+        batch_profile = metrics.get("batch_token_profile") or {}
         e2e_s = perf.get("e2e_s")
         tpot = perf.get("tpot")
         ttft = perf.get("ttft")
@@ -584,20 +762,24 @@ def main() -> int:
                 "total_hourly_rate_usd": hourly_rate,
                 "price_per_second_usd": price_per_s,
                 "price_source": rent_price_sources.get(gpu_key, DEFAULT_RENT_PRICE_SOURCE),
-                "cost": {
-                    "avg_cost_per_request_usd": e2e_s * price_per_s,
-                    "avg_cost_per_1M_output_tokens_usd": tpot * 1_000_000 * price_per_s,
-                },
+                "cost": build_cost_metrics(
+                    price_per_s=price_per_s,
+                    e2e_s=e2e_s,
+                    ttft=ttft,
+                    tpot=tpot,
+                    batch_profile=batch_profile,
+                ),
             }
 
         buy = build_buy_block(
-            gpu_key, num_gpus, e2e_s, tpot,
+            gpu_key, num_gpus, e2e_s, ttft, tpot, batch_profile,
             gpu_specs=gpu_specs, cpu_specs=cpu_specs, gpu_host_cpu=gpu_host_cpu,
             lifetime_hours=effective_lifetime_hours,
             base_lifetime_hours=args.buy_lifetime_hours,
             utilisation=args.utilisation,
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
+            buy_price_quote_time=buy_price_quote_time,
         )
         if buy is not None:
             payload["buy"] = buy
