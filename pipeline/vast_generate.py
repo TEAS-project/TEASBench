@@ -12,7 +12,7 @@ from utils import MODEL_DISK_GB_MAP, VAST_GPU_MAP
 # A rented Vast.ai host's driver must support a minimum CUDA version that is compatible with
 # the version in the base images in pipeline/vast/*/Dockerfile (currently vllm/vllm-openai:v0.16.0, which uses 12.9).
 # Note that I've observed that sometimes the version specified in an offer doesn't appear to be accurate; in this case,
-# cancel and start with a new offer. (I will have run_benchmark.sh note if this is spotted in server logs.)
+# cancel and start with a new offer. run_benchmark.sh tries to spot if this happens in logs and comments in the log.
 MIN_CUDA_VERSION = "12.9"
 
 
@@ -42,7 +42,7 @@ def _generate_script_text(engine, gpu, num_gpu, disk_gb, encoded_csv, private_im
     We pass the encoded CSV containing the benchmarks to run through to it as a environment variable.
     We rely on:
     1) the user having installed the Vast.ai CLI locally
-    2) the image being accessible (i.e. public, or if private that the user sets GHCR_USERNAME/GHCR_PAT at runtime)
+    2) the image being accessible (i.e. public, or else you must set your GHCR_USERNAME/GHCR_PAT at runtime)
     3) the GIT_TOKEN, HF_TOKEN, OPENAI_API_KEY secrets set in Vast.ai
     """
     vast_gpu = VAST_GPU_MAP[gpu]
@@ -60,7 +60,7 @@ def _generate_script_text(engine, gpu, num_gpu, disk_gb, encoded_csv, private_im
         login_line = f"\n          --login \"-u $GHCR_USERNAME -p $GHCR_PAT {registry}\" \\"
         registry_comment = "\n        #   - GHCR_USERNAME and GHCR_PAT must be set in *your* environment (to access image)"
         guard_block = textwrap.dedent(f"""\
-            # {image} is currently private; this must be set in your environment until it's made public.
+            # {image} is private; GHCR_USERNAME and GHCR_PAT must be set environment variables.
             if [ -z "$GHCR_USERNAME" ] || [ -z "$GHCR_PAT" ]; then
               echo "Error: GHCR_USERNAME and GHCR_PAT must be set in your environment (required while {image} is private)." >&2
               exit 1
@@ -86,8 +86,6 @@ def _generate_script_text(engine, gpu, num_gpu, disk_gb, encoded_csv, private_im
         BENCHMARK_CSV="{encoded_csv}"
 
         # 1. Search for available offers matching the hardware requested from the CSV.
-        #    cuda_vers filters out hosts whose driver is too old for the image's CUDA
-        #    build (otherwise the server dies on GPU init with a cudaGetDeviceCount error).
         #    Offers will be sorted by dollars per hour rental cost, increasing.
         vastai search offers 'gpu_name={vast_gpu} num_gpus={num_gpu} verified=true rentable=true cuda_vers>={MIN_CUDA_VERSION}' -o 'dph+'
 

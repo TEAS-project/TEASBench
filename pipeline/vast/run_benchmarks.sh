@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 
-# This general purpose script runs benchmarks for all vLLM and SGLang configurations from the
+# This script runs MoE-CAP benchmarks for all vLLM and SGLang configurations from the
 # experiment CSV passed in $BENCHMARK_CSV. The server and client commands for each row are built
 # at runtime by /opt/teasbench/pipeline/vast/resolve_commands.py, which applies the rules in the
-# config.yaml in /opt/teasbench/pipeline/configs.
+# config.yaml in /opt/teasbench/pipeline/configs. These are copied into the image at build time.
+
+# The script should be platform agnostic, except for the presence of CONTAINER_ID and CONTAINER_API_KEY environment
+# variables which are injected by Vast.ai into the container at runtime, and the use of the Vast.ai API to destroy
+# the instance at the very end of the script. Running outside Vast.ai would require changing this behaviour.
 
 set -euo pipefail
 
-# Check required environment variables.
+# Check that required environment variables have been set.
 if [ -z "${BENCHMARK_CSV:-}" ]; then
   echo "ERROR: BENCHMARK_CSV environment variable is not set" >&2
   exit 1
@@ -92,10 +96,6 @@ run_benchmark() {
 
 # Function to move output into the right directory and upload to results repo.
 push_results() {
-    ##################
-    # Saving results #
-    ##################
-
     local run_dir=$1
     local run_subdir=$2
     local job_description=$3
@@ -129,27 +129,26 @@ push_results() {
     echo "Job took $job_duration seconds"
     jq -n --arg job_duration "$job_duration" '{job: $job_duration}'  >> "$output_dir/timings.json"
 
-    # Pull to refresh before committing and pushing
+    # Pull to refresh before committing and pushing in case there have been any pushes from elsewhere since the last pull.
     git pull "$RESULTS_REPO_URL" main
 
     # Commit and push data to results repository
     git add "$output_dir/metrics*.json" "$output_dir/metadata*.json" "$output_dir/timings.json"
     git commit -m "auto: ${r[inference_engine]}-${model_name}-${r[dataset]}-${r[num_samples]}-${r[gpu]}x${r[num_gpu]}-bs${r[batch_size]}"
     git push "https://oauth2:${GIT_TOKEN}@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
-    # echo "Would be pushing to results repo here, but skipping for now."
 }
 
 # Get MoE-CAP commit hash for reproducibility.
 cd /dev/shm/MoE-CAP
 MOE_CAP_COMMIT=$(git rev-parse --short HEAD)
 
-# Configuration
+# These are the headers we always need to be present in the CSV, otherwise we can't run the benchmark.
 REQUIRED_HEADERS=("inference_engine" "model" "dataset" "num_samples" "gpu" "num_gpu" "batch_size")
 
 # Decode the CSV and grab the header line
 IFS=',' read -r -a HEADERS < <(echo "$BENCHMARK_CSV" | base64 -d | head -n 1)
 
-# Verify that we have all the column headers we're expecting.
+# Verify that we have all the required column headers.
 for req in "${REQUIRED_HEADERS[@]}"; do
     found=0
     for header in "${HEADERS[@]}"; do
@@ -167,7 +166,8 @@ done
 declare -A row
 line_number=1
 
-# Stream the raws from the encoded CSV, skipping the first line (headers).
+# Main benchmarking loop.
+# Stream the rows from the encoded CSV, skipping the first line (headers).
 while IFS=',' read -r -a VALUES; do
     ((line_number++))
 
@@ -324,6 +324,7 @@ while IFS=',' read -r -a VALUES; do
 
     sleep 5  # short break between benchmarks
 
+ # End of main benchmarking loop, reading next CSV row.
 done < <(echo "$BENCHMARK_CSV" | base64 -d | tail -n +2)
 
 benchmark_end_timestamp=$( date +%Y%m%d-%H%M )
@@ -335,7 +336,7 @@ echo "-----------------------------------------"
 # externally destroyed. Use an API call through curl to avoid having to bake the Vast.ai CLI into
 # the image. We also need to retry on failure, and as a last resort, sleep forever instead of exiting.
 # If the script were to exit instead, without the instance being destroyed, Vast.ai would just
-# start the container up again and loop it indefinitely.
+# restart the container and run the set of benchmarks again.
 echo "Destroying this instance..."
 destroyed=0
 for attempt in 1 2 3 4 5; do
