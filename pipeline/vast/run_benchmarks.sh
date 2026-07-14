@@ -210,7 +210,7 @@ while IFS=',' read -r -a VALUES; do
     cd "$BASE_DIR"
 
     job_timestamp=$( date +%Y%m%d-%H%M )
-    RUN_SUBDIR="moe/vast/${row[inference_engine]}/${row[model]}/${row[dataset]}_${row[num_samples]}samples/${row[gpu]}x${row[num_gpu]}/batch-size-${row[batch_size]}/$job_timestamp"
+    RUN_SUBDIR="moe/vastai/${row[inference_engine]}/${row[model]}/${row[dataset]}_${row[num_samples]}samples/${row[gpu]}x${row[num_gpu]}/batch-size-${row[batch_size]}/$job_timestamp"
     RUN_DIR="${BASE_DIR}/${RUN_SUBDIR}"
     # RUN_DIR=/dev/shm/$timestamp
     mkdir -p "$RUN_DIR"
