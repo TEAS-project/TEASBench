@@ -650,10 +650,70 @@ def write_fixed_length_cost_per_permutation_csvs(df_standard, df_fixed, output_d
     )
 
 
+def gpu_type_of(gpu_dir):
+    """Extract gpu_type from a "gpu_type x num_gpu" value, e.g. "h200x8" -> "h200"."""
+    m = GPU_DIR_RE.match(str(gpu_dir))
+    return m.group("gpu_type") if m else None
+
+
+# Batch sizes shown as columns in README.md, in display order, mapped to their
+# column headers.
+README_BATCH_SIZES = ["default", "1"]
+README_BATCH_COLUMN_LABELS = {"default": "batch-size-default", "1": "batch-size-1"}
+
+
+def write_readme(df, root_dir):
+    """Write README.md under root_dir: one table per (model, dataset) combination
+    present in df (platform is ignored -- results from any platform count).
+
+    Each table has an "inference_engine" row-group for every inference_engine found
+    for that (model, dataset), and within each group a row for every entry in
+    GPU_TYPE_ORDER, plus one column per README_BATCH_SIZES entry with a checkbox in
+    cells where at least one run exists for that inference_engine/gpu_type/batch_size
+    (any num_gpu or platform), left blank otherwise.
+    """
+    df = df.copy()
+    df["_gpu_type"] = df["gpu_type x num_gpu"].map(gpu_type_of)
+
+    group_cols = ["model", "dataset"]
+    combos = df[group_cols].drop_duplicates().sort_values(by=group_cols, kind="stable")
+
+    lines = ["# Results\n"]
+    header = "| inference_engine | gpu_type | " + " | ".join(
+        README_BATCH_COLUMN_LABELS[b] for b in README_BATCH_SIZES) + " |"
+    separator = "|---|---|" + "|".join("---" for _ in README_BATCH_SIZES) + "|"
+
+    for _, key in combos.iterrows():
+        model, dataset = key["model"], key["dataset"]
+        subset = df[(df["model"] == model) & (df["dataset"] == dataset)]
+
+        lines.append(f"## {model} / {dataset}\n")
+        lines.append(header)
+        lines.append(separator)
+        for inference_engine in sorted(subset["inference_engine"].dropna().unique()):
+            engine_subset = subset[subset["inference_engine"] == inference_engine]
+            for gpu_type in GPU_TYPE_ORDER:
+                cells = [
+                    "[x]" if ((engine_subset["_gpu_type"] == gpu_type) &
+                              (engine_subset["batch_size"] == batch_size)).any() else ""
+                    for batch_size in README_BATCH_SIZES
+                ]
+                lines.append(f"| {inference_engine} | {gpu_type.upper()} | " +
+                             " | ".join(cells) + " |")
+        lines.append("")
+
+    readme_path = pathlib.Path(root_dir) / "README.md"
+    readme_path.write_text("\n".join(lines))
+    print(f"Wrote {readme_path}")
+    return readme_path
+
+
 def main(results_dir, output_dir):
 
     df = get_results(results_dir, pattern="metrics*")
     df = arrange_combined(df)
+
+    write_readme(df, results_dir)
 
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
     df.to_csv(os.path.join(output_dir, "all_metrics.csv"), index=False)
