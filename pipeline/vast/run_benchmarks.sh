@@ -224,8 +224,10 @@ while IFS=',' read -r -a VALUES; do
 
     # Resolve the server and client commands for this row from the config.yaml
     # baked into the image, via template.py's rule engine. resolve_commands.py
-    # prints three lines: the HF model path, then the server and client commands
-    # (base64-encoded, since they contain line continuations).
+    # prints four lines: the HF model path, then the server command, client
+    # command, and any env var exports (e.g. SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR)
+    # needed before starting the server (base64-encoded, since they contain line
+    # continuations).
     resolve_args=(
         --inference-engine "${row[inference_engine]}"
         --model "${row[model]}"
@@ -243,7 +245,14 @@ while IFS=',' read -r -a VALUES; do
         resolve_args+=(--output-length "${row[output_length]}")
     fi
     resolved=$(python3 /opt/teasbench/pipeline/vast/resolve_commands.py "${resolve_args[@]}")
-    { read -r HF_MODEL_PATH; read -r server_b64; read -r client_b64; } <<< "$resolved"
+    { read -r HF_MODEL_PATH; read -r server_b64; read -r client_b64; read -r env_b64; } <<< "$resolved"
+
+    # Apply any environment variables from config.yaml's extra_container_env
+    # rules for this row before starting the server which may need them.
+    env_exports=$(echo "$env_b64" | base64 -d)
+    if [[ -n "$env_exports" ]]; then
+        eval "$env_exports"
+    fi
 
     server_command=$(echo "$server_b64" | base64 -d)
     echo "Starting server: $server_command"

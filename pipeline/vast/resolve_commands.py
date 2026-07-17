@@ -3,6 +3,7 @@
 import argparse
 import base64
 import pathlib
+import shlex
 import sys
 
 # template.py, utils.py and configs/ live one directory up, both in the repo
@@ -15,6 +16,26 @@ import yaml
 from template import Template
 from utils import HF_MODEL_MAP
 
+def resolve_env_exports(template, config, matching_rules, parameters):
+    """Translate any extra_container_env rules from the config into
+    'export NAME=VALUE' shell lines.
+    Entries that use valueFrom (e.g. secretKeyRef) are skipped: those only
+    resolve inside a k8s pod, and on Vast.ai the variables they'd populate
+    (e.g. OPENAI_API_KEY) are already required directly as container env vars.
+    """
+    raw = template.resolve_generic_variable(
+        "extra_container_env", config, matching_rules, parameters
+    )
+    if not raw:
+        return ""
+    entries = yaml.safe_load(raw) or []
+    exports = [
+        f"export {entry['name']}={shlex.quote(str(entry['value']))}"
+        for entry in entries
+        if "value" in entry
+    ]
+    return "\n".join(exports)
+
 def main():
     """
     run_benchmarks.sh calls this script in order to use the same template.py code
@@ -26,10 +47,11 @@ def main():
     It also translates from the short-form model names used in the CSV files
     to the full Huggingface paths needed by MoE-CAP.
 
-    Prints exactly three lines to stdout which run_benchmarks.sh picks up:
+    Prints exactly four lines to stdout which run_benchmarks.sh picks up:
       1. the Huggingface model path (e.g. unsloth/gpt-oss-20b)
       2. the server command, base64-encoded
       3. the client command, base64-encoded
+      4. env var exports needed before starting the server, base64-encoded
     The commands are base64-encoded because they contain backslash-newline
     continuations, which otherwise break line-based parsing in bash.
     """
@@ -75,10 +97,12 @@ def main():
     matching_rules = template.get_matching_rules(config.get("rules", []), parameters)
     server_cmd = template.build_command("server", config, parameters, matching_rules)
     client_cmd = template.build_command("client", config, parameters, matching_rules)
+    env_exports = resolve_env_exports(template, config, matching_rules, parameters)
 
     print(parameters["hf_model_path"])
     print(base64.b64encode(server_cmd.encode()).decode())
     print(base64.b64encode(client_cmd.encode()).decode())
+    print(base64.b64encode(env_exports.encode()).decode())
 
 if __name__ == "__main__":
     main()
