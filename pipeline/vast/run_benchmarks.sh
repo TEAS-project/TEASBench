@@ -75,7 +75,7 @@ run_benchmark() {
     # the script before we can capture it. Once we've done so, just below, set -e again
     set +e
     # and benchmark.
-    eval "$client_command" &> "$run_dir/client_$dataset.log"
+    eval "$client_command" &> "$run_dir/client.log"
     CLIENT_SUCCESS=$?
     set -e
 
@@ -133,7 +133,13 @@ push_results() {
     git pull "$RESULTS_REPO_URL" main
 
     # Commit and push data to results repository
-    git add "$output_dir/metrics*.json" "$output_dir/metadata*.json" "$output_dir/timings.json"
+    git add -f "$output_dir/metrics*.json" \
+               "$output_dir/metadata*.json" \
+               "$output_dir/timings.json" \
+               "$output_dir/detailed_results.jsonl" \
+               "$output_dir/output_data.jsonl" \
+               "$output_dir/client.log" \
+               "$output_dir/server.log"
     git commit -m "auto: ${r[inference_engine]}-${model_name}-${r[dataset]}-${r[num_samples]}-${r[gpu]}x${r[num_gpu]}-bs${r[batch_size]}"
     git push "https://oauth2:${GIT_TOKEN}@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
 }
