@@ -144,22 +144,27 @@ class Template:
             cmd_cfg = config["variables_defaults"]["client_command"]
             rule_key = "client_flags"
 
-        cmd = cmd_cfg["base_command"] + " \\\n"
-        
-        # Base parameters
-        for param in cmd_cfg["flags"]:
+        # Base parameter values, in base-command order
+        order = list(cmd_cfg["flags"])
+        values = {}
+        for param in order:
             if param not in flags_def: continue
-            flag_def = flags_def[param]
-            value = self._resolve_flag_value(param, flag_def, parameters)
-            
-            rendered = self._build_flag(flag_def, param, value)
-            if rendered: cmd += f"  {rendered} \\\n"
+            values[param] = self._resolve_flag_value(param, flags_def[param], parameters)
 
-        # Conditional overrides
+        # Conditional overrides replace the base value for a param (rather
+        # than appending a second, duplicate flag); params not already in
+        # the base command are appended in conditional order.
         conditional = self.resolve_params(rule_key, matching_rules)
         for param, value in conditional.items():
             if param not in flags_def: continue
-            rendered = self._build_flag(flags_def[param], param, value)
+            if param not in values:
+                order.append(param)
+            values[param] = value
+
+        cmd = cmd_cfg["base_command"] + " \\\n"
+        for param in order:
+            if param not in values: continue
+            rendered = self._build_flag(flags_def[param], param, values[param])
             if rendered: cmd += f"  {rendered} \\\n"
 
         return cmd.strip(" \\\n")

@@ -17,7 +17,8 @@ MODEL_SHORT_NAME_MAP={
     "Qwen3-235B-A22B-Instruct-2507-FP8": "qwen3-235b-fp8",
     "DeepSeek-R1": "deepseek-r1",
     "Kimi-K2.5": "kimi-k2.5",
-    "Qwen3.5-4B": "qwen3.5-4.5b"
+    "Qwen3.5-4B": "qwen3.5-4.5b",
+    "Qwen3-4B": "qwen3-4b"
 }
 
 DATASET_SHORT_NAME_MAP={
@@ -33,7 +34,8 @@ HF_MODEL_MAP={
     "Qwen3-235B-A22B-Instruct-2507-FP8": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
     "DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
     "Kimi-K2.5": "moonshotai/Kimi-K2.5",
-    "Qwen3.5-4B": "Qwen/Qwen3.5-4B"
+    "Qwen3.5-4B": "Qwen/Qwen3.5-4B",
+    "Qwen3-4B": "Qwen/Qwen3-4B"
 }
 
 

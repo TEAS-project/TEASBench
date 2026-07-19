@@ -33,6 +33,10 @@ variables_defaults:
         value: "3600"
       gpu_memory_fraction:
         flag: "--mem-fraction-static"
+      host:
+        flag: "--host"
+      trust_remote_code:
+        flag: "--trust-remote-code"
     vllm:
       port:
         flag: "--port"
@@ -55,6 +59,8 @@ variables_defaults:
         flag: "--max-model-len"
       gpu_memory_fraction:
         flag: "--gpu_memory_utilization"
+      trust_remote_code:
+        flag: "--trust-remote-code"
 
   client_flags:
     hf_model_path:
@@ -211,6 +217,29 @@ rules:
         - "Kimi-K2.5"
     server_flags:
       reasoning_parser: "kimi_k2"
+
+# Qwen3-4B is a dense model; run both engines' servers on localhost and
+# restrict profiling to compute cost only via MOE_CAP_PROFILING_ONLY.
+  - match:
+      model:
+        - "Qwen3-4B"
+    server_flags:
+      host: "127.0.0.1"
+      trust_remote_code: true
+      reasoning_parser: "qwen3"
+    extra_container_env:
+      value: |
+        - name: MOE_CAP_PROFILING_ONLY
+          value: "1"
+
+# Qwen3-4B and Qwen3.5-4B are dense models with no experts, so omit the
+# expert-distribution-recording flag from the server command entirely.
+  - match:
+      model:
+        - "Qwen3-4B"
+        - "Qwen3.5-4B"
+    server_flags:
+      expert_recording: null
 
   - match: 
       model:
