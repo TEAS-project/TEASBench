@@ -213,8 +213,6 @@ class Template:
         Builds four commands:
           @agentic_server_command@  -- sglang.launch_server invocation
           @agentic_client_command@  -- python -m agent_cap.agents --config ...
-          @side_car@ -- additional container
-          @side_car_ready@ -- check side car ready to benchmark
         and routes to the agentic-agents.yaml template which starts the server
         in the background, waits for readiness, then runs the client.
         """
@@ -224,6 +222,8 @@ class Template:
         image_name = self.resolve_generic_variable("agentcap_image", config, matching_rules, parameters)
         agentcap_repo = self.resolve_generic_variable("agentcap_repo", config, matching_rules, parameters)
         agentcap_ref = self.resolve_generic_variable("agentcap_ref", config, matching_rules, parameters)
+
+        sidecar_port = self.resolve_generic_variable("agentsidecar_port", config, matching_rules, parameters)
 
         env_setup_path = self.resolve_generic_variable("agentic_env_setup_script", config, matching_rules, parameters)
         with open(env_setup_path, "r") as f:
