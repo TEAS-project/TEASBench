@@ -154,7 +154,8 @@ COST_DECIMALS = 5
 # column not listed here.
 PERF_DECIMALS_DEFAULT = 5
 PERF_DECIMALS = {
-    "e2e_s": 3,
+    "unnormalized_e2e": 2,
+    "request/s": 5,
     "ttft": 5,
     "tpot": 5,
     "prefill_avg_expert_activation": 2,
@@ -552,10 +553,13 @@ SPARSITY_VALUE_SPECS = [
     ("decode_S_MFU",                  "sparsity.decode.S_MFU"),
 ]
 
-# Latency metrics that lead the performance CSVs, as (output_label, source_column)
-# in display order, followed by the merged sparsity metrics.
+# Latency/throughput metrics that lead the performance CSVs, as
+# (output_label, source_column) in display order, followed by the merged sparsity
+# metrics. Both new-style keys are top-level under "performance" in every metrics
+# file, so find_metric_column resolves them to "performance.<key>".
 PERFORMANCE_VALUE_SPECS = [
-    ("e2e_s", "e2e_s"),
+    ("unnormalized_e2e", "unnormalized_e2e"),
+    ("request/s", "request/s"),
     ("ttft", "ttft"),
     ("tpot", "tpot"),
 ] + SPARSITY_VALUE_SPECS
@@ -563,8 +567,9 @@ PERFORMANCE_VALUE_SPECS = [
 
 def write_performance_per_permutation_csvs(df, output_dir):
     """Per (model, dataset, batch_size) CSVs whose final columns are the
-    performance metrics in PERFORMANCE_VALUE_SPECS order: end-to-end latency
-    ("e2e_s"), time to first token ("ttft"), time per output token ("tpot"), then
+    performance metrics in PERFORMANCE_VALUE_SPECS order: unnormalized end-to-end
+    latency ("unnormalized_e2e"), throughput ("request/s"), time to first token
+    ("ttft"), time per output token ("tpot"), then
     the sparsity metrics (present when sparsity data has been merged onto df;
     otherwise written as NaN). Each column is truncated/formatted to its own fixed
     number of decimals from PERF_DECIMALS (falling back to PERF_DECIMALS_DEFAULT).
@@ -712,6 +717,11 @@ def main(results_dir, output_dir):
 
     df = get_results(results_dir, pattern="metrics*")
     df = arrange_combined(df)
+
+    # e2e_s has been superseded by unnormalized_e2e / request/s and is no longer
+    # reported, so drop it from the combined all_metrics.csv dump too.
+    e2e_cols = [c for c in df.columns if c.split(".")[-1] == "e2e_s"]
+    df = df.drop(columns=e2e_cols)
 
     write_readme(df, results_dir)
 
