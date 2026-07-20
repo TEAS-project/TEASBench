@@ -207,7 +207,7 @@ class Template:
         """Agentic family: separate server process + agent_cap.agents for all engines."""
         return self._agentic_agents(config, parameters, matching_rules)
 
-    def _agentic_mcp(self, config, parameters, matching_rules):
+    def _agentic_sidecar(self, config, parameters, matching_rules):
         """sglang agentic path: standalone SGLang server + agent_cap.agents.
 
         Builds four commands:
@@ -216,14 +216,15 @@ class Template:
         and routes to the agentic-agents.yaml template which starts the server
         in the background, waits for readiness, then runs the client.
         """
-        server_cmd = self.build_command("agentic_server_sidecar", config, parameters, matching_rules)
-        client_cmd = self.build_command("agentic_sidecar", config, parameters, matching_rules)
+        server_cmd = self.build_command("agentic_server", config, parameters, matching_rules)
+        client_cmd = self.build_command("agentic", config, parameters, matching_rules)
 
         image_name = self.resolve_generic_variable("agentcap_image", config, matching_rules, parameters)
         agentcap_repo = self.resolve_generic_variable("agentcap_repo", config, matching_rules, parameters)
         agentcap_ref = self.resolve_generic_variable("agentcap_ref", config, matching_rules, parameters)
 
         sidecar_port = self.resolve_generic_variable("agentsidecar_port", config, matching_rules, parameters)
+        sidecar_image = self.resolve_generic_variable("agentsidecar_port", config, matching_rules, parameters)
 
         env_setup_path = self.resolve_generic_variable("agentic_env_setup_script", config, matching_rules, parameters)
         with open(env_setup_path, "r") as f:
@@ -293,13 +294,13 @@ class Template:
             "@teasbench_commit@": teasbench_commit,
         }
 
-        if benchmark_family(parameters) == "agentic":
+        if benchmark_family(parameters) == "agentic-sidecar":
             print("test1")
-            template_path, family_replacements = self._agentic(
+            template_path, family_replacements = self._agentic_sidecar(
                 config, parameters, matching_rules)
-        elif benchmark_family(parameters) == "agentic-sidecar":
+        elif benchmark_family(parameters) == "agentic":
             print("test2")
-            template_path, family_replacements = self._agentic_mcp(
+            template_path, family_replacements = self._agentic(
                 config, parameters, matching_rules)
         else:
             template_path, family_replacements = self._moe(

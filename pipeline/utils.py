@@ -51,6 +51,7 @@ MODELS_ROOT = "/llm-cache-pvc/models"
 # its own inference server) rather than the MoE server+client split.
 AGENTIC_BENCHMARKS = {"imo-answerbench", "mcp-atlas"}
 
+AGENTIC_SIDECAR_BENCHMARKS = {"mcp-atlas"}
 
 def benchmark_family(p: dict):
     """Return the pipeline family ('agentic' or 'moe') for an experiment row.
@@ -58,7 +59,13 @@ def benchmark_family(p: dict):
     MoE experiment CSVs predate the 'benchmark' column, so a missing/empty
     benchmark defaults to 'moe' and the existing MoE behaviour is preserved.
     """
-    return "agentic-sidecar" if p.get("benchmark") in AGENTIC_BENCHMARKS else "moe"
+
+    if(p.get("benchmark") in AGENTIC_BENCHMARKS and p.get("benchmark") in AGENTIC_SIDECAR_BENCHMARKS):
+        print(p.get("benchmark"))
+        # p["benchmark"] = "agentic-sidecar"
+        return "agentic-sidecar"
+
+    return "agentic" if p.get("benchmark") in AGENTIC_BENCHMARKS else "moe"
 
 
 def local_model_path(model: str):
@@ -67,7 +74,7 @@ def local_model_path(model: str):
 
 def get_run_name(p: dict):
     print(benchmark_family(p))
-    if benchmark_family(p) == "agentic-sidecar":
+    if (benchmark_family(p) == "agentic" or benchmark_family(p) == "agentic-sidecar"):
         print("test")
         return (f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}"
                 f"_{p['benchmark']}_nt{p['num_tasks']}_{p['gpu']}x{p['num_gpu']}")
@@ -88,7 +95,7 @@ def k8s_friendlify(unfriendly_string):
     return unfriendly_string.replace("_", "-").lower()
 
 def results_repo_dir(p: dict):
-    if benchmark_family(p) == "agentic-sidecar":
+    if benchmark_family(p) == "agentic" or benchmark_family(p) == "agentic-sidecar":
         return (f"agentic/eidf/{p['inference_engine']}/{p['model'].lower()}"
                 f"/{p['benchmark']}_{p['num_tasks']}tasks/{p['gpu'].lower()}x{p['num_gpu']}")
 

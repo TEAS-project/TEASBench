@@ -256,7 +256,7 @@ variables_defaults:
         - enable_prefix_caching
         - trust_remote_code
 
-  agentic_server_sidecar_command:
+  agentic_sidecar_server_command:
     sglang:
       base_command: "TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 python -m sglang.launch_server"
       flags:
@@ -415,19 +415,19 @@ variables_defaults:
         - output_dir
 
   agentic_sidecar_command:
-    sglang:
-      base_command: "python -m agent_cap.agents"
-      flags:
-        - agents_config_file_sglang
-        - num_tasks
-        - output_dir
-    vllm:
-      base_command: "python -m agent_cap.agents"
-      flags:
-        - agents_config_file_vllm
-        - num_tasks
-        - output_dir          
+    base_command: ""
+    flags:
+      - script
+      - script_path
+      - output_dir 
 
+  agentic_sidecar_flags:
+    script:
+      value: "X"
+    flag:
+      value: "Y"
+    output_dir:
+      value: "Z"
 
   agentcap_image:
     sglang:
@@ -447,6 +447,19 @@ variables_defaults:
   agentcap_ref:
     value: "arno/gemini-judge-endpoint"
 
+  # Agentic sidecar generic vairiables
+  
+  enabled_servers:
+    value:
+  atlas_dir:
+    value:
+  data_dir:
+     value:
+  sidecar_image:
+     value: "ghcr.io/scaleapi/mcp-atlas:latest"
+
+ 
+   
   # Other variables needed to make up substitutions for template.yaml
   
   inference_engine_version:

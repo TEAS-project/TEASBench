@@ -18,8 +18,8 @@ spec:
       initContainers: []
       containers:
       # ---- Container 1: MCP tool server sidecar ----
-      - name: mcp-server
-        image: ghcr.io/scaleapi/mcp-atlas:latest
+      - name: sidecar-server
+        image: @side_car_image@
         command: ["/bin/bash", "-c"]
         args:
         - |
@@ -31,18 +31,18 @@ spec:
            echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
            pip install -e /dev/shm/AgentCAP
 
-           nohup bash /dev/shm/AgentCAP/mcp-server/start.sh > /root/mcp_server.log 2>&1 &
+           nohup bash @sidecar_bash_script@ > sidecar_server.log 2>&1 &
         ports:
-        - containerPort: 1984
+        - containerPort: @sidecar_port@
           env:
           - name: ENABLED_SERVERS 
-            value: "arxiv,brave-search,calculator,cli-mcp-server,clinicaltrialsgov-mcp-server,context7,ddg-search,desktop-commander,fetch,filesystem,git,github,mcp-code-executor,mcp-server-code-runner,memory,met-museum,open-library,osm-mcp-server,pubmed,weather,whois,wikipedia"
+            value: "@enabled_servers@"
             - name: MCP_ATLAS_DIR
-              value: "/dev/shm/AgentCAP/third_party/mcp_atlas"
+              value: "@atlas_dir@"
             - name: MCP_DATA_DIR
-              value: "/dev/shm/data"
+              value: "@data_dir@"
             - name: MCP_PORT
-              value: "1984"
+              value: "@sidecar_port@"
           resources:
             requests:
               cpu: "2"
@@ -187,7 +187,7 @@ spec:
             echo "Waiting for server sidecar"
             server_sidecar_ready=0
             for i in $(seq 1 60); do
-              if bash -c "echo > /dev/tcp/localhost/1984" 2>/dev/null; then
+              if bash -c "echo > /dev/tcp/localhost/@sidecar_port@" 2>/dev/null; then
                 echo "sidecar server ready after ${i}s"
                 break
               fi
