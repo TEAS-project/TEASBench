@@ -730,6 +730,11 @@ def main() -> int:
         e2e_s = perf.get("e2e_s")
         tpot = perf.get("tpot")
         ttft = perf.get("ttft")
+        if e2e_s is None:
+            # Newer collection schema omits e2e_s; it is exactly 1 / request rate.
+            request_rate = perf.get("request/s")
+            if request_rate:
+                e2e_s = 1.0 / request_rate
         if e2e_s is None or tpot is None:
             skipped += 1
             continue
