@@ -714,6 +714,7 @@ def main() -> int:
 
     written = 0
     skipped = 0
+    skipped_no_profile = 0
     for f in metrics_files:
         info = describe_run(f, root)
         parsed = parse_gpu_dir(info["gpu_dir"])
@@ -737,6 +738,19 @@ def main() -> int:
                 e2e_s = 1.0 / request_rate
         if e2e_s is None or tpot is None:
             skipped += 1
+            continue
+
+        # Concurrent run with no measured batch profile: the single-stream fallback would inflate
+        # cost 10-20x for a run that actually batched. Skip it — a blank is more honest than a
+        # fabricated number. Single-query runs keep the fallback (single-stream is their real cost).
+        concurrent = any(p.startswith("batch-size-default") for p in f.parts)
+        decode_batch = batch_profile.get("decode_avg_batch_size")
+        if concurrent and not (isinstance(decode_batch, (int, float)) and decode_batch > 0):
+            # Remove any previously-committed cost so the skip is effective, not shadowed by a stale file.
+            stale = cost_path_for(f)
+            if stale.exists() and not args.dry_run:
+                stale.unlink()
+            skipped_no_profile += 1
             continue
 
         payload = {
@@ -796,7 +810,8 @@ def main() -> int:
             out_path.write_text(json.dumps(payload, indent=2) + "\n")
         written += 1
 
-    print(f"\nWrote {written} cost JSON files (skipped {skipped})")
+    print(f"\nWrote {written} cost JSON files (skipped {skipped}, "
+          f"skipped {skipped_no_profile} concurrent runs with no batch profile)")
     return 0
 
 
