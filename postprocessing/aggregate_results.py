@@ -219,7 +219,7 @@ def get_results(results_dir, pattern="metrics*", required=True):
 # sort key, rows are ordered by gpu_type per this list, then by num_gpu
 # numerically. gpu_types not listed here sort after all listed ones; values that
 # don't parse sort last.
-GPU_TYPE_ORDER = ["a100", "h100", "h200", "b200", "b300", "mi355x"]
+GPU_TYPE_ORDER = ["a100", "h100", "h200", "b200", "b300", "gb10", "mi355x"]
 GPU_DIR_RE = re.compile(r"^(?P<gpu_type>.+)x(?P<num_gpu>\d+)$")
 
 
@@ -666,16 +666,47 @@ def gpu_type_of(gpu_dir):
 README_BATCH_SIZES = ["default", "1"]
 README_BATCH_COLUMN_LABELS = {"default": "batch-size-default", "1": "batch-size-1"}
 
+# GPU types physically available on each platform, used to restrict each
+# platform's table in README.md to only the gpu_types it can actually run.
+# Platforms not listed here fall back to the full GPU_TYPE_ORDER.
+PLATFORM_GPU_TYPES = {
+    "eidf": ["a100", "h100", "h200"],
+    "vastai": ["h200", "b200", "b300"],
+    "dgx-spark": ["gb10"],
+    "amd": ["mi355x"],
+}
+
+# Display order for platform tables in README.md. Platforms not listed here sort
+# after all listed ones, alphabetically.
+PLATFORM_ORDER = ["eidf", "vastai", "amd", "dgx-spark"]
+
+
+def platform_sort_key(platform):
+    return (PLATFORM_ORDER.index(platform) if platform in PLATFORM_ORDER
+            else len(PLATFORM_ORDER), platform)
+
 
 def write_readme(df, root_dir):
-    """Write README.md under root_dir: one table per (model, dataset) combination
-    present in df (platform is ignored -- results from any platform count).
+    """Write README.md under root_dir: one section per (model, dataset) combination
+    present in df, and within each section one table per platform that has at
+    least one result for that (model, dataset).
 
-    Each table has an "inference_engine" row-group for every inference_engine found
-    for that (model, dataset), and within each group a row for every entry in
-    GPU_TYPE_ORDER, plus one column per README_BATCH_SIZES entry with a checkbox in
-    cells where at least one run exists for that inference_engine/gpu_type/batch_size
-    (any num_gpu or platform), left blank otherwise.
+    Each table only lists the gpu_types available on that platform (per
+    PLATFORM_GPU_TYPES) that actually have a result there -- in particular,
+    vastai's H200 row is only shown if vastai itself has an H200 result, since
+    H200 is normally run on eidf instead. Rows are sorted by gpu_type first (per
+    GPU_TYPE_ORDER), then by inference_engine (the set of engines seen anywhere
+    for this (model, dataset), so every platform's table has the same rows for a
+    given gpu_type), so successive rows share a gpu_type across inference engines
+    before moving to the next gpu_type. One column per README_BATCH_SIZES entry
+    holds a bold tick mark where at least one run exists for that
+    platform/gpu_type/inference_engine/batch_size (any num_gpu), left blank
+    otherwise.
+
+    If the same gpu_type has results on more than one platform for a given
+    (model, dataset) -- e.g. H200 on both eidf and vastai -- a warning naming the
+    gpu_type, platforms, model and dataset is printed, since each gpu_type is
+    normally expected to be run on only one platform.
     """
     df = df.copy()
     df["_gpu_type"] = df["gpu_type x num_gpu"].map(gpu_type_of)
@@ -684,28 +715,50 @@ def write_readme(df, root_dir):
     combos = df[group_cols].drop_duplicates().sort_values(by=group_cols, kind="stable")
 
     lines = ["# Results\n"]
-    header = "| inference_engine | gpu_type | " + " | ".join(
+    header = "| gpu_type | inference_engine | " + " | ".join(
         README_BATCH_COLUMN_LABELS[b] for b in README_BATCH_SIZES) + " |"
-    separator = "|---|---|" + "|".join("---" for _ in README_BATCH_SIZES) + "|"
+    separator = "|---|---|" + "|".join(":---:" for _ in README_BATCH_SIZES) + "|"
 
     for _, key in combos.iterrows():
         model, dataset = key["model"], key["dataset"]
         subset = df[(df["model"] == model) & (df["dataset"] == dataset)]
+        engines = sorted(subset["inference_engine"].dropna().unique())
+
+        for gpu_type in GPU_TYPE_ORDER:
+            platforms_with_gpu = sorted(
+                subset.loc[subset["_gpu_type"] == gpu_type, "platform"].dropna().unique())
+            if len(platforms_with_gpu) > 1:
+                print(f"Warning: results for the gpu_type {gpu_type} on multiple "
+                      f"platforms ({', '.join(platforms_with_gpu)}) "
+                      f"for {model}/{dataset}")
 
         lines.append(f"## {model} / {dataset}\n")
-        lines.append(header)
-        lines.append(separator)
-        for inference_engine in sorted(subset["inference_engine"].dropna().unique()):
-            engine_subset = subset[subset["inference_engine"] == inference_engine]
-            for gpu_type in GPU_TYPE_ORDER:
-                cells = [
-                    "[x]" if ((engine_subset["_gpu_type"] == gpu_type) &
-                              (engine_subset["batch_size"] == batch_size)).any() else ""
-                    for batch_size in README_BATCH_SIZES
+        platforms = sorted(subset["platform"].dropna().unique(), key=platform_sort_key)
+        for platform in platforms:
+            platform_subset = subset[subset["platform"] == platform]
+            platform_gpu_types = PLATFORM_GPU_TYPES.get(platform, GPU_TYPE_ORDER)
+
+            gpu_types_to_show = [g for g in GPU_TYPE_ORDER if g in platform_gpu_types]
+            if platform == "vastai":
+                gpu_types_to_show = [
+                    g for g in gpu_types_to_show
+                    if g != "h200" or (platform_subset["_gpu_type"] == "h200").any()
                 ]
-                lines.append(f"| {inference_engine} | {gpu_type.upper()} | " +
-                             " | ".join(cells) + " |")
-        lines.append("")
+
+            lines.append(f"### {platform}\n")
+            lines.append(header)
+            lines.append(separator)
+            for gpu_type in gpu_types_to_show:
+                for inference_engine in engines:
+                    engine_subset = platform_subset[platform_subset["inference_engine"] == inference_engine]
+                    cells = [
+                        "**✓**" if ((engine_subset["_gpu_type"] == gpu_type) &
+                                  (engine_subset["batch_size"] == batch_size)).any() else ""
+                        for batch_size in README_BATCH_SIZES
+                    ]
+                    lines.append(f"| {gpu_type.upper()} | {inference_engine} | " +
+                                 " | ".join(cells) + " |")
+            lines.append("")
 
     readme_path = pathlib.Path(root_dir) / "README.md"
     readme_path.write_text("\n".join(lines))
