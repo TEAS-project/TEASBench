@@ -69,7 +69,7 @@ except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
             "AMD-Instinct-MI355X-288GB": 2500e12,
         },
         "fp8": {
-            "NVIDIA-A100-SXM4-80GB": 1248e12,
+            "NVIDIA-A100-SXM4-80GB": 624e12,  # A100 has no FP8 tensor cores -> upcasts to bf16
             "NVIDIA-H100-HBM3-80GB": 3958e12,
             "NVIDIA-H200-141GB": 3958e12,
             "NVIDIA-B200-183GB": 9000e12,
@@ -85,7 +85,7 @@ except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
             "AMD-Instinct-MI355X-288GB": 5050e12,
         },
         "fp4": {
-            "NVIDIA-A100-SXM4-80GB": 1248e12,
+            "NVIDIA-A100-SXM4-80GB": 624e12,  # A100 has no FP4 tensor cores -> mxfp4 upcasts to bf16
             "NVIDIA-H100-HBM3-80GB": 3958e12,
             "NVIDIA-H200-141GB": 3958e12,
             "NVIDIA-B200-183GB": 18000e12,
@@ -529,6 +529,14 @@ def compute_for_run(
         decoding_tp = output_tps or (1.0 / tpot)
     decode_smbu = smbu(decode_act, tpot, kv_size_decode_TB) if decode_act > 0 else None
     decode_smfu = smfu(decoding_tp) if decoding_tp > 0 else None
+
+    # Backstop: utilisation > 100% is physically impossible (bad clock, cache-inflated
+    # prefill accounting, or a mislabeled precision peak). Null it rather than emit an
+    # impossible number the radar/methodology would show as real.
+    def _cap(x):
+        return None if (x is not None and x > 1.0) else x
+    prefill_smbu, prefill_smfu = _cap(prefill_smbu), _cap(prefill_smfu)
+    decode_smbu, decode_smfu = _cap(decode_smbu), _cap(decode_smfu)
 
     hardware_specs = {
         "peak_bandwidth_tb": peak_bw / 1e12,
