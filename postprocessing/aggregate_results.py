@@ -219,7 +219,7 @@ def get_results(results_dir, pattern="metrics*", required=True):
 # sort key, rows are ordered by gpu_type per this list, then by num_gpu
 # numerically. gpu_types not listed here sort after all listed ones; values that
 # don't parse sort last.
-GPU_TYPE_ORDER = ["a100", "h100", "h200", "b200", "b300", "gb10", "mi355x"]
+GPU_TYPE_ORDER = ["a100", "h100", "h200", "b200", "b300", "gb10", "mi355x", "blackhole-p150b"]
 GPU_DIR_RE = re.compile(r"^(?P<gpu_type>.+)x(?P<num_gpu>\d+)$")
 
 
@@ -674,11 +674,12 @@ PLATFORM_GPU_TYPES = {
     "vastai": ["h200", "b200", "b300"],
     "dgx-spark": ["gb10"],
     "amd": ["mi355x"],
+    "tenstorrent": ["blackhole-p150b"],
 }
 
 # Display order for platform tables in README.md. Platforms not listed here sort
 # after all listed ones, alphabetically.
-PLATFORM_ORDER = ["eidf", "vastai", "amd", "dgx-spark"]
+PLATFORM_ORDER = ["eidf", "vastai", "amd", "dgx-spark", "tenstorrent"]
 
 
 def platform_sort_key(platform):
