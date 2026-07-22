@@ -514,7 +514,10 @@ def compute_for_run(
         isinstance(profile_prefill_len, (int, float)) and profile_prefill_len > 0
         and isinstance(profile_prefill_bs, (int, float)) and profile_prefill_bs > 0
     ):
-        prefill_tp = float(profile_prefill_len) * float(profile_prefill_bs) / ttft
+        # per-request prefill rate: len / ttft. NOT x prefill_bs — ttft is one request's
+        # first-token latency, so the batch's prefills are not all realised within it (that
+        # over-counted throughput -> S-MFU > 100%). Matches the else-branch's avg_prefill_len/ttft.
+        prefill_tp = float(profile_prefill_len) / ttft
     else:
         prefill_tp = prefill_tps or (avg_prefill_len / ttft if avg_prefill_len else 0)
     prefill_smbu = smbu(prefill_act, ttft, kv_size_prefill_TB) if prefill_act > 0 else None
