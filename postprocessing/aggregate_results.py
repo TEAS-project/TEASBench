@@ -681,6 +681,13 @@ PLATFORM_GPU_TYPES = {
 # after all listed ones, alphabetically.
 PLATFORM_ORDER = ["eidf", "vastai", "amd", "dgx-spark", "tenstorrent"]
 
+# Inference engines available on a given platform, used to restrict that
+# platform's table rows accordingly. Platforms not listed here show a row for
+# every inference_engine seen anywhere for the (model, dataset).
+PLATFORM_INFERENCE_ENGINES = {
+    "tenstorrent": ["kai"],
+}
+
 
 def platform_sort_key(platform):
     return (PLATFORM_ORDER.index(platform) if platform in PLATFORM_ORDER
@@ -745,12 +752,13 @@ def write_readme(df, root_dir):
                     g for g in gpu_types_to_show
                     if g != "h200" or (platform_subset["_gpu_type"] == "h200").any()
                 ]
+            platform_engines = PLATFORM_INFERENCE_ENGINES.get(platform, engines)
 
             lines.append(f"### {platform}\n")
             lines.append(header)
             lines.append(separator)
             for gpu_type in gpu_types_to_show:
-                for inference_engine in engines:
+                for inference_engine in platform_engines:
                     engine_subset = platform_subset[platform_subset["inference_engine"] == inference_engine]
                     cells = [
                         "**✓**" if ((engine_subset["_gpu_type"] == gpu_type) &
