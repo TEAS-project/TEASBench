@@ -13,11 +13,11 @@ from decimal import Decimal, ROUND_DOWN
 # the metrics file appended beneath the directory that function returns:
 #
 #   moe/eidf/<inference_engine>/<model>/<dataset>_<num_samples>samples/
-#       <gpu>x<num_gpu>/batch-size-<batch_size>[_input<N>][_output<N>]/
+#       <hw>x<num_hw>/batch-size-<batch_size>[_input<N>][_output<N>]/
 #       <run_timestamp>/metrics.json
 #
 # Note (vs. a naive reading of the path):
-#   * <model> and <gpu> are lower-cased in the path (utils uses .lower()).
+#   * <model> and <hw> are lower-cased in the path (utils uses .lower()).
 #   * the "dataset" level encodes the sample count: "<dataset>_<num_samples>samples".
 #   * the batch-size level may carry "_input<N>" and/or "_output<N>" suffixes,
 #     and <batch_size> may be the literal "default".
@@ -41,7 +41,7 @@ COMBINED_LEADING_COLS = [
     "model",
     "dataset",
     "platform",
-    "gpu_type x num_gpu",
+    "hw_type x num_hw",
     "inference_engine",
     "batch_size",
 ]
@@ -74,7 +74,7 @@ def parse_run_path(rel_parts):
     dict, or return None if the path doesn't match the expected layout.
 
     Fixed prefix (6 levels): platform / inference_engine / model /
-    <dataset>_<n>samples / <gpu>x<num_gpu> / batch-size-...
+    <dataset>_<n>samples / <hw>x<num_hw> / batch-size-...
     Everything between that prefix and the trailing filename is the run id
     (normally a single timestamp directory).
     """
@@ -82,7 +82,7 @@ def parse_run_path(rel_parts):
     if len(rel_parts) < 7:
         return None
 
-    platform, inference_engine, model, dataset_dir, gpu_dir, batch_dir = rel_parts[:6]
+    platform, inference_engine, model, dataset_dir, hw_dir, batch_dir = rel_parts[:6]
     dataset, num_samples = parse_dataset_dir(dataset_dir)
     batch_size, input_length, output_length = parse_batch_dir(batch_dir)
 
@@ -92,7 +92,7 @@ def parse_run_path(rel_parts):
         "model": model,
         "dataset": dataset,
         "num_samples": num_samples,
-        "gpu_type x num_gpu": gpu_dir,
+        "hw_type x num_hw": hw_dir,
         "batch_size": batch_size,
         "input_length": input_length,
         "output_length": output_length,
@@ -214,36 +214,36 @@ def get_results(results_dir, pattern="metrics*", required=True):
     return pd.concat(data_frames, ignore_index=True)
 
 
-# Sort order for the gpu_type portion of the "gpu_type x num_gpu" column. That
-# column holds "<gpu_type>x<num_gpu>" (e.g. "h200x8", "mi355xx4"); wherever it is a
-# sort key, rows are ordered by gpu_type per this list, then by num_gpu
-# numerically. gpu_types not listed here sort after all listed ones; values that
+# Sort order for the hw_type portion of the "hw_type x num_hw" column. That
+# column holds "<hw_type>x<num_hw>" (e.g. "h200x8", "mi355xx4"); wherever it is a
+# sort key, rows are ordered by hw_type per this list, then by num_hw
+# numerically. hw_types not listed here sort after all listed ones; values that
 # don't parse sort last.
-GPU_TYPE_ORDER = ["a100", "h100", "h200", "b200", "b300", "gb10", "mi355x", "blackhole-p150b"]
-GPU_DIR_RE = re.compile(r"^(?P<gpu_type>.+)x(?P<num_gpu>\d+)$")
+HW_TYPE_ORDER = ["a100", "h100", "h200", "b200", "b300", "gb10", "mi355x", "blackhole-p150b"]
+HW_DIR_RE = re.compile(r"^(?P<hw_type>.+)x(?P<num_hw>\d+)$")
 
 
-def gpu_dir_sort_value(value):
-    """Map a "<gpu_type>x<num_gpu>" value to a zero-padded string that sorts by
-    gpu_type (per GPU_TYPE_ORDER) then num_gpu. A string key (rather than a tuple)
+def hw_dir_sort_value(value):
+    """Map a "<hw_type>x<num_hw>" value to a zero-padded string that sorts by
+    hw_type (per HW_TYPE_ORDER) then num_hw. A string key (rather than a tuple)
     keeps it robust under pandas' object-dtype sorting."""
-    m = GPU_DIR_RE.match(str(value))
+    m = HW_DIR_RE.match(str(value))
     if not m:
-        return f"{len(GPU_TYPE_ORDER) + 1:03d}|{value}"
-    gpu_type = m.group("gpu_type")
-    num_gpu = int(m.group("num_gpu"))
-    rank = (GPU_TYPE_ORDER.index(gpu_type)
-            if gpu_type in GPU_TYPE_ORDER else len(GPU_TYPE_ORDER))
-    return f"{rank:03d}|{num_gpu:04d}|{gpu_type}"
+        return f"{len(HW_TYPE_ORDER) + 1:03d}|{value}"
+    hw_type = m.group("hw_type")
+    num_hw = int(m.group("num_hw"))
+    rank = (HW_TYPE_ORDER.index(hw_type)
+            if hw_type in HW_TYPE_ORDER else len(HW_TYPE_ORDER))
+    return f"{rank:03d}|{num_hw:04d}|{hw_type}"
 
 
 def descriptor_sort_key(col):
-    """Key for DataFrame.sort_values: apply the custom gpu ordering to the
-    "gpu_type x num_gpu" column and leave every other sort column unchanged.
+    """Key for DataFrame.sort_values: apply the custom hw ordering to the
+    "hw_type x num_hw" column and leave every other sort column unchanged.
     sort_values applies this to each `by` column independently, and the Series
-    carries its column name so the gpu column can be singled out."""
-    if col.name == "gpu_type x num_gpu":
-        return col.map(gpu_dir_sort_value)
+    carries its column name so the hw column can be singled out."""
+    if col.name == "hw_type x num_hw":
+        return col.map(hw_dir_sort_value)
     return col
 
 
@@ -269,7 +269,7 @@ def arrange_combined(df):
 # identify a single run, used to join metrics from sibling files (e.g. sparsity)
 # onto the metrics rows.
 RUN_KEY_COLS = ["platform", "inference_engine", "model", "dataset", "num_samples",
-                "gpu_type x num_gpu", "batch_size", "input_length", "output_length",
+                "hw_type x num_hw", "batch_size", "input_length", "output_length",
                 "run_timestamp"]
 
 
@@ -302,19 +302,19 @@ def merge_run_metrics(left, right, value_cols):
     return merged.drop(columns="_run_key")
 
 
-CORE_DESCRIPTOR_COLS = ["platform", "gpu_type x num_gpu", "batch_size", "inference_engine"]
+CORE_DESCRIPTOR_COLS = ["platform", "hw_type x num_hw", "batch_size", "inference_engine"]
 OPTIONAL_DESCRIPTOR_COLS = ["num_samples", "input_length", "output_length"]
 
 # Descriptor column order used inside the per-permutation CSVs, which also serves
 # as the successive row-sort key order. Kept deliberately separate for accuracy and
 # performance so they can diverge later. Any listed column that is fixed by the
 # grouping (e.g. batch_size in the performance files) is dropped automatically.
-ACCURACY_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
-PERFORMANCE_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
-COST_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "batch_size", "platform"]
+ACCURACY_DESCRIPTOR_ORDER = ["inference_engine", "hw_type x num_hw", "batch_size", "platform"]
+PERFORMANCE_DESCRIPTOR_ORDER = ["inference_engine", "hw_type x num_hw", "batch_size", "platform"]
+COST_DESCRIPTOR_ORDER = ["inference_engine", "hw_type x num_hw", "batch_size", "platform"]
 # Fixed-length CSVs omit batch_size (always "default") and lead with input_length
 # / output_length instead (handled separately by write_fixed_length_per_permutation_csvs).
-FIXED_LENGTH_DESCRIPTOR_ORDER = ["inference_engine", "gpu_type x num_gpu", "platform"]
+FIXED_LENGTH_DESCRIPTOR_ORDER = ["inference_engine", "hw_type x num_hw", "platform"]
 
 
 def sanitize_filename_part(value):
@@ -443,8 +443,8 @@ def write_fixed_length_per_permutation_csvs(df_standard, df_fixed, output_dir,
         resolved_specs.append((out_name, src, transform))
 
     def fl_sort_key(col):
-        """Numeric sort for input/output length (None → -1, sorts first); GPU
-        ordering for gpu_type x num_gpu; natural sort for everything else."""
+        """Numeric sort for input/output length (None → -1, sorts first); HW
+        ordering for hw_type x num_hw; natural sort for everything else."""
         if col.name in ("input_length", "output_length"):
             def to_int(v):
                 try:
@@ -461,7 +461,7 @@ def write_fixed_length_per_permutation_csvs(df_standard, df_fixed, output_dir,
         model, dataset = keys
 
         # Pull the standard batch-size-default rows for this (model, dataset),
-        # restricted to configurations (inference_engine, gpu_type x num_gpu,
+        # restricted to configurations (inference_engine, hw_type x num_hw,
         # platform) that have at least one fixed-length run -- so only rows with
         # a direct fixed-length counterpart appear in the CSV.
         config_cols = [c for c in descriptor_order if c in fixed_group.columns]
@@ -655,10 +655,10 @@ def write_fixed_length_cost_per_permutation_csvs(df_standard, df_fixed, output_d
     )
 
 
-def gpu_type_of(gpu_dir):
-    """Extract gpu_type from a "gpu_type x num_gpu" value, e.g. "h200x8" -> "h200"."""
-    m = GPU_DIR_RE.match(str(gpu_dir))
-    return m.group("gpu_type") if m else None
+def hw_type_of(hw_dir):
+    """Extract hw_type from a "hw_type x num_hw" value, e.g. "h200x8" -> "h200"."""
+    m = HW_DIR_RE.match(str(hw_dir))
+    return m.group("hw_type") if m else None
 
 
 # Batch sizes shown as columns in README.md, in display order, mapped to their
@@ -666,10 +666,10 @@ def gpu_type_of(gpu_dir):
 README_BATCH_SIZES = ["default", "1"]
 README_BATCH_COLUMN_LABELS = {"default": "batch-size-default", "1": "batch-size-1"}
 
-# GPU types physically available on each platform, used to restrict each
-# platform's table in README.md to only the gpu_types it can actually run.
-# Platforms not listed here fall back to the full GPU_TYPE_ORDER.
-PLATFORM_GPU_TYPES = {
+# HW types physically available on each platform, used to restrict each
+# platform's table in README.md to only the hw_types it can actually run.
+# Platforms not listed here fall back to the full HW_TYPE_ORDER.
+PLATFORM_HW_TYPES = {
     "eidf": ["a100", "h100", "h200"],
     "vastai": ["h200", "b200", "b300"],
     "dgx-spark": ["gb10"],
@@ -682,11 +682,12 @@ PLATFORM_GPU_TYPES = {
 PLATFORM_ORDER = ["eidf", "vastai", "amd", "dgx-spark", "tenstorrent"]
 
 # Inference engines available on a given platform, used to restrict that
-# platform's table rows accordingly. Platforms not listed here show a row for
-# every inference_engine seen anywhere for the (model, dataset).
+# platform's table rows accordingly. Platforms not listed here fall back to
+# DEFAULT_INFERENCE_ENGINES.
 PLATFORM_INFERENCE_ENGINES = {
     "tenstorrent": ["kai"],
 }
+DEFAULT_INFERENCE_ENGINES = ["sglang", "vllm"]
 
 
 def platform_sort_key(platform):
@@ -699,73 +700,71 @@ def write_readme(df, root_dir):
     present in df, and within each section one table per platform that has at
     least one result for that (model, dataset).
 
-    Each table only lists the gpu_types available on that platform (per
-    PLATFORM_GPU_TYPES) that actually have a result there -- in particular,
+    Each table only lists the hw_types available on that platform (per
+    PLATFORM_HW_TYPES) that actually have a result there -- in particular,
     vastai's H200 row is only shown if vastai itself has an H200 result, since
-    H200 is normally run on eidf instead. Rows are sorted by gpu_type first (per
-    GPU_TYPE_ORDER), then by inference_engine (the set of engines seen anywhere
-    for this (model, dataset), so every platform's table has the same rows for a
-    given gpu_type), so successive rows share a gpu_type across inference engines
-    before moving to the next gpu_type. One column per README_BATCH_SIZES entry
-    holds a bold tick mark where at least one run exists for that
-    platform/gpu_type/inference_engine/batch_size (any num_gpu), left blank
-    otherwise.
+    H200 is normally run on eidf instead. Rows are sorted by hw_type first (per
+    HW_TYPE_ORDER), then by inference_engine (per PLATFORM_INFERENCE_ENGINES,
+    falling back to DEFAULT_INFERENCE_ENGINES), so successive rows share a
+    hw_type across inference engines before moving to the next hw_type. One
+    column per README_BATCH_SIZES entry holds a bold tick mark where at least one
+    run exists for that platform/hw_type/inference_engine/batch_size (any
+    num_hw), left blank otherwise.
 
-    If the same gpu_type has results on more than one platform for a given
+    If the same hw_type has results on more than one platform for a given
     (model, dataset) -- e.g. H200 on both eidf and vastai -- a warning naming the
-    gpu_type, platforms, model and dataset is printed, since each gpu_type is
+    hw_type, platforms, model and dataset is printed, since each hw_type is
     normally expected to be run on only one platform.
     """
     df = df.copy()
-    df["_gpu_type"] = df["gpu_type x num_gpu"].map(gpu_type_of)
+    df["_hw_type"] = df["hw_type x num_hw"].map(hw_type_of)
 
     group_cols = ["model", "dataset"]
     combos = df[group_cols].drop_duplicates().sort_values(by=group_cols, kind="stable")
 
     lines = ["# Results\n"]
-    header = "| gpu_type | inference_engine | " + " | ".join(
+    header = "| hw_type | inference_engine | " + " | ".join(
         README_BATCH_COLUMN_LABELS[b] for b in README_BATCH_SIZES) + " |"
     separator = "|---|---|" + "|".join(":---:" for _ in README_BATCH_SIZES) + "|"
 
     for _, key in combos.iterrows():
         model, dataset = key["model"], key["dataset"]
         subset = df[(df["model"] == model) & (df["dataset"] == dataset)]
-        engines = sorted(subset["inference_engine"].dropna().unique())
 
-        for gpu_type in GPU_TYPE_ORDER:
-            platforms_with_gpu = sorted(
-                subset.loc[subset["_gpu_type"] == gpu_type, "platform"].dropna().unique())
-            if len(platforms_with_gpu) > 1:
-                print(f"Warning: results for the gpu_type {gpu_type} on multiple "
-                      f"platforms ({', '.join(platforms_with_gpu)}) "
+        for hw_type in HW_TYPE_ORDER:
+            platforms_with_hw = sorted(
+                subset.loc[subset["_hw_type"] == hw_type, "platform"].dropna().unique())
+            if len(platforms_with_hw) > 1:
+                print(f"Warning: results for the hw_type {hw_type} on multiple "
+                      f"platforms ({', '.join(platforms_with_hw)}) "
                       f"for {model}/{dataset}")
 
         lines.append(f"## {model} / {dataset}\n")
         platforms = sorted(subset["platform"].dropna().unique(), key=platform_sort_key)
         for platform in platforms:
             platform_subset = subset[subset["platform"] == platform]
-            platform_gpu_types = PLATFORM_GPU_TYPES.get(platform, GPU_TYPE_ORDER)
+            platform_hw_types = PLATFORM_HW_TYPES.get(platform, HW_TYPE_ORDER)
 
-            gpu_types_to_show = [g for g in GPU_TYPE_ORDER if g in platform_gpu_types]
+            hw_types_to_show = [g for g in HW_TYPE_ORDER if g in platform_hw_types]
             if platform == "vastai":
-                gpu_types_to_show = [
-                    g for g in gpu_types_to_show
-                    if g != "h200" or (platform_subset["_gpu_type"] == "h200").any()
+                hw_types_to_show = [
+                    g for g in hw_types_to_show
+                    if g != "h200" or (platform_subset["_hw_type"] == "h200").any()
                 ]
-            platform_engines = PLATFORM_INFERENCE_ENGINES.get(platform, engines)
+            platform_engines = PLATFORM_INFERENCE_ENGINES.get(platform, DEFAULT_INFERENCE_ENGINES)
 
             lines.append(f"### {platform}\n")
             lines.append(header)
             lines.append(separator)
-            for gpu_type in gpu_types_to_show:
+            for hw_type in hw_types_to_show:
                 for inference_engine in platform_engines:
                     engine_subset = platform_subset[platform_subset["inference_engine"] == inference_engine]
                     cells = [
-                        "**✓**" if ((engine_subset["_gpu_type"] == gpu_type) &
+                        "**✓**" if ((engine_subset["_hw_type"] == hw_type) &
                                   (engine_subset["batch_size"] == batch_size)).any() else ""
                         for batch_size in README_BATCH_SIZES
                     ]
-                    lines.append(f"| {gpu_type.upper()} | {inference_engine} | " +
+                    lines.append(f"| {hw_type.upper()} | {inference_engine} | " +
                                  " | ".join(cells) + " |")
             lines.append("")
 
