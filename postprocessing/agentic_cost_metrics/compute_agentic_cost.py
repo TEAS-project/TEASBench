@@ -7,6 +7,11 @@ Per the user spec:
   cost_per_1M_output_tokens  = (avg_e2e_latency_s / avg_total_output_tokens)
                                * 1_000_000 * effective_$/s
 
+Costs are amortised over the run's achieved concurrency (total task-seconds /
+wall-clock), so a run executing tasks in parallel is not billed for the whole
+node once per task in flight. `reserved_worker` below is exempt: it is defined
+as an exclusive-node upper bound.
+
 For buy-cost accounting, the script reports two explicit modes instead of
 mixing conventions:
   active_resource: charge GPU for estimated LLM-active time and CPU for
@@ -337,6 +342,20 @@ def _per_token_scale(output_tokens: float) -> float:
     return float("nan")
 
 
+def achieved_concurrency(perf: dict, latencies: list[float]) -> float:
+    """Mean tasks in flight = total task-seconds / wall-clock seconds; 1.0 when not derivable.
+
+    A run that executes tasks concurrently finishes N of them in far less than N x avg_e2e, so
+    charging each task the whole node for its own wall time bills the node once per task in flight.
+    Costs are therefore amortised over this value, which keeps a concurrent run comparable with a
+    serial one."""
+    wall_min = perf.get("total_wall_time_min")
+    if not wall_min or not latencies:
+        return 1.0
+    c = sum(latencies) / (wall_min * 60.0)
+    return c if c >= 1.0 else 1.0
+
+
 def compute_costs_lumped(
     e2e_s: float,
     output_tokens: float,
@@ -344,8 +363,11 @@ def compute_costs_lumped(
     *,
     p50_e2e_s: Optional[float] = None,
     p99_e2e_s: Optional[float] = None,
+    concurrency: float = 1.0,
 ) -> dict[str, float]:
-    price_per_s = hourly_rate_usd / 3600.0
+    # Amortise the node over the tasks sharing it: in wall time T at concurrency C the run completes
+    # C*T/e2e tasks, so cost per token is e2e*price/(C*tokens). Dividing the rate is equivalent.
+    price_per_s = hourly_rate_usd / 3600.0 / max(concurrency, 1.0)
     scale = _per_token_scale(output_tokens)
     out: dict[str, float] = {
         "avg_cost_per_task_usd": e2e_s * price_per_s,
@@ -412,13 +434,18 @@ def compute_costs_split(
     p99_e2e_s: Optional[float] = None,
     p99_llm_active_s: Optional[float] = None,
     p99_tool_wait_s: Optional[float] = None,
+    concurrency: float = 1.0,
 ) -> dict[str, object]:
     if default_mode not in {"active_resource", "reserved_worker"}:
         raise ValueError(f"unknown buy cost mode: {default_mode}")
 
+    # active_resource attributes the node across the tasks actually sharing it. reserved_worker is
+    # by definition an exclusive-node upper bound, so it is NOT amortised -- that would remove the
+    # property that makes it a bound.
+    c = max(concurrency, 1.0)
     active = _compute_split_mode_costs(
         llm_active_s, tool_wait_s, output_tokens,
-        gpu_hourly_rate_usd, cpu_hourly_rate_usd,
+        gpu_hourly_rate_usd / c, cpu_hourly_rate_usd / c,
         p99_gpu_billable_s=p99_llm_active_s,
         p99_cpu_billable_s=p99_tool_wait_s,
     )
@@ -553,9 +580,10 @@ def main() -> int:
         tool_calls = ag.get("avg_tool_call_count")
 
         # Runs that omit the end-to-end summary fields still record each task individually.
+        latencies = task_latencies(f)
+        concurrency = achieved_concurrency(perf, latencies)
         e2e_source = "metrics"
         if avg_e2e is None:
-            latencies = task_latencies(f)
             if latencies:
                 e2e_source = "output-data"
                 avg_e2e = sum(latencies) / len(latencies)
@@ -593,6 +621,7 @@ def main() -> int:
                 "p50_e2e_latency_s": p50_e2e,
                 "p99_e2e_latency_s": p99_e2e,
                 "e2e_latency_source": e2e_source,
+                "achieved_concurrency": round(concurrency, 3),
                 "ttft_s": ttft,
                 "p99_ttft_s": p99_ttft,
                 "tpot_s": tpot,
@@ -620,6 +649,7 @@ def main() -> int:
                 "cost": compute_costs_lumped(
                     avg_e2e, out_tok, rent_hourly,
                     p50_e2e_s=p50_e2e, p99_e2e_s=p99_e2e,
+                    concurrency=concurrency,
                 ),
             }
 
@@ -652,6 +682,7 @@ def main() -> int:
                 buy_pricing["gpu"]["effective_hourly_rate_usd"],
                 buy_pricing["cpu"]["effective_hourly_rate_usd"],
                 default_mode=buy_cost_mode,
+                concurrency=concurrency,
                 p99_e2e_s=p99_e2e,
                 p99_llm_active_s=p99_llm_active_s,
                 p99_tool_wait_s=p99_tool_wait_s,
