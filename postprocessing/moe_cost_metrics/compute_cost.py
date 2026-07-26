@@ -98,6 +98,12 @@ GPU_SPECS: dict[str, dict] = {
         "tdp_w": 1400,
         "tdp_source": "https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html",
     },
+    "blackhole-p150b": {
+        "price_per_unit_usd": 1399.0,
+        "price_source": "https://tenstorrent.com/en/hardware/cards",
+        "tdp_w": 300,
+        "tdp_source": "https://docs.tenstorrent.com/aibs/blackhole/",
+    },
 }
 
 CPU_SPECS: dict[str, dict] = {
@@ -139,10 +145,11 @@ GPU_HOST_CPU: dict[str, tuple[int, str]] = {
     "b300": (2, "xeon-8558"),
     "gb10": (1, "gb10-soc"),
     "mi355x": (2, "epyc-7713p"),
+    "blackhole-p150b": (1, "xeon-8468"),  # PCIe dev card in a single-CPU workstation host
 }
 
 
-GPU_DIR_RE = re.compile(r"^([a-z][a-z0-9]*?)x(\d+)(?:[_-].*)?$")
+GPU_DIR_RE = re.compile(r"^([a-z][a-z0-9-]*?)x(\d+)(?:[_-].*)?$")  # hyphen allows blackhole-p150b
 
 
 def parse_gpu_dir(name: str) -> Optional[tuple[str, int]]:

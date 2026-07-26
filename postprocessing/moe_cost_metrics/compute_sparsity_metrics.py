@@ -254,7 +254,7 @@ def resolve_precision(metadata_precision: str, cfg_d: dict) -> tuple[str, str]:
     return (metadata_precision or "bfloat16"), "metadata.model_config.precision"
 
 
-GPU_DIR_RE = re.compile(r"^([a-z][a-z0-9]*?)x(\d+)(?:[_-].*)?$")
+GPU_DIR_RE = re.compile(r"^([a-z][a-z0-9-]*?)x(\d+)(?:[_-].*)?$")  # hyphen allows blackhole-p150b
 
 
 def parse_gpu_dir(name: str) -> Optional[tuple[str, int]]:
