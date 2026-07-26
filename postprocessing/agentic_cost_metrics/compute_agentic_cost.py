@@ -181,6 +181,33 @@ def _swap_prefix(name: str, old: str, new: str) -> str:
     return f"{new}_{name}"
 
 
+def task_latencies(metrics_path: Path) -> list[float]:
+    """Per-task end-to-end latencies (s) from the run's `output-data_*.jsonl`, or []."""
+    files = sorted(metrics_path.parent.glob("output-data_*.jsonl"))
+    if not files:
+        return []
+    latencies: list[float] = []
+    try:
+        with files[0].open() as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                value = json.loads(line).get("e2e_latency_s")
+                if value is not None:
+                    latencies.append(float(value))
+    except (OSError, ValueError):
+        return []
+    return latencies
+
+
+def _percentile(values: list[float], pct: int) -> float:
+    """Nearest-rank percentile."""
+    ordered = sorted(values)
+    rank = -(-pct * len(ordered) // 100)
+    return ordered[min(max(rank, 1), len(ordered)) - 1]
+
+
 def cost_path_for(metrics_path: Path) -> Path:
     return metrics_path.with_name(_swap_prefix(metrics_path.name, "metrics", "cost"))
 
@@ -525,6 +552,18 @@ def main() -> int:
         out_tok = ag.get("avg_total_output_tokens")
         tool_calls = ag.get("avg_tool_call_count")
 
+        # Runs that omit the end-to-end summary fields still record each task individually.
+        e2e_source = "metrics"
+        if avg_e2e is None:
+            latencies = task_latencies(f)
+            if latencies:
+                e2e_source = "output-data"
+                avg_e2e = sum(latencies) / len(latencies)
+                if p50_e2e is None:
+                    p50_e2e = _percentile(latencies, 50)
+                if p99_e2e is None:
+                    p99_e2e = _percentile(latencies, 99)
+
         if avg_e2e is None or ttft is None or tpot is None or out_tok is None:
             skipped += 1
             continue
@@ -553,6 +592,7 @@ def main() -> int:
                 "avg_e2e_latency_s": avg_e2e,
                 "p50_e2e_latency_s": p50_e2e,
                 "p99_e2e_latency_s": p99_e2e,
+                "e2e_latency_source": e2e_source,
                 "ttft_s": ttft,
                 "p99_ttft_s": p99_ttft,
                 "tpot_s": tpot,
