@@ -166,6 +166,15 @@ PERF_DECIMALS = {
     "decode_S_MBU": 6,
     "prefill_S_MFU": 6,
     "decode_S_MFU": 6,
+    # Agentic runs (see AGENTIC_PERFORMANCE_VALUE_SPECS) have no sparsity/MoE
+    # routing metrics, but do report per-task latency and agent workload stats.
+    "avg_e2e_latency_s": 3,
+    "p50_e2e_latency_s": 3,
+    "p99_e2e_latency_s": 3,
+    "avg_num_requests": 2,
+    "avg_tool_call_count": 2,
+    "avg_total_input_tokens": 2,
+    "avg_total_output_tokens": 2,
 }
 
 
@@ -553,10 +562,11 @@ SPARSITY_VALUE_SPECS = [
     ("decode_S_MFU",                  "sparsity.decode.S_MFU"),
 ]
 
-# Latency/throughput metrics that lead the performance CSVs, as
-# (output_label, source_column) in display order, followed by the merged sparsity
-# metrics. Both new-style keys are top-level under "performance" in every metrics
-# file, so find_metric_column resolves them to "performance.<key>".
+# Latency/throughput metrics that lead the performance CSVs for MoE (batch
+# inference) runs, as (output_label, source_column) in display order, followed by
+# the merged sparsity metrics. Both new-style keys are top-level under
+# "performance" in every metrics file, so find_metric_column resolves them to
+# "performance.<key>".
 PERFORMANCE_VALUE_SPECS = [
     ("unnormalized_e2e", "unnormalized_e2e"),
     ("request/s", "request/s"),
@@ -564,22 +574,37 @@ PERFORMANCE_VALUE_SPECS = [
     ("tpot", "tpot"),
 ] + SPARSITY_VALUE_SPECS
 
+# Latency and agent-workload metrics that lead the performance CSVs for agentic
+# runs. Agentic metrics files have no MoE routing/sparsity data (there is no
+# batch inference server to profile), but each task's LLM interaction is still
+# characterized by e2e/ttft/tpot latency plus request/tool-call/token counts
+# under the "agentic.*" key, which take the place of the sparsity metrics.
+AGENTIC_PERFORMANCE_VALUE_SPECS = [
+    ("avg_e2e_latency_s", "avg_e2e_latency_s"),
+    ("p50_e2e_latency_s", "p50_e2e_latency_s"),
+    ("p99_e2e_latency_s", "p99_e2e_latency_s"),
+    ("ttft", "ttft"),
+    ("tpot", "tpot"),
+    ("avg_num_requests", "avg_num_requests"),
+    ("avg_tool_call_count", "avg_tool_call_count"),
+    ("avg_total_input_tokens", "avg_total_input_tokens"),
+    ("avg_total_output_tokens", "avg_total_output_tokens"),
+]
 
-def write_performance_per_permutation_csvs(df, output_dir):
-    """Per (model, dataset, batch_size) CSVs whose final columns are the
-    performance metrics in PERFORMANCE_VALUE_SPECS order: unnormalized end-to-end
-    latency ("unnormalized_e2e"), throughput ("request/s"), time to first token
-    ("ttft"), time per output token ("tpot"), then
-    the sparsity metrics (present when sparsity data has been merged onto df;
-    otherwise written as NaN). Each column is truncated/formatted to its own fixed
-    number of decimals from PERF_DECIMALS (falling back to PERF_DECIMALS_DEFAULT).
-    Files are bucketed into a "batch-size-<n>" subdirectory per batch size, so
-    batch_size appears in neither the columns nor the filename."""
+
+def write_performance_per_permutation_csvs(df, output_dir, value_specs=PERFORMANCE_VALUE_SPECS):
+    """Per (model, dataset, batch_size) CSVs whose final columns are the given
+    performance `value_specs` in order (PERFORMANCE_VALUE_SPECS for MoE runs,
+    AGENTIC_PERFORMANCE_VALUE_SPECS for agentic runs -- see main()). Each column
+    is truncated/formatted to its own fixed number of decimals from PERF_DECIMALS
+    (falling back to PERF_DECIMALS_DEFAULT). Files are bucketed into a
+    "batch-size-<n>" subdirectory per batch size, so batch_size appears in
+    neither the columns nor the filename."""
     return write_metric_per_permutation_csvs(
         df, output_dir,
         value_specs=[
             (label, src, trunc_fixed(PERF_DECIMALS.get(label, PERF_DECIMALS_DEFAULT)))
-            for label, src in PERFORMANCE_VALUE_SPECS
+            for label, src in value_specs
         ],
         group_cols=("model", "dataset", "batch_size"),
         descriptor_order=PERFORMANCE_DESCRIPTOR_ORDER,
@@ -592,16 +617,17 @@ def write_performance_per_permutation_csvs(df, output_dir):
 
 
 def write_fixed_length_performance_per_permutation_csvs(df_standard, df_fixed,
-                                                         output_dir):
+                                                         output_dir,
+                                                         value_specs=PERFORMANCE_VALUE_SPECS):
     """Fixed-length performance CSVs under batch-size-default_fixed-length/.
 
-    Same metrics as the standard performance CSVs (PERFORMANCE_VALUE_SPECS with
-    per-column PERF_DECIMALS), preceded by input_length and output_length columns."""
+    Same metrics as the standard performance CSVs (`value_specs` with per-column
+    PERF_DECIMALS), preceded by input_length and output_length columns."""
     return write_fixed_length_per_permutation_csvs(
         df_standard, df_fixed, output_dir,
         value_specs=[
             (label, src, trunc_fixed(PERF_DECIMALS.get(label, PERF_DECIMALS_DEFAULT)))
-            for label, src in PERFORMANCE_VALUE_SPECS
+            for label, src in value_specs
         ],
         descriptor_order=FIXED_LENGTH_DESCRIPTOR_ORDER,
         filename_fn=lambda k: "_".join([
@@ -611,20 +637,50 @@ def write_fixed_length_performance_per_permutation_csvs(df_standard, df_fixed,
     )
 
 
-def write_cost_per_permutation_csvs(df, output_dir):
-    """Per (model, dataset, batch_size) CSVs whose final columns are the cost
-    metrics, each truncated to a fixed COST_DECIMALS decimal places:
-    avg_cost_per_request_usd and avg_cost_per_1M_output_tokens_usd (read from the
-    nested "buy.cost.*" keys of each run's cost file). Files are bucketed into a
-    "batch-size-<n>" subdirectory per batch size, so batch_size appears in neither
-    the columns nor the filename -- mirroring the performance CSVs."""
+# Every run's cost file carries two independent cost models side by side, under
+# top-level "rent" and "buy" keys: "rent.cost.*" is the cost at the platform's
+# quoted market rental price, "buy.cost.*" is the cost under a capital
+# amortization + electricity model as if the hardware were purchased outright.
+# Both blocks report the same metric names (e.g. "avg_cost_per_request_usd"), so
+# the bare metric name is ambiguous under find_metric_column's suffix matching --
+# each spec below therefore uses the full "rent.cost.<metric>"/"buy.cost.<metric>"
+# path to pick out the right one unambiguously, with output labels prefixed
+# "rent_"/"buy_" so the two are clearly distinguished in the CSV columns too.
+
+# Cost metrics for MoE runs, whose natural unit of work is a single inference
+# request.
+MOE_COST_VALUE_SPECS = [
+    ("rent_avg_cost_per_request_usd", "rent.cost.avg_cost_per_request_usd"),
+    ("buy_avg_cost_per_request_usd", "buy.cost.avg_cost_per_request_usd"),
+    ("rent_avg_cost_per_1M_output_tokens_usd", "rent.cost.avg_cost_per_1M_output_tokens_usd"),
+    ("buy_avg_cost_per_1M_output_tokens_usd", "buy.cost.avg_cost_per_1M_output_tokens_usd"),
+]
+
+# Cost metrics for agentic runs, whose natural unit of work is a whole agent
+# task (e.g. one SWE-bench-lite instance), which is why the per-request cost
+# metric is named "avg_cost_per_task_usd" instead of "avg_cost_per_request_usd".
+# "buy.cost.avg_cost_per_task_usd" reflects the run's default_cost_mode (normally
+# "active_resource"); the alternative "reserved_worker" accounting mode nested
+# under "buy.cost.reserved_worker.*" is not surfaced as a separate column here.
+AGENTIC_COST_VALUE_SPECS = [
+    ("rent_avg_cost_per_task_usd", "rent.cost.avg_cost_per_task_usd"),
+    ("buy_avg_cost_per_task_usd", "buy.cost.avg_cost_per_task_usd"),
+    ("rent_avg_cost_per_1M_output_tokens_usd", "rent.cost.avg_cost_per_1M_output_tokens_usd"),
+    ("buy_avg_cost_per_1M_output_tokens_usd", "buy.cost.avg_cost_per_1M_output_tokens_usd"),
+]
+
+
+def write_cost_per_permutation_csvs(df, output_dir, value_specs=MOE_COST_VALUE_SPECS):
+    """Per (model, dataset, batch_size) CSVs whose final columns are the given
+    cost `value_specs` (MOE_COST_VALUE_SPECS for MoE runs, AGENTIC_COST_VALUE_SPECS
+    for agentic runs -- see main()), each truncated to a fixed COST_DECIMALS
+    decimal places. Files are bucketed into a "batch-size-<n>" subdirectory per
+    batch size, so batch_size appears in neither the columns nor the filename --
+    mirroring the performance CSVs."""
     fmt = trunc_fixed(COST_DECIMALS)
     return write_metric_per_permutation_csvs(
         df, output_dir,
-        value_specs=[
-            ("avg_cost_per_request_usd", "avg_cost_per_request_usd", fmt),
-            ("avg_cost_per_1M_output_tokens_usd", "avg_cost_per_1M_output_tokens_usd", fmt),
-        ],
+        value_specs=[(label, src, fmt) for label, src in value_specs],
         group_cols=("model", "dataset", "batch_size"),
         descriptor_order=COST_DESCRIPTOR_ORDER,
         subdir_fn=lambda k: "batch-size-" + sanitize_filename_part(k["batch_size"]),
@@ -635,7 +691,8 @@ def write_cost_per_permutation_csvs(df, output_dir):
     )
 
 
-def write_fixed_length_cost_per_permutation_csvs(df_standard, df_fixed, output_dir):
+def write_fixed_length_cost_per_permutation_csvs(df_standard, df_fixed, output_dir,
+                                                  value_specs=MOE_COST_VALUE_SPECS):
     """Fixed-length cost CSVs under batch-size-default_fixed-length/.
 
     Same metrics as the standard cost CSVs, preceded by input_length and
@@ -643,10 +700,7 @@ def write_fixed_length_cost_per_permutation_csvs(df_standard, df_fixed, output_d
     fmt = trunc_fixed(COST_DECIMALS)
     return write_fixed_length_per_permutation_csvs(
         df_standard, df_fixed, output_dir,
-        value_specs=[
-            ("avg_cost_per_request_usd", "avg_cost_per_request_usd", fmt),
-            ("avg_cost_per_1M_output_tokens_usd", "avg_cost_per_1M_output_tokens_usd", fmt),
-        ],
+        value_specs=[(label, src, fmt) for label, src in value_specs],
         descriptor_order=FIXED_LENGTH_DESCRIPTOR_ORDER,
         filename_fn=lambda k: "_".join([
             sanitize_filename_part(k["model"]),
@@ -779,6 +833,17 @@ def main(results_dir, output_dir):
     df = get_results(results_dir, pattern="metrics*")
     df = arrange_combined(df)
 
+    # Agentic runs report an "agentic.*" block of per-task request/tool-call/token
+    # stats that MoE (batch inference) runs never have; its presence is what
+    # distinguishes the two result sets and selects which performance/cost
+    # metric names to look for below (moe and agentic name some metrics
+    # differently -- e.g. avg_cost_per_request_usd vs avg_cost_per_task_usd --
+    # since a MoE run's unit of work is a request and an agentic run's is a
+    # whole task).
+    is_agentic = any(col == "agentic" or col.startswith("agentic.") for col in df.columns)
+    performance_value_specs = AGENTIC_PERFORMANCE_VALUE_SPECS if is_agentic else PERFORMANCE_VALUE_SPECS
+    cost_value_specs = AGENTIC_COST_VALUE_SPECS if is_agentic else MOE_COST_VALUE_SPECS
+
     # e2e_s has been superseded by unnormalized_e2e / request/s and is no longer
     # reported, so drop it from the combined all_metrics.csv dump too.
     e2e_cols = [c for c in df.columns if c.split(".")[-1] == "e2e_s"]
@@ -803,31 +868,36 @@ def main(results_dir, output_dir):
     performance_per_permutation_dir = pathlib.Path(output_dir) / "performance/by_model_dataset"
 
     # Sparsity metrics live in separate sibling files ("sparsity.json" or
-    # "sparsity_<dataset>_<ts>.json"), present only for a subset of runs, so they
-    # are collected in their own pass and joined onto the metrics rows by run
-    # identity. The merge uses RUN_KEY_COLS (which includes input_length /
-    # output_length) so sparsity is matched correctly for both standard and
-    # fixed-length rows.
+    # "sparsity_<dataset>_<ts>.json"), present only for MoE runs, so they are
+    # collected in their own pass and joined onto the metrics rows by run
+    # identity. Agentic runs have no MoE routing to profile, so this pass is
+    # skipped entirely for them. The merge uses RUN_KEY_COLS (which includes
+    # input_length / output_length) so sparsity is matched correctly for both
+    # standard and fixed-length rows.
     performance_df = df
-    sparsity_df = get_results(results_dir, pattern="sparsity*.json", required=False)
-    if sparsity_df is not None:
-        performance_df = merge_run_metrics(
-            df, sparsity_df, [src for _, src in SPARSITY_VALUE_SPECS])
+    if not is_agentic:
+        sparsity_df = get_results(results_dir, pattern="sparsity*.json", required=False)
+        if sparsity_df is not None:
+            performance_df = merge_run_metrics(
+                df, sparsity_df, [src for _, src in SPARSITY_VALUE_SPECS])
 
     perf_std = performance_df[~is_fixed_length(performance_df)].copy()
     perf_fl  = performance_df[ is_fixed_length(performance_df)].copy()
 
     print(f"Writing performance per model-dataset CSVs to {performance_per_permutation_dir} ...")
-    write_performance_per_permutation_csvs(perf_std, performance_per_permutation_dir)
+    write_performance_per_permutation_csvs(perf_std, performance_per_permutation_dir,
+                                            value_specs=performance_value_specs)
 
     if not perf_fl.empty:
         fl_perf_dir = performance_per_permutation_dir / "batch-size-default_fixed-length"
         print(f"Writing fixed-length performance CSVs to {fl_perf_dir} ...")
-        write_fixed_length_performance_per_permutation_csvs(perf_std, perf_fl, fl_perf_dir)
+        write_fixed_length_performance_per_permutation_csvs(
+            perf_std, perf_fl, fl_perf_dir, value_specs=performance_value_specs)
 
     # Cost lives in separate cost files ("cost.json" or "cost_<dataset>_<ts>.json"),
-    # present only for a subset of runs, so it is collected in its own pass and is
-    # non-fatal when absent (e.g. the agentic runs carry no cost files).
+    # present only for a subset of runs (both MoE and agentic runs carry cost
+    # files; some ad hoc runs of either kind may not), so it is collected in its
+    # own pass and is non-fatal when absent.
     cost_df = get_results(results_dir, pattern="*cost*.json", required=False)
     if cost_df is not None:
         cost_std = cost_df[~is_fixed_length(cost_df)].copy()
@@ -835,12 +905,14 @@ def main(results_dir, output_dir):
 
         cost_per_permutation_dir = pathlib.Path(output_dir) / "cost/by_model_dataset"
         print(f"Writing cost per model-dataset CSVs to {cost_per_permutation_dir} ...")
-        write_cost_per_permutation_csvs(cost_std, cost_per_permutation_dir)
+        write_cost_per_permutation_csvs(cost_std, cost_per_permutation_dir,
+                                         value_specs=cost_value_specs)
 
         if not cost_fl.empty:
             fl_cost_dir = cost_per_permutation_dir / "batch-size-default_fixed-length"
             print(f"Writing fixed-length cost CSVs to {fl_cost_dir} ...")
-            write_fixed_length_cost_per_permutation_csvs(cost_std, cost_fl, fl_cost_dir)
+            write_fixed_length_cost_per_permutation_csvs(cost_std, cost_fl, fl_cost_dir,
+                                                          value_specs=cost_value_specs)
 
     print("Done.")
 
