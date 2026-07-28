@@ -1,0 +1,320 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: @name_k8s@-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+spec:
+  completions: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      @service_account@
+      securityContext:
+        fsGroup: 2000
+      containers:
+      @sidecar_containers@
+      - name: @inference_engine@-agentic
+        image: @image_name@
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: k8s_job_name
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['job-name']
+          - name: k8s_node_name
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+
+          - name: HF_HOME
+            value: /mnt/input/hf_cache
+          - name: PIP_CACHE_DIR
+            value: /mnt/input/pip_cache
+          - name: PYTORCH_NVML_BASED_MEMORY_STATS
+            value: "0"
+          - name: PYTHONPATH
+            value: /dev/shm/TEASBench
+
+          # Runner metadata / behaviour
+          - name: INFERENCE_ENGINE
+            value: @inference_engine@
+          - name: IS_LOCAL
+            value: "true"
+          - name: MODEL_NAME_FOR_METADATA
+            value: @model@
+
+          # Where the results push happens
+          - name: TEAS_OUTPUT_DIR
+            value: /mnt/develop/outputs
+
+          # --- Secrets -----------------------------------------------------
+          - name: GEMINI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: gemini-api-key
+                key: key
+          - name: GITHUB_RESULTS_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: teas-develop-results-private-ap
+                key: token
+          - name: TEASBENCH_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: teasbench-pat
+                key: token
+          @extra_container_env@
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            job_start_time=$(date +%s)
+
+            timestamp=$( date +%Y%m%d-%H%M )
+            RUN_DIR=/dev/shm/$timestamp
+            mkdir -p $RUN_DIR
+            exec &> $RUN_DIR/stdout_stderr.log
+
+            # Save the log if the script exits with any signal other than 0 (success), so it can be inspected even after the job is gone.
+            trap 'if [ $? -ne 0 ]; then mkdir -p ${TEAS_OUTPUT_DIR}/failed/agentic/@name_k8s@_${timestamp} && cp $RUN_DIR/*.log ${TEAS_OUTPUT_DIR}/failed/agentic/@name_k8s@_${timestamp}/ 2>/dev/null || true; fi' EXIT
+
+            echo "Running on node $k8s_node_name"
+
+            env_start_time=$(date +%s)
+
+            mkdir -p /mnt/input/hf_cache \
+                     /mnt/input/pip_cache
+
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" -y install git
+            apt-get -y install jq
+
+            ###################################
+            # Check out AgentCAP and TEASBench #
+            ###################################
+            cd /dev/shm
+            rm -rf AgentCAP
+            git clone "https://@agentcap_repo@" /dev/shm/AgentCAP
+            git -C /dev/shm/AgentCAP checkout @agentcap_ref@
+            AGENTCAP_COMMIT=$(git -C /dev/shm/AgentCAP rev-parse --short HEAD)
+            echo "AgentCAP at ref @agentcap_ref@ (commit $AGENTCAP_COMMIT)"
+            pip install -e /dev/shm/AgentCAP
+
+            TEASBENCH_TOKEN="${TEASBENCH_TOKEN%$'\n'}"
+            rm -rf /dev/shm/TEASBench
+            git clone "https://x-access-token:${TEASBENCH_TOKEN}@github.com/TEAS-project/TEASBench.git" /dev/shm/TEASBench
+            git -C /dev/shm/TEASBench checkout @teasbench_commit@
+            echo "TEASBench at commit @teasbench_commit@"
+
+            which python
+            python -V
+
+            # Per-engine environment repair/sanity-check (inlined from
+            # pipeline/scripts/setup_{sglang,vllm}_env.sh at generation time).
+            @agentic_env_setup@
+
+            # Benchmark-specific setup, run after the checkouts above so it
+            # can see /dev/shm/AgentCAP (e.g. SWE-agent + kubectl for
+            # swe-bench-lite). Empty for benchmarks that don't need it.
+            @extra_setup@
+
+            env_end_time=$(date +%s)
+            env_duration=$((env_end_time - env_start_time))
+            echo "Environment setup took $env_duration seconds"
+            jq -n --arg env_duration $env_duration '{environment_setup: $env_duration}' >> $RUN_DIR/timings.json
+
+            ################################################################
+            # TEAS_* env vars, read by agent_cap.agents.teas_output at run  #
+            # end (metadata_*.json / metrics_*.json hardware+model fields) #
+            ################################################################
+            export TEAS_ENGINE="@inference_engine@"
+            export TEAS_ENGINE_VERSION="@agentic_engine_version@"
+            export TEAS_GPU_TYPE="@teas_gpu_name@"
+            export TEAS_NUM_GPUS="@num_gpu@"
+            export TEAS_TP="@num_gpu@"
+            export TEAS_MODEL_NAME="@hf_model_path@"
+            export TEAS_PRECISION="mxfp4"
+            export TEAS_CPU_TYPE="$(lscpu 2>/dev/null | grep 'Model name' | head -1 | cut -d: -f2 | xargs || true)"
+            export TEAS_NUM_CPUS="$(nproc 2>/dev/null || echo 0)"
+            @teas_env_exports@
+
+            #################
+            # Start server  #
+            #################
+            server_init_start_time=$(date +%s)
+            cd /dev/shm/AgentCAP
+            echo "Starting server..."
+            (
+              @agentic_server_command@
+            ) > $RUN_DIR/server.log 2>&1 &
+            SERVER_PID=$!
+
+            echo "Waiting for server (PID $SERVER_PID)..."
+            server_ready=0
+            for i in $(seq 1 3600); do
+              if ! kill -0 $SERVER_PID 2>/dev/null; then
+                echo "Server died unexpectedly. Logs:" >&2
+                cat $RUN_DIR/server.log >&2
+                exit 1
+              fi
+              if curl -sf http://127.0.0.1:8000/v1/models > /dev/null 2>&1; then
+                echo "Server ready after ${i}s"
+                server_ready=1
+                break
+              fi
+              sleep 1
+            done
+            if [ $server_ready -eq 0 ]; then
+              echo "Server did not become ready within 3600s. Logs:" >&2
+              cat $RUN_DIR/server.log >&2
+              exit 1
+            fi
+
+            server_init_end_time=$(date +%s)
+            server_init_duration=$((server_init_end_time - server_init_start_time))
+            echo "Server initialisation took $server_init_duration seconds"
+            jq -n --arg server_init_duration $server_init_duration '{server_initialisation: $server_init_duration}' >> $RUN_DIR/timings.json
+
+            # Wait for a benchmark-specific sidecar (e.g. the mcp-atlas tool
+            # server on 1984). Empty for benchmarks that don't need one.
+            @sidecar_wait@
+
+            ##########################
+            # Run agent_cap.agents   #
+            ##########################
+            cd $RUN_DIR
+            export OUTPUT_ROOT=$RUN_DIR/agentic
+            mkdir -p $OUTPUT_ROOT
+
+            client_start_time=$(date +%s)
+            if @agentic_client_command@ > $RUN_DIR/client.log 2>&1 ; then
+                echo "Benchmark run finished"
+                CLIENT_SUCCESS=0
+            else
+                echo "Benchmark run crashed"
+                CLIENT_SUCCESS=1
+            fi
+            client_end_time=$(date +%s)
+            client_duration=$((client_end_time - client_start_time))
+            echo "Client took $client_duration seconds"
+            jq -n --arg client_duration $client_duration '{client: $client_duration}' >> $RUN_DIR/timings.json
+
+            # Stop the server and collect its log
+            kill $SERVER_PID 2>/dev/null || true
+            wait $SERVER_PID 2>/dev/null || true
+
+            ##################
+            # Saving results #
+            ##################
+            echo "Collecting results..."
+
+            RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/$timestamp
+            mkdir -p $RUN_OUTPUT_DIR
+
+            # AgentCAP's TEAS writer (and the raw per-task outputs) land in
+            # $OUTPUT_ROOT ($RUN_DIR/agentic); the results-repo layout is flat
+            # (see TEAS_Results_Private/agentic/**), so copy their contents
+            # directly into RUN_OUTPUT_DIR rather than preserving the
+            # agentic/ subdirectory. nullglob means a pattern with no match
+            # (e.g. metadata_*.json for imo-answerbench, which never calls
+            # write_teas_outputs -- see docs/agentic-pipeline-design.md)
+            # simply disappears instead of leaving a literal unmatched glob.
+            shopt -s nullglob
+            RESULT_FILES=(
+              "$OUTPUT_ROOT"/metrics*.json "$OUTPUT_ROOT"/metadata*.json
+              "$OUTPUT_ROOT"/detailed-results_*.jsonl "$OUTPUT_ROOT"/output-data*.jsonl
+              "$OUTPUT_ROOT"/results.jsonl
+              "$RUN_DIR"/timings.json "$RUN_DIR"/*.log
+            )
+            shopt -u nullglob
+            if [ ${#RESULT_FILES[@]} -gt 0 ]; then
+                cp "${RESULT_FILES[@]}" $RUN_OUTPUT_DIR/
+            fi
+            if [ -f /mnt/shared/job-configs/${k8s_job_name}.yaml ]; then
+                cp /mnt/shared/job-configs/${k8s_job_name}.yaml $RUN_OUTPUT_DIR/
+                rm /mnt/shared/job-configs/${k8s_job_name}.yaml
+            fi
+
+            exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
+            cd $RUN_OUTPUT_DIR
+            echo "Files copied to pvc at $RUN_OUTPUT_DIR"
+
+            job_end_time=$(date +%s)
+            job_duration=$((job_end_time - job_start_time))
+            jq -n --arg job_duration $job_duration '{job: $job_duration}' >> $RUN_OUTPUT_DIR/timings.json
+
+            #####################################################
+            # Provenance: commits, timings, and the run metadata #
+            # needed to interpret the numbers (sandbox placement #
+            # is part of the measured scenario -- see             #
+            # docs/agentic-pipeline-design.md).                  #
+            #####################################################
+            jq -n \
+              --arg teasbench_commit "@teasbench_commit@" \
+              --arg agentcap_commit "$AGENTCAP_COMMIT" \
+              --arg benchmark "@benchmark@" \
+              --arg model "@hf_model_path@" \
+              --arg model_local_path "@model_path@" \
+              --argjson num_tasks "@num_tasks@" \
+              --argjson concurrency "@concurrency@" \
+              --arg sandbox_provider "@sandbox_provider@" \
+              --slurpfile timings $RUN_OUTPUT_DIR/timings.json \
+              '{teasbench_commit: $teasbench_commit, agentcap_commit: $agentcap_commit, benchmark: $benchmark, model: $model, model_local_path: $model_local_path, num_tasks: $num_tasks, concurrency: $concurrency, sandbox_provider: (if $sandbox_provider == "" then null else $sandbox_provider end), timings: ($timings | add)}' \
+              > $RUN_OUTPUT_DIR/provenance.json
+
+            #########################
+            # Push to results repo  #
+            #########################
+            GITHUB_RESULTS_TOKEN="${GITHUB_RESULTS_TOKEN%$'\n'}"
+            git pull "https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git" || true
+            git config user.email "autopush@eidf"
+            git config user.name "Pipeline Autopush"
+
+            shopt -s nullglob
+            ADD_FILES=(metrics*.json metadata*.json detailed-results_*.jsonl output-data*.jsonl results.jsonl timings.json provenance.json *.yaml *.log)
+            shopt -u nullglob
+            if [ ${#ADD_FILES[@]} -gt 0 ]; then
+                git add "${ADD_FILES[@]}"
+            fi
+            git commit -m "auto: @name_k8s@"
+            git push "https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+
+            echo "Finalising container"
+            exit $CLIENT_SUCCESS
+        resources:
+          requests:
+            cpu: "8"
+            memory: "64Gi"
+            nvidia.com/gpu: @num_gpu@
+          limits:
+            cpu: "8"
+            memory: "64Gi"
+            nvidia.com/gpu: @num_gpu@
+        volumeMounts:
+          - mountPath: /mnt/develop
+            name: develop
+          - mountPath: /mnt/input
+            name: inputs
+          - mountPath: /dev/shm
+            name: dshm
+          - mountPath: /mnt/shared
+            name: shared
+      volumes:
+        - name: inputs
+          persistentVolumeClaim:
+            claimName: inputs-pvc
+        - name: develop
+          persistentVolumeClaim:
+            claimName: develop-pvc
+        - name: shared
+          persistentVolumeClaim:
+            claimName: eidf230shared
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      nodeSelector:
+        nvidia.com/gpu.product: @gpu_product@

@@ -1,0 +1,26 @@
+# Endpoint for the swe-bench-lite benchmark. Everything else (strategy,
+# evaluator, task_indices, sweagent_*, sandbox/exec_provider, num_tasks,
+# concurrency, output_dir, ...) is passed on the CLI via agentic_client_flags
+# -- see pipeline/configs/config.yaml.
+#
+# The sweagent strategy reads only endpoint.name, endpoint.base_url and
+# endpoint.api_key from the agent spec (it drives SWE-agent's own model
+# client, patched by scripts/patch_sweagent_streaming.py, not
+# agent_cap.agents.llm) -- so this file omits protocol/engine/sampling
+# params, which sweagent never looks at. name must be the litellm custom-
+# provider form "openai/<hf id>" so SWE-agent's model client routes the
+# completion call at our OpenAI-compatible base_url instead of trying to
+# resolve "unsloth/gpt-oss-120b" against a real hosted provider.
+#
+# No judge: block -- swebench-k8s grading uses the official SWE-bench test
+# harness (pass/fail from running the repo's own tests), not an LLM judge.
+#
+# Identical to swe-bench-lite_gptoss_sglang.yaml: none of these three fields
+# depend on which engine served the model. Kept as a separate file (rather
+# than reusing one path for both engines) so agents_config selection in
+# config.yaml stays uniform across all six (benchmark, engine) combinations.
+agents:
+  agent:
+    name: openai/unsloth/gpt-oss-120b
+    base_url: http://127.0.0.1:8000/v1
+    api_key: dummy

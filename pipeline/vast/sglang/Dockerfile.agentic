@@ -1,0 +1,97 @@
+# Agentic-family image (imo-answerbench, mcp-atlas, swe-bench-lite).
+#
+# Build with the following, from the repo root directory (note the build context is pipeline/,
+# so that template.py, utils.py and configs/ can be copied into the image):
+# docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t ghcr.io/teas-project/sglang-agentic:latest -f pipeline/vast/sglang/Dockerfile.agentic pipeline/
+# (or podman)
+#
+# Deliberately SEPARATE from the MoE Dockerfile alongside it rather than a
+# BENCHMARK_FAMILY switch inside one image. The agentic family needs SWE-agent,
+# swebench, swe-rex and modal on top of a base image (lmsysorg/sglang) whose
+# torch/transformers pins are notoriously brittle -- the EIDF agentic path needs
+# a whole torch/torchvision repair script for exactly this reason. Sharing one
+# image would put that dependency risk on the MoE runs, which do not need any of
+# it. Two images cost a second build; one broken MoE sweep costs more.
+
+FROM docker.io/lmsysorg/sglang:v0.5.9
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+ARG TEASBENCH_COMMIT=unknown
+ENV TEASBENCH_COMMIT=${TEASBENCH_COMMIT}
+
+ENV ALLOWED_ENGINE=sglang
+
+RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update && \
+    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" install -y --no-install-recommends git curl jq ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# AgentCAP owns benchmark semantics (agent strategy, call limits, streaming
+# metrics, grading). The curated task-index JSONs under benchmarks/ are read
+# directly out of /opt/AgentCAP by the client commands resolve_commands.py builds.
+# --recurse-submodules matters: mcp-atlas is a submodule (third_party/mcp-atlas)
+# and mcp-server/start.sh exits 1 without it, so a plain clone breaks the
+# mcp-atlas benchmark only -- after the GPU is already rented.
+RUN git clone --recurse-submodules https://github.com/Auto-CAP/AgentCAP.git /opt/AgentCAP
+
+# Toolchain for the MCP Atlas tool server (mcp-server/start.sh): it builds a
+# uv venv, npm-installs MCP server packages and compiles the github MCP server.
+# Installed at build time so the ~5-10 min preinstall is not paid on rented
+# GPU time, and so a missing toolchain fails the build rather than the run.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    ln -sf /root/.local/bin/uv /usr/local/bin/uv && \
+    ln -sf /root/.local/bin/uvx /usr/local/bin/uvx && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# Agentic runtime deps. Only swe-bench-lite rows exercise SWE-agent/swebench/
+# modal, but installing at build time keeps startup cost off the rented GPU clock.
+# On Vast.ai the SWE-bench sandbox substrate is Modal, which swe-rex supports
+# natively -- so unlike EIDF there is no sandbox provider and no kubectl here.
+RUN python3 -m pip install --no-cache-dir \
+        'swe-rex>=1.4.0' 'swebench>=2.0' modal boto3 && \
+    git clone https://github.com/SWE-agent/SWE-agent.git /opt/swe_agent && \
+    python3 -m pip install --no-cache-dir -e /opt/swe_agent
+
+# Patch SWE-agent's single litellm.completion call to route through
+# agent_cap.sweagent_streaming, which is what captures per-call TTFT/TPOT and the
+# visible/reasoning/cached token split. Without this the agentic metrics are empty.
+RUN python3 /opt/AgentCAP/scripts/patch_sweagent_streaming.py /opt/swe_agent
+
+RUN git config --global user.name "Pipeline Autopush" && \
+    git config --global user.email ""
+
+# Pre-build the MCP Atlas server environment (venv + npm/uvx MCP packages +
+# github MCP compile), mirroring what mcp-server/start.sh does on first run.
+# start.sh skips it when the marker exists, and the generated tool_server_setup
+# sets MCP_SKIP_PREINSTALL=1 -- so this build step is what makes that skip safe.
+# ~5-10 min that would otherwise be paid on a rented GPU, every run.
+RUN ATLAS_DIR=/opt/AgentCAP/third_party/mcp-atlas && \
+    AGENT_ENV_DIR="$ATLAS_DIR/services/agent-environment" && \
+    test -d "$AGENT_ENV_DIR" || (echo "mcp-atlas submodule missing: clone AgentCAP with --recurse-submodules" >&2; exit 1) && \
+    uv venv /opt/AgentCAP/mcp-server/.venv --python 3.12 && \
+    . /opt/AgentCAP/mcp-server/.venv/bin/activate && \
+    uv pip install -r /opt/AgentCAP/mcp-server/pyproject.toml && \
+    uv pip install -e "$AGENT_ENV_DIR" && \
+    if [ -f "$AGENT_ENV_DIR/dev_scripts/install_mcp_packages.sh" ]; then \
+        bash "$AGENT_ENV_DIR/dev_scripts/install_mcp_packages.sh"; \
+    fi && \
+    touch /opt/AgentCAP/mcp-server/.venv/.mcp_packages_installed
+
+COPY vast/run_agentic_benchmarks.sh /root/run_agentic_benchmarks.sh
+COPY vast/sglang/entrypoint-agentic.sh /root/entrypoint.sh
+RUN chmod +x /root/run_agentic_benchmarks.sh /root/entrypoint.sh
+
+# Command resolution infrastructure, shared with the EIDF pipeline: the same
+# template.py rule engine and the same configs/config.yaml, so a benchmark is
+# never specified twice.
+COPY template.py utils.py /opt/teasbench/pipeline/
+COPY configs/config.yaml /opt/teasbench/pipeline/configs/config.yaml
+COPY configs/agents/ /opt/teasbench/pipeline/configs/agents/
+COPY vast/resolve_commands.py /opt/teasbench/pipeline/vast/resolve_commands.py
+COPY scripts/ /opt/teasbench/pipeline/scripts/
+
+WORKDIR /root
+
+ENTRYPOINT ["/root/entrypoint.sh"]

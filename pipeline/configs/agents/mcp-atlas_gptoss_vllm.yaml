@@ -1,0 +1,29 @@
+# Endpoint + sampling params for the mcp-atlas benchmark. Everything else
+# (strategy, tool_backend, mcp_server_url, evaluator, num_tasks, task_indices,
+# concurrency, output_dir, ...) is passed on the CLI via agentic_client_flags
+# -- see pipeline/configs/config.yaml.
+agents:
+  agent:
+    name: gpt-oss
+    base_url: http://127.0.0.1:8000
+    api_key: EMPTY
+    protocol: harmony
+    engine: vllm
+    max_tokens: 131072
+    temperature: 1.0
+    top_p: 1.0
+
+# NOTE: this judge: block is NOT what actually configures the judge for
+# evaluator=gtfa. GTFAEvaluatorAdapter.__init__ (agent_cap/agents/evaluators.py)
+# discards every constructor kwarg and always builds a bare GTFAEvaluator(),
+# which reads its judge config from EVAL_LLM_MODEL / EVAL_LLM_BASE_URL /
+# EVAL_LLM_API_KEY in the environment instead (see
+# agent_cap/evaluators/gtfa_eval.py and docs/agentic-pipeline-design.md).
+# Those env vars are set by the mcp-atlas rule's extra_setup block in
+# config.yaml. This block is kept for documentation/consistency with the
+# other five agent config files, and would take effect immediately if
+# GTFAEvaluatorAdapter is ever changed to honour it.
+judge:
+  name: gemini-3.1-flash-lite
+  base_url: https://generativelanguage.googleapis.com/v1beta/openai
+  api_key: ${GEMINI_API_KEY}
