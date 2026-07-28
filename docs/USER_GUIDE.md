@@ -229,6 +229,38 @@ ServiceAccount.
 If the routability check fails, in-cluster mode is unusable on this cluster; use
 `PortForwardK8sProvider` (§7.3), which needs neither assumption.
 
+### 4.7 Preflight for the port-forward fallback
+
+If you are going down the fallback route, check it the same way — but note this
+one runs **on a login node**, not as a Job, because that is where the provider
+itself runs. It uses your own kubectl credentials and needs no ServiceAccount
+and no RBAC manifest, which is the whole reason it is the fallback.
+
+```bash
+python3 eidf/preflight/preflight_portforward.py --namespace eidf230ns
+```
+
+It drives the **real** `PortForwardK8sProvider` — OS port allocation, the
+`kubectl port-forward` spawn, the readiness poll, the tunnel-babysitter thread
+and cleanup on release — plus the `kubectl cp` / `kubectl exec` path the
+SWE-bench evaluator uses. Only the sandbox container's payload is substituted
+(busybox serving an `is_alive` file instead of a multi-GB image pip-installing
+swe-rex), because what is under test is the tunnel mechanism, not swe-rex. No
+GPU, seconds rather than minutes.
+
+The check most worth reading is this one:
+
+```
+  PASS  tunnel still alive after 10s (babysitter working)
+```
+
+A `kubectl port-forward` that dies quietly mid-task is the failure this provider's
+babysitter thread exists to prevent, and the one that would otherwise surface as
+an inexplicable task failure deep into a long SWE-bench run.
+
+The permission unique to this path is `create pods/portforward`; the in-cluster
+provider never needs it, because it talks to pod IPs directly.
+
 ---
 
 ## 5. Running MoE on Vast.ai
@@ -358,7 +390,7 @@ If sandbox creation fails with a `kubectl` permissions error, either apply
 `eidf/rbac/teasbench-runner-rbac.yaml`, or switch to the login-node fallback by
 pointing the run at `PortForwardK8sProvider` instead of `InClusterK8sProvider` —
 that provider uses *your* kubectl credentials via port-forwarding rather than
-the pod's ServiceAccount.
+the pod's ServiceAccount. Confirm it works first with §4.7.
 
 ### 7.4 MCP Atlas scores lower than expected
 
