@@ -8,6 +8,10 @@ spec:
   completions: 1
   backoffLimit: 0
   ttlSecondsAfterFinished: 600
+  # Backstop against a pod that never terminates (e.g. a sidecar that misses the
+  # shutdown sentinel). ttlSecondsAfterFinished cannot cover this: it only starts
+  # counting once the Job has finished, which is precisely what would not happen.
+  activeDeadlineSeconds: 86400
   template:
     spec:
       restartPolicy: Never
@@ -79,7 +83,16 @@ spec:
             exec &> $RUN_DIR/stdout_stderr.log
 
             # Save the log if the script exits with any signal other than 0 (success), so it can be inspected even after the job is gone.
-            trap 'if [ $? -ne 0 ]; then mkdir -p ${TEAS_OUTPUT_DIR}/failed/agentic/@name_k8s@_${timestamp} && cp $RUN_DIR/*.log ${TEAS_OUTPUT_DIR}/failed/agentic/@name_k8s@_${timestamp}/ 2>/dev/null || true; fi' EXIT
+            # Two things on exit, in order:
+            #  1. preserve logs if we failed, and
+            #  2. drop the shutdown sentinel so any sidecar stops. A Job pod with
+            #     restartPolicy: Never only reaches Succeeded once EVERY container
+            #     has terminated, so a tool server that runs forever would keep the
+            #     pod Running and hold the GPU after the benchmark finished.
+            #     Written unconditionally (success or failure), and harmless when
+            #     there is no sidecar.
+            mkdir -p /var/run/teasbench
+            trap 'rc=$?; if [ $rc -ne 0 ]; then mkdir -p ${TEAS_OUTPUT_DIR}/failed/agentic/@name_k8s@_${timestamp} && cp $RUN_DIR/*.log ${TEAS_OUTPUT_DIR}/failed/agentic/@name_k8s@_${timestamp}/ 2>/dev/null || true; fi; touch /var/run/teasbench/main-container-done 2>/dev/null || true' EXIT
 
             echo "Running on node $k8s_node_name"
 
@@ -294,6 +307,8 @@ spec:
             memory: "64Gi"
             nvidia.com/gpu: @num_gpu@
         volumeMounts:
+          - mountPath: /var/run/teasbench
+            name: sidecar-signal
           - mountPath: /mnt/develop
             name: develop
           - mountPath: /mnt/input
@@ -312,6 +327,10 @@ spec:
         - name: shared
           persistentVolumeClaim:
             claimName: eidf230shared
+        # Tiny shared volume carrying only the shutdown sentinel between the
+        # main container and any sidecar (see the EXIT trap above).
+        - name: sidecar-signal
+          emptyDir: {}
         - name: dshm
           emptyDir:
             medium: Memory

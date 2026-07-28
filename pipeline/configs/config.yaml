@@ -785,7 +785,32 @@ rules:
                   f.write('import httpx\nif not hasattr(httpx, \"TimeoutError\"): httpx.TimeoutError = httpx.TimeoutException\n')
               print('httpx.TimeoutError patched')
               "
-              exec /agent-environment/entrypoint.sh uv run python -m uvicorn agent_environment.main:app --host 0.0.0.0 --port 1984
+              # NOT `exec`: the server runs in the background so this script can
+              # wait for the main container's shutdown sentinel and then exit.
+              #
+              # A Job pod with restartPolicy: Never only reaches Succeeded when
+              # EVERY container has terminated. A tool server that runs forever
+              # therefore keeps the pod Running after the benchmark is done, the
+              # Job never completes, and the GPU stays allocated indefinitely --
+              # ttlSecondsAfterFinished cannot help, because it only starts once
+              # the Job has finished. (Kubernetes >= 1.29 solves this natively with
+              # sidecar initContainers, restartPolicy: Always, which are excluded
+              # from the completion calculation; this sentinel is the portable
+              # equivalent for clusters below that.)
+              /agent-environment/entrypoint.sh uv run python -m uvicorn agent_environment.main:app --host 0.0.0.0 --port 1984 &
+              MCP_PID=$!
+
+              while kill -0 $MCP_PID 2>/dev/null; do
+                  if [ -f /var/run/teasbench/main-container-done ]; then
+                      echo "Main container finished; shutting the tool server down."
+                      kill $MCP_PID 2>/dev/null || true
+                      wait $MCP_PID 2>/dev/null || true
+                      exit 0
+                  fi
+                  sleep 2
+              done
+              echo "Tool server exited on its own (pid $MCP_PID)." >&2
+              exit 1
           workingDir: /agent-environment
           ports:
             - containerPort: 1984
@@ -809,6 +834,9 @@ rules:
             limits:
               cpu: "4"
               memory: 16Gi
+          volumeMounts:
+            - mountPath: /var/run/teasbench
+              name: sidecar-signal
     sidecar_wait:
       value: |
         echo "Waiting for MCP Atlas sidecar..."
