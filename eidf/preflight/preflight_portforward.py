@@ -17,8 +17,9 @@ The only thing substituted is the sandbox container's payload. The real spec
 pip-installs swe-rex into a multi-GB per-instance SWE-bench image, which is slow
 and unnecessary here: what is under test is the *tunnel mechanism*, not swe-rex.
 A busybox httpd serving a file named `is_alive` answers the provider's readiness
-probe identically, in seconds, with no GPU. The exec-container path needs no
-substitution at all -- its real spec just runs `sleep`.
+probe identically, in seconds, with no GPU. The exec-container path keeps the
+real spec (which just runs `sleep`) but uses a debian image, because the provider
+execs `bash -c` and busybox only ships `sh`.
 
 Exit code 0 and "ALL CHECKS PASSED" means the fallback works on this cluster.
 """
@@ -37,6 +38,14 @@ sys.path.insert(0, str(REPO))
 
 FAILED = 0
 CHECK_IMAGE = os.environ.get("TEASBENCH_PREFLIGHT_IMAGE", "busybox:1.36")
+# The exec path needs a DIFFERENT image from the sandbox path. K8sExecHandle.exec
+# runs `kubectl exec -- bash -c ...`, and busybox ships `sh`, not `bash`, so it
+# fails with "executable file not found". That is a property of the probe image,
+# not of the provider: the real per-instance SWE-bench images
+# (docker.io/swebench/sweb.eval.x86_64.*) are Debian-based and do have bash,
+# which is why the provider hardcodes it. debian:stable-slim also has the `tar`
+# that `kubectl cp` needs.
+EXEC_IMAGE = os.environ.get("TEASBENCH_PREFLIGHT_EXEC_IMAGE", "debian:stable-slim")
 
 
 def ok(msg):
@@ -178,6 +187,7 @@ def check_sandbox(ns, queue):
 
 def check_exec(ns, queue):
     print("\n[4] Exec-container path (used by the SWE-bench evaluator)")
+    print(f"      image: {EXEC_IMAGE}  (needs bash + tar, as the real instance images have)")
     from teasbench.sandbox import k8s
 
     # No substitution needed: the real exec spec just runs `sleep`.
@@ -185,7 +195,7 @@ def check_exec(ns, queue):
     handle = None
     try:
         try:
-            handle = provider.acquire_exec(CHECK_IMAGE, "preflight")
+            handle = provider.acquire_exec(EXEC_IMAGE, "preflight")
         except Exception as exc:
             bad(f"acquire_exec() raised: {exc}")
             return
@@ -199,8 +209,14 @@ def check_exec(ns, queue):
             if "teasbench-cp-ok" in (r.stdout or ""):
                 ok("kubectl cp + kubectl exec both work")
             else:
-                bad(f"exec did not read back the copied file (stdout={r.stdout!r})",
-                    (r.stderr or "")[:200])
+                err = r.stderr or ""
+                hint = err[:300]
+                if "bash" in err and ("not found" in err or "no such file" in err.lower()):
+                    hint = ("The probe image has no `bash`, but K8sExecHandle.exec runs\n"
+                            "`bash -c`. This is a property of the probe image, not the\n"
+                            "provider -- the real SWE-bench instance images do have bash.\n"
+                            "Set TEASBENCH_PREFLIGHT_EXEC_IMAGE to an image that does.")
+                bad(f"exec did not read back the copied file (stdout={r.stdout!r})", hint)
         except Exception as exc:
             bad(f"cp/exec failed: {exc}")
         finally:
