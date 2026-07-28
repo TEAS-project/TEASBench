@@ -1,0 +1,202 @@
+# Preflight check for the two cluster assumptions the in-cluster SWE-bench
+# sandbox provider depends on (docs/DEVELOPER_GUIDE.md §11):
+#
+#   1. Pod IPs are routable within the namespace, so the driver can reach a
+#      sandbox at http://<podIP>:9999 without a port-forward.
+#   2. kubectl works in-cluster from the ServiceAccount token, with no
+#      kubeconfig, and the RBAC grants the verbs the provider needs.
+#
+# This Job does exactly what teasbench.sandbox.k8s.InClusterK8sProvider.acquire()
+# does -- same kubectl bootstrap, same Job spec shape, same jsonpath to read the
+# pod IP, same port -- but with a busybox target instead of a multi-GB swebench
+# image, and NO GPU. It therefore schedules immediately and costs no GPU time,
+# while still exercising the real code path's assumptions.
+#
+# Run it BEFORE queueing a real SWE-bench Lite job:
+#
+#   kubectl apply -f eidf/rbac/teasbench-runner-rbac.yaml   # once, if not already
+#   kubectl -n eidf230ns create -f eidf/preflight/teasbench-preflight.yaml
+#   kubectl -n eidf230ns logs -f job/teasbench-preflight
+#
+# Exit code 0 and "ALL CHECKS PASSED" means in-cluster mode is good to go.
+# Any FAIL line names which assumption broke and what to do about it.
+#
+# Change eidf230ns to your namespace throughout if it differs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: teasbench-preflight
+  namespace: eidf230ns
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      # The whole point: run as the ServiceAccount the real job uses.
+      serviceAccountName: teasbench-runner
+      containers:
+        - name: preflight
+          image: debian:stable-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              NS="${NAMESPACE:-eidf230ns}"
+              QUEUE="${NS}-user-queue"
+              PORT=9999
+              FAILED=0
+              pass() { echo "  PASS  $1"; }
+              fail() { echo "  FAIL  $1"; FAILED=1; }
+
+              echo "=============================================="
+              echo "TEASBench in-cluster preflight (namespace $NS)"
+              echo "=============================================="
+
+              echo
+              echo "[0] Installing kubectl (same as the real job does)"
+              apt-get -o Acquire::Retries=3 update -qq > /dev/null 2>&1
+              apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends \
+                  curl ca-certificates > /dev/null 2>&1
+              KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+              if [ -z "$KUBECTL_VERSION" ]; then
+                  fail "could not reach dl.k8s.io -- pod has no outbound internet."
+                  echo "        The real job downloads kubectl the same way, so it would fail too."
+                  exit 1
+              fi
+              curl -sLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+              install -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl
+              pass "kubectl ${KUBECTL_VERSION} installed"
+
+              echo
+              echo "[1] ASSUMPTION 2: kubectl from the ServiceAccount token, no kubeconfig"
+              SA_DIR=/var/run/secrets/kubernetes.io/serviceaccount
+              if [ ! -f "$SA_DIR/token" ]; then
+                  fail "no ServiceAccount token mounted at $SA_DIR."
+                  echo "        automountServiceAccountToken may be disabled in this namespace."
+                  exit 1
+              fi
+              kubectl config set-cluster in-cluster \
+                  --server=https://kubernetes.default.svc \
+                  --certificate-authority="$SA_DIR/ca.crt" > /dev/null
+              kubectl config set-credentials in-cluster \
+                  --token="$(cat $SA_DIR/token)" > /dev/null
+              kubectl config set-context in-cluster \
+                  --cluster=in-cluster --user=in-cluster --namespace="$NS" > /dev/null
+              kubectl config use-context in-cluster > /dev/null
+
+              echo "      identity: $(kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || echo '(auth whoami unsupported)')"
+
+              if kubectl get pods > /dev/null 2>&1; then
+                  pass "kubectl authenticates and can list pods"
+              else
+                  fail "kubectl cannot list pods from the SA token."
+                  echo "        Apply eidf/rbac/teasbench-runner-rbac.yaml, or use PortForwardK8sProvider."
+                  exit 1
+              fi
+
+              echo
+              echo "[2] RBAC verbs the provider needs"
+              # Mirrors eidf/rbac/teasbench-runner-rbac.yaml.
+              for v in "create jobs" "get jobs" "list jobs" "delete jobs" \
+                       "get pods" "list pods" "create pods/exec"; do
+                  set -- $v
+                  if kubectl auth can-i "$1" "$2" > /dev/null 2>&1; then
+                      pass "can $1 $2"
+                  else
+                      fail "cannot $1 $2  (needed by the sandbox/exec provider)"
+                  fi
+              done
+
+              echo
+              echo "[3] ASSUMPTION 1: pod IPs routable on port $PORT"
+              echo "      creating a throwaway target Job (busybox httpd, no GPU)..."
+              # Built as JSON on stdin, exactly as InClusterK8sProvider does
+              # (kubectl create -f - with json.dumps(job)). No heredoc: this
+              # whole script is a YAML block scalar, where heredoc terminators
+              # are indentation-fragile.
+              TARGET_JSON=$(printf '%s' "{
+                \"apiVersion\":\"batch/v1\",\"kind\":\"Job\",
+                \"metadata\":{\"generateName\":\"teasbench-preflight-target-\",
+                  \"labels\":{\"app\":\"teasbench-preflight-target\",
+                              \"kueue.x-k8s.io/queue-name\":\"$QUEUE\"}},
+                \"spec\":{\"backoffLimit\":0,\"ttlSecondsAfterFinished\":300,
+                  \"activeDeadlineSeconds\":600,
+                  \"template\":{\"metadata\":{\"labels\":{\"app\":\"teasbench-preflight-target\"}},
+                    \"spec\":{\"restartPolicy\":\"Never\",\"containers\":[{
+                      \"name\":\"target\",\"image\":\"busybox:1.36\",
+                      \"command\":[\"/bin/sh\",\"-c\"],
+                      \"args\":[\"mkdir -p /www && echo teasbench-ok > /www/index.html && httpd -f -p $PORT -h /www\"],
+                      \"ports\":[{\"containerPort\":$PORT}],
+                      \"resources\":{\"requests\":{\"cpu\":\"100m\",\"memory\":\"64Mi\"},
+                                     \"limits\":{\"cpu\":\"500m\",\"memory\":\"256Mi\"}}}]}}}}")
+              TARGET=$(printf '%s' "$TARGET_JSON" | kubectl create -f - -o jsonpath='{.metadata.name}' 2>&1)
+              if ! kubectl get job "$TARGET" > /dev/null 2>&1; then
+                  fail "could not create the target Job: $TARGET"
+                  exit 1
+              fi
+              if [ -z "$TARGET" ]; then
+                  fail "could not create the target Job (see the create verb above)."
+                  exit 1
+              fi
+              echo "      target job: $TARGET"
+
+              echo "      waiting for it to run and get an IP..."
+              POD_IP=""
+              for i in $(seq 1 120); do
+                  OUT=$(kubectl get pods -l=job-name=$TARGET \
+                        -o jsonpath='{.items[0].status.phase}|{.items[0].status.podIP}' 2>/dev/null)
+                  PHASE="${OUT%%|*}"; IP="${OUT##*|}"
+                  if [ "$PHASE" = "Running" ] && [ -n "$IP" ]; then POD_IP="$IP"; break; fi
+                  if [ "$PHASE" = "Failed" ]; then break; fi
+                  sleep 5
+              done
+
+              if [ -z "$POD_IP" ]; then
+                  fail "target pod never reached Running with an IP (phase=${PHASE:-unknown})."
+                  echo "        Could be queue/quota rather than networking:"
+                  kubectl describe job "$TARGET" 2>/dev/null | tail -20
+              else
+                  pass "read pod IP via the provider's jsonpath: $POD_IP"
+                  echo "      curling http://$POD_IP:$PORT ..."
+                  BODY=$(curl -s -m 15 "http://$POD_IP:$PORT/" 2>/dev/null)
+                  if [ "$BODY" = "teasbench-ok" ]; then
+                      pass "pod IP is routable on port $PORT -- no port-forward needed"
+                  else
+                      fail "could not reach http://$POD_IP:$PORT (got: '${BODY:-<nothing>}')"
+                      echo "        A NetworkPolicy is probably blocking pod-to-pod traffic."
+                      echo "        Check:  kubectl get networkpolicy -n $NS"
+                      echo "        Fall back to PortForwardK8sProvider (docs/USER_GUIDE.md 7.3)."
+                  fi
+              fi
+
+              echo
+              echo "[4] Cleaning up"
+              kubectl delete job "$TARGET" --wait=false --ignore-not-found=true > /dev/null 2>&1 \
+                  && pass "deleted target job" || fail "could not delete target job"
+
+              echo
+              echo "=============================================="
+              if [ $FAILED -eq 0 ]; then
+                  echo "ALL CHECKS PASSED -- in-cluster mode is good to go."
+              else
+                  echo "SOME CHECKS FAILED -- see FAIL lines above."
+                  echo "In-cluster SWE-bench will not work until they are resolved;"
+                  echo "PortForwardK8sProvider is the fallback that needs none of this."
+              fi
+              echo "=============================================="
+              exit $FAILED
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

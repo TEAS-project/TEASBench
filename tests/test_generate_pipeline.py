@@ -84,11 +84,21 @@ def run_generate(pipeline_dir, csv_file, target_dir, results_repo=None):
                           capture_output=True, check=True)
 
 
+# Last commit before the agentic-pipeline generalisation ("Fix agentic cost
+# computation"). The MoE regression tests below compare against this, not HEAD.
+BASELINE_REF = os.environ.get("TEASBENCH_BASELINE_REF", "f22e96e")
+
+
 def make_baseline_pipeline_copy(tmp_root):
-    """Materialise the pre-change (git HEAD) pipeline/ into a fresh directory
-    nested inside this repo (so `git rev-parse HEAD`, run with this directory
-    as cwd, walks up to the real .git and returns the SAME commit hash the
-    current code would also compute -- no git stash involved, per the spec).
+    """Materialise the pre-change pipeline/ into a fresh directory nested
+    inside this repo (so `git rev-parse HEAD`, run with this directory as cwd,
+    walks up to the real .git -- no git stash involved).
+
+    The baseline is pinned to BASELINE_REF, NOT to HEAD. It was HEAD while this
+    work was uncommitted, but once the work lands HEAD becomes the *post*-change
+    code and every comparison below silently turns into new-vs-new -- i.e. the
+    MoE byte-identity guarantee would keep passing while testing nothing at all.
+    Override with TEASBENCH_BASELINE_REF if the history is ever rewritten.
 
     Returns the path to the baseline pipeline/ directory.
     """
@@ -99,7 +109,7 @@ def make_baseline_pipeline_copy(tmp_root):
     for rel in ("utils.py", "generate.py", "template.py",
                 "configs/config.yaml", "templates/template.yaml"):
         blob = subprocess.check_output(
-            ["git", "show", f"HEAD:pipeline/{rel}"], cwd=str(REPO), text=True)
+            ["git", "show", f"{BASELINE_REF}:pipeline/{rel}"], cwd=str(REPO), text=True)
         (baseline / rel).write_text(blob)
 
     return baseline
@@ -113,7 +123,7 @@ def add_blank_length_columns(src_csv, dst_csv):
     documented in MoeRegressionTests.test_pre_change_code_cannot_run_against_the_checked_in_csv:
     the pre-change generate.py unconditionally evaluates
     `row.input_length`/`row.output_length` for every row (see git show
-    HEAD:pipeline/generate.py), but experiments/moe-experiments-eidf.csv has
+    $BASELINE_REF:pipeline/generate.py), but experiments/moe-experiments-eidf.csv has
     never had those columns (git log -p confirms it was committed without
     them). Pandas' Series.__getattr__ raises AttributeError for a genuinely
     absent column (as opposed to one that is present but NaN), so the
@@ -138,12 +148,12 @@ class MoeRegressionTests(unittest.TestCase):
 
     def test_pre_change_code_cannot_run_against_the_checked_in_csv(self):
         """Documents a pre-existing, refactor-unrelated fixture/code mismatch
-        discovered while writing the regression test below: HEAD's
+        discovered while writing the regression test below: the pre-change
         generate.py hard-codes `row.input_length`/`row.output_length` (no
         .get(), no try/except), but experiments/moe-experiments-eidf.csv has
         no such columns (confirmed with `git log -p -- experiments/moe-experiments-eidf.csv`,
         which shows the file was committed without them). Running the
-        unmodified HEAD code against the unmodified checked-in CSV therefore
+        unmodified pre-change code against the unmodified checked-in CSV therefore
         fails outright, in this repo, on this pandas version, independent of
         anything in this workstream. This test pins that fact down so it
         isn't mistaken for a regression introduced here; the byte-identical

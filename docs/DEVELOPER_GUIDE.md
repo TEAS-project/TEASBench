@@ -459,6 +459,12 @@ These are load-bearing. If one is false, something breaks.
    talks to `http://<podIP>:9999` directly. Fails on a cluster with a restrictive
    NetworkPolicy.
 2. **`kubectl` works in-cluster from the ServiceAccount token** with no kubeconfig.
+
+> Assumptions 1 and 2 are the two that gate in-cluster SWE-bench, and both are
+> checkable in about a minute with no GPU:
+> `kubectl -n <ns> create -f eidf/preflight/teasbench-preflight.yaml`.
+> The preflight replays `InClusterK8sProvider.acquire()` against a busybox
+> target. See USER_GUIDE §4.6.
 3. **Modal is reachable and authenticated** from a Vast.ai instance.
 4. **Official SWE-bench instance images exist on Docker Hub** under the
    `docker.io/swebench/sweb.eval.x86_64.<iid>` naming with the `_1776_`

@@ -59,7 +59,8 @@ the TEASBench commit for provenance).
 kubectl apply -f eidf/rbac/teasbench-runner-rbac.yaml
 ```
 
-If your project won't allow that, see §7.3 for the fallback.
+Then run the preflight check (§4.6) before queueing a real job. If your project
+won't allow the RBAC, see §7.3 for the fallback.
 
 ### Vast.ai only
 
@@ -177,6 +178,56 @@ kubectl -n eidf230ns logs <pod> -c mcp-atlas-sidecar
 **SWE-bench Lite** — the Job runs with `serviceAccountName: teasbench-runner`
 and spawns per-task sandbox Jobs. If RBAC isn't applied, the run fails early
 with a permissions error from `kubectl`.
+
+### 4.6 Preflight: verify the cluster assumptions (SWE-bench Lite)
+
+In-cluster SWE-bench depends on two facts about the cluster that are worth
+confirming *before* a GPU job queues, because both fail late and confusingly:
+
+1. **Pod IPs are routable within the namespace** — the driver talks to a sandbox
+   at `http://<podIP>:9999` with no port-forward. A restrictive NetworkPolicy
+   breaks this.
+2. **`kubectl` works in-cluster from the ServiceAccount token**, with no
+   kubeconfig, and the RBAC grants the verbs the provider uses.
+
+```bash
+kubectl -n eidf230ns create -f eidf/preflight/teasbench-preflight.yaml
+kubectl -n eidf230ns logs -f job/teasbench-preflight
+```
+
+The preflight does exactly what `InClusterK8sProvider.acquire()` does — same
+kubectl bootstrap, same Job-spec shape, same jsonpath to read the pod IP, same
+port — but against a busybox target instead of a multi-GB SWE-bench image, and
+with **no GPU**. It schedules immediately and costs no GPU time.
+
+Expected output:
+
+```
+  PASS  kubectl v1.xx.x installed
+  PASS  kubectl authenticates and can list pods
+  PASS  can create jobs
+  ...
+  PASS  read pod IP via the provider's jsonpath: 10.42.3.17
+  PASS  pod IP is routable on port 9999 -- no port-forward needed
+ALL CHECKS PASSED -- in-cluster mode is good to go.
+```
+
+It exits non-zero on any failure and names which assumption broke. Two quick
+manual cross-checks if you want them independently:
+
+```bash
+kubectl -n eidf230ns get networkpolicy          # empty = nothing blocking pod-to-pod
+kubectl -n eidf230ns auth can-i create jobs \
+        --as=system:serviceaccount:eidf230ns:teasbench-runner
+```
+
+The second impersonates the ServiceAccount from your own session, so it checks
+the RBAC without running anything. Note it needs impersonation rights, which not
+every project grants — the preflight Job needs none, since it *is* the
+ServiceAccount.
+
+If the routability check fails, in-cluster mode is unusable on this cluster; use
+`PortForwardK8sProvider` (§7.3), which needs neither assumption.
 
 ---
 
