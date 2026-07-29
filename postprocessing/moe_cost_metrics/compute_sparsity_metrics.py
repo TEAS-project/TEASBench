@@ -54,20 +54,27 @@ except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
         return MEM_BW_DICT.get(gpu_key, 0)
 
 
-# Peak FLOPS is owned here rather than imported from MoE-CAP, because the two vendors quote
-# it on different bases and mixing them silently biases S-MFU across vendors. NVIDIA
-# datasheets quote tensor-core throughput *with 2:4 structured sparsity*; AMD quotes dense.
-# Every entry below is DENSE, so S-MFU divides by the value as written. NVIDIA figures are
-# generally half the number on the datasheet; the with-sparsity value is spelled out per
-# entry so a future edit cannot reintroduce it unnoticed. Blackwell Ultra is the exception
-# and is not a 2x — see the fp4 block.
+# Peak FLOPS is owned here rather than imported from MoE-CAP, because vendors quote it on
+# different bases and mixing them silently biases S-MFU across vendors.
+#
+# Every entry is DENSE, and S-MFU divides by the value as written. Each names its
+# with-sparsity counterpart inline where the vendor publishes one. The bases differ by
+# vendor and part:
+#   - H100/H200 datasheets lead with the with-sparsity figure; dense is half.
+#   - A100's leads with dense (312) and footnotes the sparse one (624).
+#   - Blackwell prints both. B300 NVFP4 is the one row where sparse is 1.33x dense rather
+#     than 2x: the uplift over B200 is on the dense figure.
+#   - AMD's main column is dense. It publishes 2x sparse rates for FP16/BF16/INT8 and
+#     OCP-FP8 only; MXFP4/6/8 are marked N/A for sparsity.
+#
+# Blackwell figures are HGX 8-GPU board specs divided by 8 — the form factor the measured
+# parts report (`NVIDIA-B300-SXM6-AC-269GB`, air-cooled SXM), and one basis for both cards.
 #
 # Sources (vendor primary, dense figures):
-#   A100   https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf
-#   H100   https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306
-#   B200   https://resources.nvidia.com/en-us-blackwell-architecture
-#   B300   https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/
-#   MI355X https://rocm.blogs.amd.com/software-tools-optimization/occupancy-math-mi355x/README.html
+#   A100        https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf
+#   H100/H200   https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306
+#   B200/B300   https://www.nvidia.com/en-us/data-center/hgx/
+#   MI355X      AMD Instinct MI355X GPU datasheet (amd.com)
 PEAK_FLOPS_BASIS = "dense"
 PEAK_FLOPS_DICT = {
     "bfloat16": {
@@ -75,7 +82,7 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H100-HBM3-80GB": 989.5e12,    # 1979 w/ sparsity
         "NVIDIA-H200-141GB": 989.5e12,        # 1979 w/ sparsity
         "NVIDIA-B200-183GB": 2250e12,         # 4500 w/ sparsity
-        "NVIDIA-B300-269GB": 2500e12,         # 5000 w/ sparsity
+        "NVIDIA-B300-269GB": 2250e12,         # 4500 w/ sparsity
         "AMD-Instinct-MI355X-288GB": 2500e12,
     },
     "float16": {
@@ -83,7 +90,7 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H100-HBM3-80GB": 989.5e12,
         "NVIDIA-H200-141GB": 989.5e12,
         "NVIDIA-B200-183GB": 2250e12,
-        "NVIDIA-B300-269GB": 2500e12,
+        "NVIDIA-B300-269GB": 2250e12,
         "AMD-Instinct-MI355X-288GB": 2500e12,
     },
     "fp8": {
@@ -91,15 +98,17 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H100-HBM3-80GB": 1979e12,     # 3958 w/ sparsity
         "NVIDIA-H200-141GB": 1979e12,
         "NVIDIA-B200-183GB": 4500e12,         # 9000 w/ sparsity
-        "NVIDIA-B300-269GB": 5000e12,         # 10000 w/ sparsity
+        "NVIDIA-B300-269GB": 4500e12,         # 9000 w/ sparsity
         "AMD-Instinct-MI355X-288GB": 5050e12,
     },
     "int8": {
         "NVIDIA-A100-SXM4-80GB": 624e12,      # 1248 w/ sparsity
         "NVIDIA-H100-HBM3-80GB": 1979e12,
         "NVIDIA-H200-141GB": 1979e12,
-        "NVIDIA-B200-183GB": 4500e12,
-        "NVIDIA-B300-269GB": 5000e12,
+        "NVIDIA-B200-183GB": 4500e12,          # 9000 w/ sparsity
+        # Blackwell Ultra's INT8 tensor path is far narrower than B200's: 3 POPS per HGX
+        # board against 72.
+        "NVIDIA-B300-269GB": 187.5e12,         # 375 w/ sparsity
         "AMD-Instinct-MI355X-288GB": 5050e12,
     },
     "fp4": {
@@ -107,19 +116,23 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H100-HBM3-80GB": 1979e12,     # no FP4 tensor cores -> FP8 path
         "NVIDIA-H200-141GB": 1979e12,
         "NVIDIA-B200-183GB": 9000e12,         # 18000 w/ sparsity
-        # Blackwell Ultra is the one part where sparsity is not a clean 2x: NVIDIA quotes
-        # NVFP4 as "15 | 20 PetaFLOPS" dense | with-sparsity, the uplift over Blackwell
-        # having landed on the dense figure. Halving 20000 would understate dense peak by
-        # 1.5x, so the dense figure is taken directly.
-        "NVIDIA-B300-269GB": 15000e12,        # 20000 w/ sparsity
+        # The HGX board is rated 144 | 108 PFLOPS NVFP4 (with-sparsity | dense), so
+        # sparse is 1.33x dense here. The GB300 NVL72 tray is quoted at 15 PF dense and
+        # runs higher clocks than the air-cooled SXM modules these runs use.
+        "NVIDIA-B300-269GB": 13500e12,        # 18000 w/ sparsity
         "AMD-Instinct-MI355X-288GB": 10100e12,
     },
+    # `int4` is reached by weight-only 4-bit checkpoints (compressed-tensors
+    # `num_bits=4 type=int`), which dequantise before the matmul rather than using a native
+    # INT4 tensor path; only A100 has one. Each entry mirrors the card's fp4 rate. That is a
+    # modelling assumption rather than a datasheet figure: the exact denominator is whatever
+    # precision the kernel computes in, which the run does not record.
     "int4": {
-        "NVIDIA-A100-SXM4-80GB": 1248e12,     # 2496 w/ sparsity
+        "NVIDIA-A100-SXM4-80GB": 1248e12,     # 2496 w/ sparsity; Ampere has a real INT4 path
         "NVIDIA-H100-HBM3-80GB": 1979e12,
         "NVIDIA-H200-141GB": 1979e12,
         "NVIDIA-B200-183GB": 9000e12,
-        "NVIDIA-B300-269GB": 15000e12,        # mirrors fp4, as for B200
+        "NVIDIA-B300-269GB": 13500e12,
         "AMD-Instinct-MI355X-288GB": 10100e12,
     },
 }
@@ -180,8 +193,7 @@ def kv_per_token_entries(cfg_d: dict, n_layers: int, d_head: int, n_kv_heads: in
 B200_KEY = "NVIDIA-B200-183GB"
 B300_KEY = "NVIDIA-B300-269GB"
 
-# Blackwell bandwidth still needs patching over whatever MoE-CAP supplies; the peak-FLOPS
-# entries these lines used to override are now carried in PEAK_FLOPS_DICT above.
+# Blackwell bandwidth is patched over whatever MoE-CAP supplies.
 MEM_BW_DICT.setdefault(B300_KEY, 8000e9)
 MEM_BW_DICT[B200_KEY] = 8000e9
 
@@ -511,9 +523,7 @@ def compute_for_run(
         )
         flops_per_token = params_per_token_TB * 1e12 * 2
         flops_per_s = flops_per_token * throughput_tok_s
-        # No /2 here: PEAK_FLOPS_DICT is already on the dense basis for every vendor. The
-        # halving used to stand in for that conversion, but it was applied to AMD entries
-        # that were dense to begin with, overstating their S-MFU 2x against NVIDIA's.
+        # PEAK_FLOPS_DICT is dense for every vendor, so the peak divides in as written.
         return flops_per_s / (num_gpus * peak_flops)
 
     if (
