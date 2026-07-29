@@ -77,9 +77,9 @@ different bases and mixing them biases S-MFU across vendors. Every figure below 
 | `NVIDIA-A100-SXM4-80GB` | 2.04 TB/s | 312 | 312¹ | 624 | 312¹ | 1248 | A100 datasheet (leads dense; 2× sparse footnoted) |
 | `NVIDIA-H100-HBM3-80GB` | 3.35 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H100 datasheet (leads with-sparsity) |
 | `NVIDIA-H200-141GB` | 4.80 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H200 datasheet (same die as H100) |
-| `NVIDIA-B200-183GB` | 8.00 TB/s | 2250 | 4500 | 4500 | 9000 | 9000³ | NVIDIA HGX page, 8-GPU board ÷ 8 |
-| `NVIDIA-B300-269GB` | 8.00 TB/s | 2250 | 4500 | **187.5** | **13500** | 13500³ | NVIDIA HGX page, 8-GPU board ÷ 8 |
-| `AMD-Instinct-MI355X-288GB` | 8.00 TB/s | 2500 | 5050 | 5050 | 10100 | 10100³ | AMD Instinct MI355X GPU datasheet |
+| `NVIDIA-B200-183GB` | 7.70 TB/s | 2250 | 4500 | 4500 | 9000 | 9000³ | NVIDIA B200 datasheet |
+| `NVIDIA-B300-269GB` | 7.70 TB/s | 2250 | 4500 | 153.5 | 14000 | 13500³ | NVIDIA B300 datasheet |
+| `AMD-Instinct-MI355X-288GB` | 8.00 TB/s | 2500 | 5000 | 5000 | 10100 | 10100³ | AMD Instinct MI355X GPU datasheet |
 
 ¹ No FP8/FP4 tensor path on Ampere; falls back to the BF16 rate.
 ² No FP4 tensor path on Hopper; falls back to the FP8 rate.
@@ -87,12 +87,11 @@ different bases and mixing them biases S-MFU across vendors. Every figure below 
 rate as a modelling assumption rather than a datasheet figure. Only A100 has a native INT4
 path. See the `int4` comment in the script.
 
-**Two B300 rows sit apart from the pattern.** NVFP4 is rated `144 | 108` PFLOPS
-(with-sparsity | dense) per 8-GPU board, so sparse is 1.33× dense rather than 2× — the uplift
-over B200 is on the dense figure. And INT8 is 3 POPS per board against B200's 72.
+**Two B300 rows sit apart from the pattern.** NVFP4 is rated `18 | 14` PFLOPS
+(with-sparsity | dense) so sparse is 1.28× dense rather than 2× — the uplift
+over B200 is on the dense figure. And INT8 is 307 TOPS per board against B200's 9 POPS.
 
-**The Blackwell figures are HGX board specs ÷ 8.** The measured parts report
-`NVIDIA-B300-SXM6-AC-269GB` — air-cooled SXM modules. The GB300 NVL72 tray runs higher clocks
+The measured parts report `NVIDIA-B300-SXM6-AC-269GB` — air-cooled SXM modules. The GB300 NVL72 tray runs higher clocks
 and is quoted at 15 PF dense NVFP4; the HGX basis matches the hardware and keeps B200 and
 B300 comparable.
 
