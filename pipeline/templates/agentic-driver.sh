@@ -29,6 +29,21 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE_MANIFEST="$HERE/@engine_manifest@"
+
+# Install locations come from the environment, never from this file: it is
+# generated on whatever machine ran generate.py, which is not necessarily the
+# machine that runs it. eidf/setup/setup_swebench_env.sh writes env.sh with all
+# of them; source it first.
+if [ -z "${TEASBENCH_ENV_PREFIX:-}" ]; then
+    echo "ERROR: TEASBench environment not loaded." >&2
+    echo "  Run once:  bash eidf/setup/setup_swebench_env.sh" >&2
+    echo "  Then:      source \$TEASBENCH_ENV_PREFIX/env.sh   (default ~/teasbench-env/env.sh)" >&2
+    exit 1
+fi
+for v in TEASBENCH_ROOT AGENTCAP_DIR SWEAGENT_DIR; do
+    [ -n "${!v:-}" ] || { echo "ERROR: $v not set; re-run the setup script." >&2; exit 1; }
+done
+VERSIONS_FILE="${TEASBENCH_VERSIONS_FILE:-$TEASBENCH_ENV_PREFIX/versions.json}"
 NAMESPACE="${TEASBENCH_K8S_NAMESPACE:-eidf230ns}"
 RUN_NAME="@name_k8s@"
 LOCAL_PORT="${LOCAL_PORT:-0}"          # 0 = pick a free port, avoiding collisions
@@ -52,10 +67,16 @@ TIMESTAMP="$(date +%Y%m%d-%H%M)"
 RUN_DIR="$OUTPUT_ROOT/$RUN_NAME/$TIMESTAMP"
 mkdir -p "$RUN_DIR"
 
-# One run per output dir: a second concurrent driver would corrupt results.jsonl
-# and the per-task stream stats.
-exec 9>"$RUN_DIR/.run.lock"
-flock -n 9 || { echo "ERROR: another driver is already active on $RUN_DIR" >&2; exit 1; }
+# One run per output dir. flock is present on the EIDF login nodes; where it is
+# not (macOS, minimal images) carry on rather than aborting -- an absent flock
+# previously reported "another driver is already active", which is both wrong
+# and the sort of message that sends you hunting for a process that isn't there.
+if command -v flock > /dev/null; then
+    exec 9>"$RUN_DIR/.run.lock"
+    flock -n 9 || { echo "ERROR: another driver is already active on $RUN_DIR" >&2; exit 1; }
+else
+    echo "note: flock unavailable; concurrent-run protection is off"
+fi
 
 echo "=============================================================="
 echo "$RUN_NAME"
@@ -101,17 +122,17 @@ chk "can create pods/portforward"     "[ \"\$(kubectl -n '$NAMESPACE' auth can-i
 chk "agent_cap importable"            "python3 -c 'import agent_cap'"
 chk "swe-rex importable"              "python3 -c 'import swerex'"
 chk "swebench importable"             "python3 -c 'import swebench'"
-chk "provider importable"             "PYTHONPATH='@teasbench_root@' python3 -c 'from teasbench.sandbox.k8s import PortForwardK8sProvider'"
+chk "provider importable"             "PYTHONPATH='$TEASBENCH_ROOT' python -c 'from teasbench.sandbox.k8s import PortForwardK8sProvider'"
 chk "engine manifest present"         "[ -f '$ENGINE_MANIFEST' ]" "Regenerate with pipeline/generate.py."
-AGENTCAP_DIR="${AGENTCAP_DIR:-$(cd "@teasbench_root@/../AgentCAP-teasbench" 2>/dev/null && pwd || echo "$HOME/AgentCAP")}"
 chk "AgentCAP checkout ($AGENTCAP_DIR)" "[ -f '$AGENTCAP_DIR/benchmarks/swe_bench_lite_curated_100.json' ]" \
-    "Set AGENTCAP_DIR to your AgentCAP checkout."
+    "Re-run eidf/setup/setup_swebench_env.sh."
+chk "versions file ($VERSIONS_FILE)"  "[ -f '$VERSIONS_FILE' ]" \
+    "Re-run eidf/setup/setup_swebench_env.sh; run metadata would otherwise omit dependency versions."
 
 # A missing streaming patch yields a complete run with empty metrics -- an
 # expensive silent failure, so it is a hard precondition.
-SWEAGENT_DIR="${SWEAGENT_DIR:-$HOME/swe_agent}"
 chk "SWE-agent streaming-patched"     "grep -q AGENTCAP_STREAMING_PATCH_APPLIED '$SWEAGENT_DIR/sweagent/agent/models.py'" \
-    "python \$AGENTCAP_DIR/scripts/patch_sweagent_streaming.py $SWEAGENT_DIR"
+    "Re-run eidf/setup/setup_swebench_env.sh (it applies and verifies the patch)."
 
 [ $fail -eq 0 ] || { echo; echo "Prerequisites failed -- nothing started."; exit 1; }
 
@@ -183,12 +204,11 @@ echo "  engine ready"
 
 echo
 echo "[3] Running the benchmark"
-export PYTHONPATH="@teasbench_root@${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$TEASBENCH_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export TEASBENCH_K8S_NAMESPACE="$NAMESPACE"
 # Referenced by the generated client command (see the eidf swe-bench rule in
-# pipeline/configs/config.yaml). RUN_DIR and SWEAGENT_DIR are set above.
-export LLM_URL RUN_DIR SWEAGENT_DIR
-export AGENTCAP_DIR="${AGENTCAP_DIR:-$(cd "@teasbench_root@/../AgentCAP-teasbench" 2>/dev/null && pwd || echo "$HOME/AgentCAP")}"
+# pipeline/configs/config.yaml); AGENTCAP_DIR and SWEAGENT_DIR come from env.sh.
+export LLM_URL RUN_DIR SWEAGENT_DIR AGENTCAP_DIR
 @teas_env_exports@
 
 @agentic_client_command@ 2>&1 | tee "$RUN_DIR/client.log"
@@ -196,7 +216,50 @@ RC=${PIPESTATUS[0]}
 echo "  agent_cap exit: $RC"
 
 echo
-echo "[4] Results"
+echo "[4] Recording dependency versions"
+# Fold the environment's resolved commits/versions into the run's own metadata,
+# so a result in the results repo can be traced to the exact code that produced
+# it without consulting anything outside that directory.
+python - "$RUN_DIR" "$VERSIONS_FILE" <<'PYEOF'
+import json, sys, glob
+from pathlib import Path
+
+run_dir, versions_file = Path(sys.argv[1]), Path(sys.argv[2])
+try:
+    versions = json.loads(versions_file.read_text())
+except Exception as exc:
+    print(f"  WARNING: could not read {versions_file}: {exc}")
+    sys.exit(0)
+
+targets = sorted(run_dir.glob("metadata_*.json"))
+if not targets:
+    print("  WARNING: no metadata_*.json to stamp (did the run reach its output stage?)")
+    sys.exit(0)
+
+for t in targets:
+    try:
+        meta = json.loads(t.read_text())
+    except Exception as exc:
+        print(f"  WARNING: {t.name} unreadable: {exc}")
+        continue
+    meta["dependencies"] = versions
+    # Mirror the commits into system_environment too: that is where the MoE
+    # runs record teasbench_commit, so aggregation across families stays uniform.
+    se = meta.setdefault("system_environment", {})
+    for key, dep in (("agentcap_commit", "agentcap"),
+                     ("sweagent_commit", "sweagent"),
+                     ("teasbench_commit", "teasbench")):
+        commit = (versions.get(dep) or {}).get("commit")
+        if commit:
+            se[key] = commit[:7]
+    se["swe_rex_version"] = versions.get("swe_rex")
+    se["swebench_version"] = versions.get("swebench")
+    t.write_text(json.dumps(meta, indent=2) + "\n")
+    print(f"  stamped {t.name}")
+PYEOF
+
+echo
+echo "[5] Results"
 RESULTS_SUBDIR="@output_repo_dir@/$TIMESTAMP"
 if [ $PUSH -eq 1 ]; then
     REPO_CLONE="$RUN_DIR/@results_repo@"

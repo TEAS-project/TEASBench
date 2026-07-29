@@ -52,10 +52,22 @@ the TEASBench commit for provenance).
 | `mcp-atlas-github-token` | `token` | `mcp-atlas` tool servers |
 | `mcp-atlas-brave-api-key` | `key` | `mcp-atlas` tool servers |
 
-- **SWE-bench Lite** additionally needs a Python environment on the login node
-  with `agent_cap`, `swe-rex` and `swebench` installed, plus a SWE-agent checkout
-  patched by AgentCAP's `scripts/patch_sweagent_streaming.py`. See §4.8 — on EIDF
-  this benchmark runs from the login node, not as an unattended Job.
+- **SWE-bench Lite** needs a Python environment on the login node. One script
+  builds it, once:
+
+```bash
+bash eidf/setup/setup_swebench_env.sh
+source ~/teasbench-env/env.sh          # in every shell that runs a driver
+```
+
+  It clones AgentCAP (`aproeme/AgentCAP`, branch `arno/teasbench`), installs
+  `agent_cap`, `swe-rex` and `swebench` into a venv, clones SWE-agent and applies
+  **and verifies** AgentCAP's streaming patch, then writes `env.sh` (the exports
+  drivers read) and `versions.json` (recorded into each run's metadata). Every
+  step checks first, so re-running is cheap and safe; `--force` rebuilds.
+  Options: `--prefix`, `--agentcap-ref`, `--agentcap-repo`, `--python`.
+  See §4.8 — on EIDF this benchmark runs from the login node, not as an
+  unattended Job.
 
 > **EIDF does not grant pods RBAC**, so `eidf/rbac/teasbench-runner-rbac.yaml`
 > and the in-cluster preflight (§4.6) do not apply here. They are kept for a
@@ -336,8 +348,31 @@ load, opens and babysits the tunnel, runs the benchmark, pushes the results, and
 run cannot leave GPUs allocated. You never start an engine or submit the engine
 manifest by hand.
 
-Useful flags: `--resume`, `--no-push`, `--namespace`, `--output-root`. Override
-`SWEAGENT_DIR` / `AGENTCAP_DIR` if your checkouts are not in the default places.
+Useful flags: `--resume`, `--no-push`, `--namespace`, `--output-root`.
+
+The driver contains **no install paths of its own** — `TEASBENCH_ROOT`,
+`AGENTCAP_DIR`, `SWEAGENT_DIR` and the interpreter all come from `env.sh`, and it
+refuses to start if that has not been sourced. A generated script is therefore
+portable between machines: relocate a checkout and re-run the setup script rather
+than editing anything generated.
+
+#### Provenance
+
+After the run the driver stamps `versions.json` into every `metadata_*.json`, so
+a directory in the results repo records the exact code that produced it without
+reference to anything outside it:
+
+```json
+"system_environment": {
+  "agentcap_commit": "8df4332", "sweagent_commit": "3ea751c",
+  "teasbench_commit": "2d5d59d",
+  "swe_rex_version": "1.4.0", "swebench_version": "4.1.0"
+},
+"dependencies": { "agentcap": {"commit": "...", "ref": "arno/teasbench", "path": "..."}, ... }
+```
+
+The short commits are mirrored into `system_environment` because that is where
+MoE runs record `teasbench_commit`, keeping aggregation across families uniform.
 
 #### Smoke test first
 
