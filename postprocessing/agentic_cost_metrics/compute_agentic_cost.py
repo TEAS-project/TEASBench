@@ -19,7 +19,9 @@ mixing conventions:
   reserved_worker: charge both GPU and CPU for full end-to-end wall time as a
                    single-task/exclusive-worker upper bound.
 
-For transparency the cost JSON also reports an estimated time breakdown:
+The time breakdown below is not only reported, it drives `active_resource`:
+`llm_active_s` becomes the GPU-billable seconds and `tool_wait_s` the CPU-billable
+seconds, so a change to `prefill_s` moves the published buy cost.
   prefill_s    = mean per-task total of the per-turn `prefill_time_s` records,
                  falling back to `ttft * avg_num_requests` where those records
                  are absent or cover only part of a task (`prefill_source`
@@ -229,10 +231,13 @@ def task_prefill_times(
     -- and grouping on `example_index` gives the task total under either.
 
     What matters is that the rows account for the whole task, which is checked against the
-    run's independently recorded output-token total: a row set spanning every turn sums to it
-    (0.997-1.389 across the tree), while one holding only each task's first turn lands near
-    1/turns. Returns [] when the rows cannot be grouped or fall short, and the caller falls
-    back to `avg_num_requests * ttft`.
+    run's independently recorded output-token total: a row set spanning every turn sums to it,
+    while one holding only each task's first turn lands near 1/turns. Returns [] when the rows
+    cannot be grouped or fall short, and the caller falls back to `avg_num_requests * ttft`.
+
+    Without an output-token column there is nothing to check against, and the fallback counts
+    rows per task instead. That test cannot tell a per-task layout from a truncated per-turn
+    one, so it rejects both. No run currently reaches it.
     """
     files = sorted(metrics_path.parent.glob("detailed-results_*.jsonl"))
     if not files:
