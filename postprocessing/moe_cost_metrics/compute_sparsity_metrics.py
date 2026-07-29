@@ -46,8 +46,8 @@ except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
         "NVIDIA-A100-SXM4-80GB": 2.04e12,
         "NVIDIA-H100-HBM3-80GB": 3.35e12,
         "NVIDIA-H200-141GB": 4.8e12,
-        "NVIDIA-B200-183GB": 8.0e12,
-        "NVIDIA-B300-269GB": 8.0e12,
+        "NVIDIA-B200-183GB": 7.7e12,
+        "NVIDIA-B300-269GB": 7.7e12,
         "AMD-Instinct-MI355X-288GB": 8.0e12,
     }
 
@@ -74,8 +74,10 @@ except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
 # Sources (vendor primary, dense figures):
 #   A100        https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf
 #   H100/H200   https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306
-#   B200/B300   https://www.nvidia.com/en-us/data-center/hgx/
-#   MI355X      AMD Instinct MI355X GPU datasheet (amd.com)
+#   B200/B300   https://www.nvidia.com/en-us/data-center/hgx/ ,
+#   B200        https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703 
+#   B300        https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-datasheet?ncid=GTC-NVNLK1C3
+#   MI355X      AMD Instinct MI355X GPU datasheet (amd.com) , https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
 PEAK_FLOPS_BASIS = "dense"
 PEAK_FLOPS_DICT = {
     "bfloat16": {
@@ -90,8 +92,8 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-A100-SXM4-80GB": 312e12,
         "NVIDIA-H100-HBM3-80GB": 989.5e12,
         "NVIDIA-H200-141GB": 989.5e12,
-        "NVIDIA-B200-183GB": 2250e12,
-        "NVIDIA-B300-269GB": 2250e12,
+        "NVIDIA-B200-183GB": 2250e12,         # 4500 w/ sparsity
+        "NVIDIA-B300-269GB": 2250e12,         # 4500 w/ sparsity
         "AMD-Instinct-MI355X-288GB": 2500e12,
     },
     "fp8": {
@@ -100,7 +102,7 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H200-141GB": 1979e12,
         "NVIDIA-B200-183GB": 4500e12,         # 9000 w/ sparsity
         "NVIDIA-B300-269GB": 4500e12,         # 9000 w/ sparsity
-        "AMD-Instinct-MI355X-288GB": 5050e12,
+        "AMD-Instinct-MI355X-288GB": 5000e12,
     },
     "int8": {
         "NVIDIA-A100-SXM4-80GB": 624e12,      # 1248 w/ sparsity
@@ -109,8 +111,8 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-B200-183GB": 4500e12,          # 9000 w/ sparsity
         # Blackwell Ultra's INT8 tensor path is far narrower than B200's: 3 POPS per HGX
         # board against 72.
-        "NVIDIA-B300-269GB": 187.5e12,         # 375 w/ sparsity
-        "AMD-Instinct-MI355X-288GB": 5050e12,
+        "NVIDIA-B300-269GB": 153.5e12,         # 307 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 5000e12,
     },
     "fp4": {
         "NVIDIA-A100-SXM4-80GB": 312e12,      # A100 has no FP4 tensor cores -> mxfp4 upcasts to bf16
@@ -120,7 +122,7 @@ PEAK_FLOPS_DICT = {
         # The HGX board is rated 144 | 108 PFLOPS NVFP4 (with-sparsity | dense), so
         # sparse is 1.33x dense here. The GB300 NVL72 tray is quoted at 15 PF dense and
         # runs higher clocks than the air-cooled SXM modules these runs use.
-        "NVIDIA-B300-269GB": 13500e12,        # 18000 w/ sparsity
+        "NVIDIA-B300-269GB": 14000e12,        # 18000 w/ sparsity
         "AMD-Instinct-MI355X-288GB": 10100e12,
     },
     # `int4` is reached by weight-only 4-bit checkpoints (compressed-tensors
@@ -133,7 +135,7 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H100-HBM3-80GB": 1979e12,
         "NVIDIA-H200-141GB": 1979e12,
         "NVIDIA-B200-183GB": 9000e12,
-        "NVIDIA-B300-269GB": 13500e12,
+        "NVIDIA-B300-269GB": 14000e12,
         "AMD-Instinct-MI355X-288GB": 10100e12,
     },
 }
