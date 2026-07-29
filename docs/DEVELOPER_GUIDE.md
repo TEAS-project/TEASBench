@@ -185,6 +185,67 @@ sequenceDiagram
     I->>V: self-destruct via API
 ```
 
+### EIDF + SWE-bench Lite — the exception to the Job model
+
+**EIDF does not grant pods RBAC.** A pod cannot create Jobs or read pods via its
+ServiceAccount, so `InClusterK8sProvider` is unusable there and SWE-bench Lite
+uses `PortForwardK8sProvider`, driven from a **login node**.
+
+This is the one place TEASBench's fire-and-forget model does not hold — but it is
+narrower than "no Kubernetes". **The GPUs are still used exactly as always: via
+Jobs.** What moves off the cluster is only the *driver process*.
+
+```mermaid
+flowchart TB
+    subgraph LN["EIDF login node (VM, no GPU)"]
+        D["python -m agent_cap.agents<br/><b>the driver</b><br/>holds YOUR kubectl credentials"]
+    end
+    subgraph CL["EIDF Kubernetes cluster"]
+        E["<b>engine Job — GPU</b><br/>sglang / vllm serving the model"]
+        S["<b>sandbox Jobs — no GPU</b><br/>swe-rex in the instance image<br/>one per task, created at run time"]
+        V["<b>eval Jobs — no GPU</b><br/>official TestSpec grading"]
+    end
+    D -- "kubectl port-forward :8000" --> E
+    D -- "creates / deletes" --> S
+    D -- "kubectl port-forward :9999" --> S
+    D -- "creates / deletes" --> V
+    D -- "kubectl cp / exec" --> V
+```
+
+**Why this works without RBAC.** Submitting a Job is something *you* are allowed
+to do — the port-forward preflight confirms `create jobs` and
+`create pods/portforward` are granted to your account on EIDF. What is refused is
+granting those rights to a *pod's ServiceAccount*. Moving the driver to the login
+node swaps the pod's identity for yours, and the whole thing becomes permissible.
+
+**Three kinds of Job are still created**, all with your credentials: one
+long-lived engine Job on GPUs, and per task a short-lived sandbox Job and eval
+Job on CPU only. The driver reaches all of them through `kubectl port-forward`,
+which is why that provider carries a tunnel-babysitter thread.
+
+**Only SWE-bench is affected.** IMO AnswerBench and MCP Atlas never touch the
+Kubernetes API — MCP Atlas talks to a pod sidecar over `localhost` — so both
+still run as ordinary generated Jobs, unattended, exactly like MoE.
+
+**A consequence for §6's provenance table.** I argued that AgentCAP's
+`k8s/launch_llm_server.sh` and `k8s/port_forward_llm.sh` should not be ported
+because the in-cluster driver made them unnecessary. Under the confirmed
+no-RBAC reality that is only true for IMO AnswerBench and MCP Atlas. For
+SWE-bench on EIDF their *function* — a server-only Job plus a tunnel to it — is
+required. That function now lives in the pipeline: a row needing a login-node
+driver (`utils.needs_login_node_driver`) renders **two** artifacts instead of
+one, via `Template.get_artifacts()`:
+
+| Artifact | Template | Role |
+|---|---|---|
+| `<run>.engine.yaml` | `templates/agentic-engine.yaml` | engine-only Job, GPUs, no client |
+| `<run>.sh` | `templates/agentic-driver.sh` | submits it, tunnels, runs, tears down |
+
+So the *shape* of AgentCAP's two scripts returns, but generated from the same
+CSV row and the same `config.yaml` rules as everything else, rather than
+hand-maintained. The engine Job is never submitted by hand, and the driver
+deletes it on every exit path — an aborted run cannot strand GPUs.
+
 ### The shared rule engine
 
 Both platforms build their commands from the **same** `pipeline/configs/config.yaml`
@@ -351,7 +412,12 @@ the Kubernetes API from wherever it runs.
 
 Both are implemented in `teasbench/sandbox/k8s.py`. The deciding fact — whether
 EIDF grants pods RBAC for `jobs` and `pods` — could not be verified from a
-laptop, so building both was the hedge. `eidf/rbac/teasbench-runner-rbac.yaml`
+laptop, so building both was the hedge.
+
+**Settled 2026-07-28: EIDF does not grant pods RBAC.** On EIDF the answer is
+therefore always `PortForwardK8sProvider`, driven from a login node (see §5).
+`InClusterK8sProvider` remains for a cluster that does grant it; the hedge paid
+off, since the alternative would have been a rewrite at this point. `eidf/rbac/teasbench-runner-rbac.yaml`
 is the manifest to apply; if the project declines it, switch to
 `PortForwardK8sProvider`.
 

@@ -930,7 +930,15 @@ rules:
       platform:
         - "eidf"
     agentic_client_flags:
-      agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/swe-bench-lite_gptoss_sglang.yaml"
+      # No agents config file on this path. The driver reaches the engine over a
+      # port-forward on an OS-assigned local port, so the endpoint cannot be
+      # baked into a file; it is passed as --base-url instead (see the eidf
+      # swe-bench rule below). Leaving a --config here would be actively
+      # dangerous: agent_cap.agents only applies the --base-url/--model quick
+      # flags when --config has not already defined the 'agent' role, so the
+      # agent would silently talk to the file's hardcoded 127.0.0.1:8000 rather
+      # than the tunnel. "" omits the flag.
+      agents_config: ""
 
   - match:
       benchmark:
@@ -940,7 +948,15 @@ rules:
       platform:
         - "eidf"
     agentic_client_flags:
-      agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/swe-bench-lite_gptoss_vllm.yaml"
+      # No agents config file on this path. The driver reaches the engine over a
+      # port-forward on an OS-assigned local port, so the endpoint cannot be
+      # baked into a file; it is passed as --base-url instead (see the eidf
+      # swe-bench rule below). Leaving a --config here would be actively
+      # dangerous: agent_cap.agents only applies the --base-url/--model quick
+      # flags when --config has not already defined the 'agent' role, so the
+      # agent would silently talk to the file's hardcoded 127.0.0.1:8000 rather
+      # than the tunnel. "" omits the flag.
+      agents_config: ""
 
   - match:
       benchmark:
@@ -996,8 +1012,31 @@ rules:
     agentic_client_flags:
       evaluator: "swebench-k8s"
       sweagent_deployment: "k8s"
-      sandbox_provider: "teasbench.sandbox.k8s:InClusterK8sProvider"
-      exec_provider: "teasbench.sandbox.k8s:InClusterK8sProvider"
+      # EIDF does not grant pods RBAC, so the in-cluster provider is unusable
+      # here: the driver runs on a login node with the user's own credentials
+      # and reaches each sandbox over `kubectl port-forward`. See
+      # utils.needs_login_node_driver and docs/DEVELOPER_GUIDE.md 5.
+      sandbox_provider: "teasbench.sandbox.k8s:PortForwardK8sProvider"
+      exec_provider: "teasbench.sandbox.k8s:PortForwardK8sProvider"
+      # The driver runs on a login node, not in a pod, so every path the
+      # platform-independent rule above set to an in-pod location (/dev/shm/...)
+      # has to become something the driver defines. These are shell variables
+      # exported by templates/agentic-driver.sh; changing a name there without
+      # changing it here silently breaks the run.
+      task_indices: "$AGENTCAP_DIR/benchmarks/swe_bench_lite_curated_100.json"
+      sweagent_dir: "$SWEAGENT_DIR"
+      output_dir: "$RUN_DIR"
+      # The engine is reached through a port-forward on an OS-assigned local
+      # port, so the endpoint cannot be baked into a config file the way the
+      # in-pod benchmarks do it. Passed on the CLI instead, which also means
+      # this path needs no agents config file at all -- matching what AgentCAP's
+      # own run_swebench_k8s_100.sh did. "" omits the flag entirely.
+      agents_config: ""
+      base_url: "$LLM_URL"
+      api_key: "dummy"
+      # Must match agentic_server_flags.served_model_name above; litellm needs
+      # the openai/ prefix to route to an OpenAI-compatible endpoint.
+      model: "openai/gpt-oss"
     # Needed so InClusterK8sProvider (imported from TEASBench, on
     # PYTHONPATH=/dev/shm/TEASBench) can create/watch/delete the per-task
     # swe-rex sandbox Jobs and exec into the eval containers. Requires

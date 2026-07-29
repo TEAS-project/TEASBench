@@ -140,6 +140,22 @@ def benchmark_family(p: dict):
     return family
 
 
+def needs_login_node_driver(p: dict):
+    """True when this row cannot run as an unattended in-cluster Job.
+
+    EIDF does not grant pods RBAC, so a benchmark whose driver must create
+    Kubernetes objects mid-run (currently only swe-bench-lite, for its per-task
+    sandbox and eval Jobs) has to be driven from a login node using the user's
+    own credentials. The engine still runs on GPUs as an ordinary Job; only the
+    driver process moves. See docs/DEVELOPER_GUIDE.md 5.
+
+    imo-answerbench and mcp-atlas never touch the Kubernetes API, so they stay
+    unattended Jobs on every platform.
+    """
+    return (p.get("platform", "eidf") == "eidf"
+            and p.get("benchmark") == "swe-bench-lite")
+
+
 def local_model_path(model: str):
     return f"{MODELS_ROOT}/{HF_MODEL_MAP[model]}"
 

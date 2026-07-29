@@ -1,6 +1,7 @@
 #!/bin/python3
 
 import argparse
+import os
 import pathlib
 import pandas as pd
 from utils import (EIDF_GPU_MAP, HF_MODEL_MAP, benchmark_family, get_run_name,
@@ -63,9 +64,12 @@ def main(experiments_csv, yaml_target_dir, results_repo):
     # Generate and write one K8s config per experiment row.
     for _, row in df.iterrows():
         params = build_params(row)
-        yaml_content = yaml_template().get(params, results_repo=results_repo)
-        file_name = k8s_friendlify(get_run_name(params) + ".yaml")
-        write_yaml_files(yaml_target_dir, file_name, yaml_content)
+        for file_name, content, mode in yaml_template().get_artifacts(
+                params, results_repo=results_repo):
+            write_yaml_files(yaml_target_dir, file_name, content)
+            # Driver scripts are meant to be executed directly.
+            os.chmod(os.path.join(yaml_target_dir, file_name), mode)
+            print(f"  wrote {file_name}")
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()

@@ -48,6 +48,14 @@ CHECK_IMAGE = os.environ.get("TEASBENCH_PREFLIGHT_IMAGE", "busybox:1.36")
 EXEC_IMAGE = os.environ.get("TEASBENCH_PREFLIGHT_EXEC_IMAGE", "debian:stable-slim")
 
 
+def swebench_image(instance_id):
+    """Official per-instance image name. The `_1776_` substitution is how the
+    SWE-bench images are published on Docker Hub -- see AgentCAP's
+    _swebench_image(); it is registry naming, not anything k8s-specific."""
+    iid = instance_id.lower().replace("/", "__").replace("__", "_1776_")
+    return f"docker.io/swebench/sweb.eval.x86_64.{iid}:latest"
+
+
 def ok(msg):
     print(f"  PASS  {msg}")
 
@@ -121,18 +129,31 @@ def patch_sandbox_payload(k8s):
     return real
 
 
-def check_sandbox(ns, queue):
+def check_sandbox(ns, queue, instance_id=None):
     print("\n[3] PortForwardK8sProvider.acquire() / release()")
     from teasbench.sandbox import k8s
 
-    patch_sandbox_payload(k8s)
+    if instance_id:
+        # Full fidelity: the real per-instance image, the real swe-rex install,
+        # no substitution whatsoever. Slower (multi-GB pull) but this is the
+        # only check that proves swe-rex actually installs and runs inside the
+        # instance image -- an old conda env where a dependency clash is
+        # plausible. Still no GPU.
+        image = swebench_image(instance_id)
+        print(f"      mode: REAL image ({instance_id})")
+        print(f"      {image}")
+        print("      expect several minutes for the pull + pip install")
+    else:
+        image = CHECK_IMAGE
+        patch_sandbox_payload(k8s)
+        print(f"      mode: fast probe ({CHECK_IMAGE}); use --real-image for full fidelity")
     provider = k8s.PortForwardK8sProvider(namespace=ns, queue=queue)
 
     ep = None
     try:
         t0 = time.time()
         try:
-            ep = provider.acquire(CHECK_IMAGE, "preflight")
+            ep = provider.acquire(image, "preflight")
         except Exception as exc:
             bad(f"acquire() raised: {exc}",
                 "A 'not alive' timeout has three usual causes, in order of likelihood:\n"
@@ -151,7 +172,11 @@ def check_sandbox(ns, queue):
             req = urllib.request.Request(f"{ep.host}:{ep.port}/is_alive",
                                          headers={"X-API-Key": ep.auth_token})
             body = urllib.request.urlopen(req, timeout=10).read().decode().strip()
-            if body == "teasbench-ok":
+            if instance_id:
+                # Real swe-rex answers /is_alive with its own payload; any 200
+                # means it is installed, running and accepting the auth token.
+                ok(f"swe-rex is alive in the real instance image ({body[:40]})")
+            elif body == "teasbench-ok":
                 ok("tunnel carries HTTP through to the sandbox pod")
             else:
                 bad(f"unexpected body through the tunnel: {body!r}")
@@ -185,9 +210,11 @@ def check_sandbox(ns, queue):
                         "Orphaned jobs waste namespace quota; delete it by hand.")
 
 
-def check_exec(ns, queue):
+def check_exec(ns, queue, instance_id=None):
     print("\n[4] Exec-container path (used by the SWE-bench evaluator)")
-    print(f"      image: {EXEC_IMAGE}  (needs bash + tar, as the real instance images have)")
+    exec_image = swebench_image(instance_id) if instance_id else EXEC_IMAGE
+    print(f"      image: {exec_image}"
+          + ("" if instance_id else "  (needs bash + tar, as the real instance images have)"))
     from teasbench.sandbox import k8s
 
     # No substitution needed: the real exec spec just runs `sleep`.
@@ -195,7 +222,7 @@ def check_exec(ns, queue):
     handle = None
     try:
         try:
-            handle = provider.acquire_exec(EXEC_IMAGE, "preflight")
+            handle = provider.acquire_exec(exec_image, "preflight")
         except Exception as exc:
             bad(f"acquire_exec() raised: {exc}")
             return
@@ -236,6 +263,12 @@ def main():
                     help="Kueue queue name (default <namespace>-user-queue)")
     ap.add_argument("--skip-exec", action="store_true",
                     help="Skip the exec-container check (section 4)")
+    ap.add_argument("--real-image", nargs="?", const="astropy__astropy-12907",
+                    metavar="INSTANCE_ID", default=None,
+                    help="Use a real SWE-bench instance image instead of the fast "
+                         "busybox probe. Proves the multi-GB pull and that swe-rex "
+                         "installs and runs inside the instance image. Still no GPU, "
+                         "but takes minutes. Default instance: astropy__astropy-12907.")
     args = ap.parse_args()
     ns = args.namespace
     queue = args.queue or f"{ns}-user-queue"
@@ -249,9 +282,9 @@ def main():
         print("\nAborting: kubectl is not usable, nothing else can be checked.")
         return 1
     check_verbs(ns)
-    check_sandbox(ns, queue)
+    check_sandbox(ns, queue, args.real_image)
     if not args.skip_exec:
-        check_exec(ns, queue)
+        check_exec(ns, queue, args.real_image)
 
     print("\n" + "=" * 62)
     if FAILED == 0:

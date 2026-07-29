@@ -4,7 +4,7 @@ import yaml
 import os
 import re
 import subprocess
-from utils import get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, TEAS_GPU_NAME_MAP
+from utils import needs_login_node_driver, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, TEAS_GPU_NAME_MAP
 
 DEFINED_SENTINEL = "<defined>"
 
@@ -153,21 +153,31 @@ class Template:
             cmd_cfg = config["variables_defaults"]["client_command"]
             rule_key = "client_flags"
 
+        # Resolve every flag to a single value before rendering any of it, so a
+        # rule that overrides a flag already in the base list REPLACES it rather
+        # than appending a second copy. Rendering in two passes emitted e.g.
+        # `--output-dir $OUTPUT_ROOT ... --output-dir $RUN_DIR`, which argparse
+        # happens to resolve last-wins -- but only by luck, and it made the
+        # generated command actively misleading to read.
+        overrides = {p: v for p, v in self.resolve_params(rule_key, matching_rules).items()
+                     if p in flags_def}
+
         cmd = cmd_cfg["base_command"] + " \\\n"
 
-        # Base parameters
+        # Base parameters, in base order -- skipping any a rule overrides, which
+        # are emitted below instead. Skipping (rather than emitting both) is what
+        # stops a flag appearing twice, e.g. `--output-dir $OUTPUT_ROOT ...
+        # --output-dir $RUN_DIR`; argparse resolved that last-wins, but only by
+        # luck, and it made the generated command misleading to read.
         for param in cmd_cfg["flags"]:
-            if param not in flags_def: continue
-            flag_def = flags_def[param]
-            value = self._resolve_flag_value(param, flag_def, parameters)
-
-            rendered = self._build_flag(flag_def, param, value)
+            if param not in flags_def or param in overrides: continue
+            value = self._resolve_flag_value(param, flags_def[param], parameters)
+            rendered = self._build_flag(flags_def[param], param, value)
             if rendered: cmd += f"  {rendered} \\\n"
 
-        # Conditional overrides
-        conditional = self.resolve_params(rule_key, matching_rules)
-        for param, value in conditional.items():
-            if param not in flags_def: continue
+        # Rule overrides last, preserving the position the duplicate copy used
+        # to occupy -- so removing the duplication changes no existing output.
+        for param, value in overrides.items():
             rendered = self._build_flag(flags_def[param], param, value)
             if rendered: cmd += f"  {rendered} \\\n"
 
@@ -265,10 +275,36 @@ class Template:
             "@extra_container_env@": extra_container_env,
             "@teas_env_exports@": teas_env_exports,
         }
+        if needs_login_node_driver(parameters):
+            # Two artifacts instead of one: an engine-only Job, plus the driver
+            # that submits it, tunnels to it, runs the benchmark and tears it
+            # down. get_artifacts() below renders both.
+            return "templates/agentic-driver.sh", replacements
         return "templates/agentic.yaml", replacements
 
 
-    def get(self, parameters: dict, results_repo: str):
+    def get_artifacts(self, parameters: dict, results_repo: str):
+        """Render one experiment row into the file(s) needed to run it.
+
+        Returns [(filename, content, mode)]. Almost every row is a single Job
+        YAML. A row that needs a login-node driver (see
+        utils.needs_login_node_driver) is a driver script plus the engine-only
+        Job manifest it submits.
+        """
+        stem = k8s_friendlify(get_run_name(parameters))
+        if not needs_login_node_driver(parameters):
+            return [(f"{stem}.yaml", self.get(parameters, results_repo), 0o644)]
+
+        engine_name = f"{stem}.engine.yaml"
+        driver = self.get(parameters, results_repo,
+                          extra={"@engine_manifest@": engine_name})
+        engine = self.get(parameters, results_repo,
+                          template_override="templates/agentic-engine.yaml")
+        return [(f"{stem}.sh", driver, 0o755),
+                (engine_name, engine, 0o644)]
+
+    def get(self, parameters: dict, results_repo: str,
+            extra: dict = None, template_override: str = None):
         with open("configs/config.yaml", "r") as f:
             config = yaml.safe_load(f)
 
@@ -293,6 +329,15 @@ class Template:
         else:
             template_path, family_replacements = self._moe(config, parameters, matching_rules)
         replacements.update(family_replacements)
+
+        # The driver runs from a checkout on the login node and imports the
+        # provider from it, so it needs the repo root as an absolute path.
+        replacements["@teasbench_root@"] = os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        if extra:
+            replacements.update(extra)
+        if template_override:
+            template_path = template_override
 
         # Load the job template
         with open(template_path, "r") as f:
