@@ -20,7 +20,11 @@ mixing conventions:
                    single-task/exclusive-worker upper bound.
 
 For transparency the cost JSON also reports an estimated time breakdown:
-  llm_active_s = ttft * avg_num_requests + tpot * avg_total_output_tokens
+  prefill_s    = mean per-task total of the per-turn `prefill_time_s` records,
+                 falling back to `ttft * avg_num_requests` where those records
+                 are absent or cover only part of a task (`prefill_source`
+                 says which). See task_prefill_times().
+  llm_active_s = prefill_s + tpot * avg_total_output_tokens
   tool_wait_s  = max(0, avg_e2e_latency_s - llm_active_s)
 
 Output: a sibling JSON (`cost.json` / `cost_<suffix>.json`) is written next
@@ -204,6 +208,67 @@ def task_latencies(metrics_path: Path) -> list[float]:
     except (OSError, ValueError):
         return []
     return latencies
+
+
+def task_prefill_times(
+    metrics_path: Path,
+    avg_num_requests: Optional[float],
+    avg_total_output_tokens: Optional[float],
+) -> list[float]:
+    """Per-task total prefill time (s), summed over a task's turns, or [].
+
+    `performance.ttft` does not mean the same thing across the agentic suite. SWE-bench and
+    MCP-Atlas publish a per-turn value, so `avg_num_requests * ttft` estimates the task total.
+    The IMO runners accumulate prefill across the turn loop and publish that sum as
+    `avg_ttft_ms`, so for those runs `ttft` is itself the task total: measured on the tree,
+    `ttft` over the per-task prefill total is 1.000 on every IMO run, against 0.03 (SWE) and
+    0.11 (MCP).
+
+    Summing the records answers the question without depending on which convention a run
+    follows. Runs also differ in layout -- most write one row per turn, some one row per task
+    -- and grouping on `example_index` gives the task total under either.
+
+    What matters is that the rows account for the whole task, which is checked against the
+    run's independently recorded output-token total: a row set spanning every turn sums to it
+    (0.997-1.389 across the tree), while one holding only each task's first turn lands near
+    1/turns. Returns [] when the rows cannot be grouped or fall short, and the caller falls
+    back to `avg_num_requests * ttft`.
+    """
+    files = sorted(metrics_path.parent.glob("detailed-results_*.jsonl"))
+    if not files:
+        return []
+    prefill: dict = {}
+    out_tokens: dict = {}
+    rows = 0
+    try:
+        with files[0].open() as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                value = record.get("prefill_time_s")
+                if value is None:
+                    continue
+                key = record.get("example_index")
+                if key is None:
+                    return []  # ungroupable: every row would collapse onto one task
+                rows += 1
+                prefill[key] = prefill.get(key, 0.0) + float(value)
+                tokens = record.get("output_tokens")
+                if tokens is not None:
+                    out_tokens[key] = out_tokens.get(key, 0.0) + float(tokens)
+    except (OSError, ValueError):
+        return []
+    if len(prefill) < 2:
+        return []
+    if avg_total_output_tokens and len(out_tokens) == len(prefill):
+        covered = sum(out_tokens.values()) / len(out_tokens)
+        return list(prefill.values()) if covered >= 0.8 * avg_total_output_tokens else []
+    # No output-token column to check against; fall back to counting rows per task.
+    if avg_num_requests and rows / len(prefill) < 0.8 * avg_num_requests:
+        return []
+    return list(prefill.values())
 
 
 def _percentile(values: list[float], pct: int) -> float:
@@ -596,14 +661,35 @@ def main() -> int:
             skipped += 1
             continue
 
-        llm_active_s = (num_req or 0) * ttft + out_tok * tpot
+        # Prefill comes from the per-turn records where they support it, and falls back to the
+        # num_req * ttft estimate otherwise. See task_prefill_times() for why ttft cannot be
+        # used directly across the suite.
+        prefill_times = task_prefill_times(f, num_req, out_tok)
+        if prefill_times:
+            prefill_s = sum(prefill_times) / len(prefill_times)
+            prefill_source = "measured"
+        else:
+            prefill_s = (num_req or 0) * ttft
+            prefill_source = "derived"
+
+        llm_active_s = prefill_s + out_tok * tpot
         tool_wait_s = max(0.0, avg_e2e - llm_active_s)
 
         p99_llm_active_s = None
         p99_tool_wait_s = None
-        if p99_e2e is not None and p99_ttft is not None and p99_tpot is not None:
-            p99_llm_active_s = (num_req or 0) * p99_ttft + out_tok * p99_tpot
-            p99_tool_wait_s = max(0.0, p99_e2e - p99_llm_active_s)
+        if p99_e2e is not None and p99_tpot is not None:
+            # The p99 prefill term comes from the same per-task series as the mean, so the two
+            # figures share a basis. Without this the average becomes physically possible while
+            # the p99 keeps the double-count.
+            if prefill_times:
+                p99_prefill_s = _percentile(prefill_times, 99)
+            elif p99_ttft is not None:
+                p99_prefill_s = (num_req or 0) * p99_ttft
+            else:
+                p99_prefill_s = None
+            if p99_prefill_s is not None:
+                p99_llm_active_s = p99_prefill_s + out_tok * p99_tpot
+                p99_tool_wait_s = max(0.0, p99_e2e - p99_llm_active_s)
 
         payload = {
             "recorded_at": recorded_at,
@@ -631,6 +717,8 @@ def main() -> int:
                 "avg_num_requests": num_req,
                 "avg_tool_call_count": tool_calls,
                 "avg_total_output_tokens": out_tok,
+                "prefill_s": prefill_s,
+                "prefill_source": prefill_source,
                 "llm_active_s": llm_active_s,
                 "tool_wait_s": tool_wait_s,
                 "p99_llm_active_s": p99_llm_active_s,
