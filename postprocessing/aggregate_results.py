@@ -311,6 +311,28 @@ def merge_run_metrics(left, right, value_cols):
     return merged.drop(columns="_run_key")
 
 
+def apply_explicit_performance_fallbacks(df):
+    """Fill derived display metrics from explicit per-run performance values.
+
+    Some dense-model runs have no ``sparsity.json`` because expert activation is
+    not applicable.  Their source ``metrics.json`` may still contain a measured
+    prefill throughput.  Prefer the normal sparsity sidecar when present, and use
+    the explicit performance value only when that sidecar value is absent.
+    """
+    fallbacks = {
+        "sparsity.prefill.prefill_tokens_per_s": "performance.prefill_tokens_per_s",
+    }
+    result = df.copy()
+    for target, source in fallbacks.items():
+        if source not in result.columns:
+            continue
+        if target in result.columns:
+            result[target] = result[target].combine_first(result[source])
+        else:
+            result[target] = result[source]
+    return result
+
+
 CORE_DESCRIPTOR_COLS = ["platform", "hw_type x num_hw", "batch_size", "inference_engine"]
 OPTIONAL_DESCRIPTOR_COLS = ["num_samples", "input_length", "output_length"]
 
@@ -880,6 +902,7 @@ def main(results_dir, output_dir):
         if sparsity_df is not None:
             performance_df = merge_run_metrics(
                 df, sparsity_df, [src for _, src in SPARSITY_VALUE_SPECS])
+        performance_df = apply_explicit_performance_fallbacks(performance_df)
 
     perf_std = performance_df[~is_fixed_length(performance_df)].copy()
     perf_fl  = performance_df[ is_fixed_length(performance_df)].copy()
