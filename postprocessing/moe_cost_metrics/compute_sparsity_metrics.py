@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Compute S-MBU and S-MFU per the MoE-CAP paper (arXiv 2412.07067 v6, Eqs. 4-5)
-for every metrics file in the moe/ tree that has non-zero expert_activation.
+for every metrics file in the moe/ tree. S-MFU is always computed; S-MBU needs
+the run's own expert_activation trace and is null without one.
 
 Per the paper:
   S-MBU = B_achieved / B_peak,  B_achieved = (S_activated + S_KV) / TPOT
@@ -325,25 +326,6 @@ def describe_run(path: Path, root: Path) -> dict:
     }
 
 
-def build_activation_lookup(metrics_files: list[Path], root: Path) -> dict[tuple, tuple[float, float, str]]:
-    table: dict[tuple, tuple[float, float, str]] = {}
-    for f in metrics_files:
-        info = describe_run(f, root)
-        try:
-            metrics = json.loads(f.read_text())
-        except Exception:
-            continue
-        ea = metrics.get("expert_activation") or {}
-        p = ea.get("avg_expert_activation_prefill") or 0
-        de = ea.get("avg_expert_activation_decode") or 0
-        if p <= 0 and de <= 0:
-            continue
-        key = (info["model"], info["dataset"], info["batch_size_dir"])
-        if key not in table:
-            table[key] = (p, de, f"{info['location']}/{info['framework']}/{Path(f).parent.relative_to(root)}")
-    return table
-
-
 def _swap_prefix(name: str, old: str, new: str) -> str:
     if name == f"{old}.json":
         return f"{new}.json"
@@ -411,15 +393,19 @@ def _layer_partition(cfg_d: dict, n_layers: int) -> tuple[int, int]:
 def compute_for_run(
     metrics: dict, hf_cfg, gpu_key: str, num_gpus: int, prec_str: str,
     avg_prefill_len: float, avg_decode_ctx_len: float,
-    borrowed_activation: Optional[tuple[float, float, str]] = None,
     force_batch_size_one: bool = False,
 ) -> dict:
     perf = metrics.get("performance") or {}
     ea = metrics.get("expert_activation") or {}
+    # Expert activation is used only by S-MBU, and only the run's own trace is used. It counts the
+    # experts a step actually loaded, which depends on the realised batch, so it is a property of
+    # this engine on this accelerator and does not carry across from another run: within one model,
+    # workload and batch regime it varies several-fold across accelerators. Only SGLang's runner
+    # records it, and not on every run; a run without one publishes a null S-MBU, not an imputed one.
+    # S-MFU is unaffected -- it uses the architectural top_k, not the measured activation.
     prefill_act = ea.get("avg_expert_activation_prefill") or 0
     decode_act = ea.get("avg_expert_activation_decode") or 0
-    if prefill_act <= 0 and decode_act <= 0 and borrowed_activation is not None:
-        prefill_act, decode_act, _activation_source = borrowed_activation
+    has_activation = prefill_act > 0 or decode_act > 0
     ttft = perf.get("ttft")
     tpot = perf.get("tpot")
     batch_profile = metrics.get("batch_token_profile") or {}
@@ -443,8 +429,6 @@ def compute_for_run(
     ):
         avg_decode_ctx_len = float(profile_prefill_len) + float(profile_decode_tokens) / 2.0
 
-    if prefill_act <= 0 and decode_act <= 0:
-        return {"skipped": "expert_activation missing or zero"}
     if ttft is None or tpot is None or not ttft or not tpot:
         return {"skipped": "ttft/tpot missing"}
 
@@ -585,8 +569,9 @@ def compute_for_run(
             "peak_flops_basis": PEAK_FLOPS_BASIS,
         },
         "activation": {
-            "avg_expert_activation_prefill": prefill_act,
-            "avg_expert_activation_decode": decode_act,
+            "avg_expert_activation_prefill": prefill_act if has_activation else None,
+            "avg_expert_activation_decode": decode_act if has_activation else None,
+            "activation_source": "measured" if has_activation else "unavailable",
         },
         "prefill": {
             "ttft_s": ttft,
@@ -634,8 +619,6 @@ def main() -> int:
         print(f"error: no metrics files under {root}", file=sys.stderr)
         return 2
 
-    activation_lookup = build_activation_lookup(metrics_files, root)
-    print(f"Activation lookup built from {len(activation_lookup)} (model, dataset, batch) keys.", file=sys.stderr)
 
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     recorded_at = now.isoformat().replace("+00:00", "Z")
@@ -704,13 +687,9 @@ def main() -> int:
         else:
             decode_ctx_len = 0.0
 
-        borrowed = activation_lookup.get(
-            (info["model"], info["dataset"], info["batch_size_dir"])
-        )
         result = compute_for_run(
             metrics, hf_cfg, gpu_key, meta_num_gpus, prec_str,
             prefill_len, decode_ctx_len,
-            borrowed_activation=borrowed,
             force_batch_size_one=info["batch_size_dir"].startswith("batch-size-1"),
         )
         if "skipped" in result:

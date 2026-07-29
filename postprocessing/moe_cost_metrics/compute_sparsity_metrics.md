@@ -1,6 +1,6 @@
 # `compute_sparsity_metrics.py` — S-MBU and S-MFU per MoE-CAP
 
-Writes one `sparsity_*.json` sidecar next to every `metrics_*.json` (or `metrics.json`) that has — or can borrow — `expert_activation`. Formulas follow [MoE-CAP, arXiv 2412.07067 v6](https://arxiv.org/html/2412.07067v6), Eqs. 4-5.
+Writes one `sparsity_*.json` sidecar next to every `metrics_*.json` (or `metrics.json`) the run tree holds. S-MBU needs the run's own `expert_activation` trace and is null without it; S-MFU does not and is always published. Formulas follow [MoE-CAP, arXiv 2412.07067 v6](https://arxiv.org/html/2412.07067v6), Eqs. 4-5.
 
 ## 1. Formulas (paper convention)
 
@@ -112,15 +112,21 @@ Used as fallbacks to materialize the KV-cache term (S-MBU) and derive throughput
 | `longbench_v1` | 10,000 | 10,110 |
 | `longbench_v2` | 10,000 | 10,110 |
 
-## 6. Activation borrowing (vllm runs)
+## 6. Activation is per-run; S-MBU is null without it
 
-vllm metrics files have `expert_activation = 0` (only sglang's runner emits the trace). The script:
+Expert activation counts the experts a decode step actually loaded. That depends on the realised
+batch, so it is a property of *this* engine on *this* accelerator and is not transferable between
+runs. Only sglang's runner records it, and not on every run; no vllm run currently carries one.
 
-1. Scans every metrics file with non-zero activation, indexes them by `(model, dataset, batch_size_dir)`.
-2. For any run with zero activation, looks up that key and borrows the activation values (keeping its own `ttft`/`tpot`).
-3. Records the donor path in `sparsity.activation.source` (e.g. `amd/sglang/.../mi355xx4/batch-size-1/20260501-2342`).
+A run without its own trace publishes `activation_source: "unavailable"`, null activation values and
+a **null S-MBU**, rather than an imputed number. `inputs.precision_source` and this field are the two
+provenance markers on the sidecar.
 
-Same-key combinations across vllm and sglang are well-correlated because activation is a property of the model + dataset + batch policy, not the runner.
+**S-MFU is unaffected.** It uses the architectural `top_k`, not the measured activation, so every run
+publishes it — including the ones with no trace, which previously produced no sidecar at all.
+
+Within a single `(model, dataset, batch_size_dir)` group the measured activations vary several-fold
+across accelerators, which is why one run's value cannot stand in for another's.
 
 ## 7. Output schema (`sparsity_*.json`)
 
@@ -160,6 +166,7 @@ Same-key combinations across vllm and sglang are well-correlated because activat
       "peak_flops_basis": "dense"
     },
     "activation": {
+      "activation_source": "measured",
       "avg_expert_activation_prefill": 75.39,
       "avg_expert_activation_decode": 4.00
     },
@@ -181,16 +188,13 @@ Same-key combinations across vllm and sglang are well-correlated because activat
 
 ## 8. Verified counts (current run)
 
-```
-metrics files found:               389
-sparsity JSONs written:            370
-  └─ sglang (own activation):      197
-  └─ vllm   (borrowed activation): 173
-skipped:                            19
-  └─ no donor activation at same key:  8
-  └─ ttft/tpot missing (early profiler): 11
-activation lookup keys:             36
-```
+The script prints its own tallies on each run — metrics files found, sidecars written,
+`measured` against `unavailable`, and the skip reasons. Read them from the run rather than
+from here, so this section cannot go stale.
+
+Only sglang's runner records the trace, and not on every run; no vllm run currently carries
+one. Runs whose `gpu_key` does not resolve are skipped before a sidecar is written, so the
+`measured` count sits slightly below the number of metrics files holding a trace.
 
 ## 9. Reproduction
 
@@ -212,4 +216,4 @@ Outputs are sidecar files: `sparsity_<suffix>.json` (or `sparsity.json`) next to
 1. **`attention_score = 0`** — Q·K^T and (scores·V) compute scales with context length; not subtracted from the metrics file in aggregate form. S-MFU undercounts attention compute slightly (negligible at small context, ~10% at 10K ctx).
 2. **Peak FLOPS is dense throughout**, so the denominator is the table value as written. The table is owned here rather than imported from MoE-CAP, which keeps one basis across vendors, and `inputs.peak_flops_basis` records it per sidecar.
 3. **gpt-oss-120b mxfp4** has `self_attn` + `mlp.router` kept at BF16; we apply fp4 uniformly. Attention params ≈ 0.8% of total weights → error is negligible.
-4. **Activation borrowing** assumes `(model, dataset, batch_size_dir)` is enough to predict activation — true to first order, since activation is dominated by routing behavior of the model on the input distribution, not the runner. The donor path is recorded in every sidecar for audit.
+4. **Activation is never borrowed.** It depends on the batch a run realised, so it is a property of that engine on that accelerator, varying several-fold across accelerators within one model, workload and batch regime. A run without its own trace publishes a null S-MBU, and `activation_source` records which case applies.
