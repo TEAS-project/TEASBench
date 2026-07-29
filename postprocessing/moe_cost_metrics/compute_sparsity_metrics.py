@@ -38,9 +38,7 @@ sys.path.insert(0, "/home/sicheng/MoE-CAP")
 try:
     from moe_cap.utils.hardware_utils import (  # noqa: E402
         MEM_BW_DICT,
-        PEAK_FLOPS_DICT,
         get_peak_bw,
-        get_peak_flops,
     )
 except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
     MEM_BW_DICT = {
@@ -51,62 +49,84 @@ except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
         "NVIDIA-B300-269GB": 8.0e12,
         "AMD-Instinct-MI355X-288GB": 8.0e12,
     }
-    PEAK_FLOPS_DICT = {
-        "bfloat16": {
-            "NVIDIA-A100-SXM4-80GB": 624e12,
-            "NVIDIA-H100-HBM3-80GB": 1979e12,
-            "NVIDIA-H200-141GB": 1979e12,
-            "NVIDIA-B200-183GB": 4500e12,
-            "NVIDIA-B300-269GB": 5000e12,
-            "AMD-Instinct-MI355X-288GB": 2500e12,
-        },
-        "float16": {
-            "NVIDIA-A100-SXM4-80GB": 624e12,
-            "NVIDIA-H100-HBM3-80GB": 1979e12,
-            "NVIDIA-H200-141GB": 1979e12,
-            "NVIDIA-B200-183GB": 4500e12,
-            "NVIDIA-B300-269GB": 5000e12,
-            "AMD-Instinct-MI355X-288GB": 2500e12,
-        },
-        "fp8": {
-            "NVIDIA-A100-SXM4-80GB": 624e12,  # A100 has no FP8 tensor cores -> upcasts to bf16
-            "NVIDIA-H100-HBM3-80GB": 3958e12,
-            "NVIDIA-H200-141GB": 3958e12,
-            "NVIDIA-B200-183GB": 9000e12,
-            "NVIDIA-B300-269GB": 10000e12,
-            "AMD-Instinct-MI355X-288GB": 5050e12,
-        },
-        "int8": {
-            "NVIDIA-A100-SXM4-80GB": 1248e12,
-            "NVIDIA-H100-HBM3-80GB": 3958e12,
-            "NVIDIA-H200-141GB": 3958e12,
-            "NVIDIA-B200-183GB": 9000e12,
-            "NVIDIA-B300-269GB": 10000e12,
-            "AMD-Instinct-MI355X-288GB": 5050e12,
-        },
-        "fp4": {
-            "NVIDIA-A100-SXM4-80GB": 624e12,  # A100 has no FP4 tensor cores -> mxfp4 upcasts to bf16
-            "NVIDIA-H100-HBM3-80GB": 3958e12,
-            "NVIDIA-H200-141GB": 3958e12,
-            "NVIDIA-B200-183GB": 18000e12,
-            "NVIDIA-B300-269GB": 20000e12,
-            "AMD-Instinct-MI355X-288GB": 10100e12,
-        },
-        "int4": {
-            "NVIDIA-A100-SXM4-80GB": 2496e12,
-            "NVIDIA-H100-HBM3-80GB": 3958e12,
-            "NVIDIA-H200-141GB": 3958e12,
-            "NVIDIA-B200-183GB": 18000e12,
-            "NVIDIA-B300-269GB": 20000e12,
-            "AMD-Instinct-MI355X-288GB": 10100e12,
-        },
-    }
 
     def get_peak_bw(gpu_key):
         return MEM_BW_DICT.get(gpu_key, 0)
 
-    def get_peak_flops(gpu_key, precision="bfloat16"):
-        return PEAK_FLOPS_DICT.get((precision or "").lower(), {}).get(gpu_key, 0)
+
+# Peak FLOPS is owned here rather than imported from MoE-CAP, because the two vendors quote
+# it on different bases and mixing them silently biases S-MFU across vendors. NVIDIA
+# datasheets quote tensor-core throughput *with 2:4 structured sparsity*; AMD quotes dense.
+# Every entry below is DENSE, so S-MFU divides by the value as written. NVIDIA figures are
+# generally half the number on the datasheet; the with-sparsity value is spelled out per
+# entry so a future edit cannot reintroduce it unnoticed. Blackwell Ultra is the exception
+# and is not a 2x — see the fp4 block.
+#
+# Sources (vendor primary, dense figures):
+#   A100   https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf
+#   H100   https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306
+#   B200   https://resources.nvidia.com/en-us-blackwell-architecture
+#   B300   https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/
+#   MI355X https://rocm.blogs.amd.com/software-tools-optimization/occupancy-math-mi355x/README.html
+PEAK_FLOPS_BASIS = "dense"
+PEAK_FLOPS_DICT = {
+    "bfloat16": {
+        "NVIDIA-A100-SXM4-80GB": 312e12,      # 624 w/ sparsity
+        "NVIDIA-H100-HBM3-80GB": 989.5e12,    # 1979 w/ sparsity
+        "NVIDIA-H200-141GB": 989.5e12,        # 1979 w/ sparsity
+        "NVIDIA-B200-183GB": 2250e12,         # 4500 w/ sparsity
+        "NVIDIA-B300-269GB": 2500e12,         # 5000 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 2500e12,
+    },
+    "float16": {
+        "NVIDIA-A100-SXM4-80GB": 312e12,
+        "NVIDIA-H100-HBM3-80GB": 989.5e12,
+        "NVIDIA-H200-141GB": 989.5e12,
+        "NVIDIA-B200-183GB": 2250e12,
+        "NVIDIA-B300-269GB": 2500e12,
+        "AMD-Instinct-MI355X-288GB": 2500e12,
+    },
+    "fp8": {
+        "NVIDIA-A100-SXM4-80GB": 312e12,      # A100 has no FP8 tensor cores -> upcasts to bf16
+        "NVIDIA-H100-HBM3-80GB": 1979e12,     # 3958 w/ sparsity
+        "NVIDIA-H200-141GB": 1979e12,
+        "NVIDIA-B200-183GB": 4500e12,         # 9000 w/ sparsity
+        "NVIDIA-B300-269GB": 5000e12,         # 10000 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 5050e12,
+    },
+    "int8": {
+        "NVIDIA-A100-SXM4-80GB": 624e12,      # 1248 w/ sparsity
+        "NVIDIA-H100-HBM3-80GB": 1979e12,
+        "NVIDIA-H200-141GB": 1979e12,
+        "NVIDIA-B200-183GB": 4500e12,
+        "NVIDIA-B300-269GB": 5000e12,
+        "AMD-Instinct-MI355X-288GB": 5050e12,
+    },
+    "fp4": {
+        "NVIDIA-A100-SXM4-80GB": 312e12,      # A100 has no FP4 tensor cores -> mxfp4 upcasts to bf16
+        "NVIDIA-H100-HBM3-80GB": 1979e12,     # no FP4 tensor cores -> FP8 path
+        "NVIDIA-H200-141GB": 1979e12,
+        "NVIDIA-B200-183GB": 9000e12,         # 18000 w/ sparsity
+        # Blackwell Ultra is the one part where sparsity is not a clean 2x: NVIDIA quotes
+        # NVFP4 as "15 | 20 PetaFLOPS" dense | with-sparsity, the uplift over Blackwell
+        # having landed on the dense figure. Halving 20000 would understate dense peak by
+        # 1.5x, so the dense figure is taken directly.
+        "NVIDIA-B300-269GB": 15000e12,        # 20000 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 10100e12,
+    },
+    "int4": {
+        "NVIDIA-A100-SXM4-80GB": 1248e12,     # 2496 w/ sparsity
+        "NVIDIA-H100-HBM3-80GB": 1979e12,
+        "NVIDIA-H200-141GB": 1979e12,
+        "NVIDIA-B200-183GB": 9000e12,
+        "NVIDIA-B300-269GB": 15000e12,        # mirrors fp4, as for B200
+        "AMD-Instinct-MI355X-288GB": 10100e12,
+    },
+}
+
+
+def get_peak_flops(gpu_key, precision="bfloat16"):
+    return PEAK_FLOPS_DICT.get((precision or "").lower(), {}).get(gpu_key, 0)
 
 
 DATASET_TOKEN_PROFILE = {
@@ -160,27 +180,10 @@ def kv_per_token_entries(cfg_d: dict, n_layers: int, d_head: int, n_kv_heads: in
 B200_KEY = "NVIDIA-B200-183GB"
 B300_KEY = "NVIDIA-B300-269GB"
 
+# Blackwell bandwidth still needs patching over whatever MoE-CAP supplies; the peak-FLOPS
+# entries these lines used to override are now carried in PEAK_FLOPS_DICT above.
 MEM_BW_DICT.setdefault(B300_KEY, 8000e9)
 MEM_BW_DICT[B200_KEY] = 8000e9
-
-for _p in PEAK_FLOPS_DICT:
-    PEAK_FLOPS_DICT[_p].setdefault(
-        B300_KEY, PEAK_FLOPS_DICT[_p].get(B200_KEY, 0)
-    )
-
-PEAK_FLOPS_DICT["bfloat16"][B200_KEY] = 4500e12
-PEAK_FLOPS_DICT["float16"][B200_KEY] = 4500e12
-PEAK_FLOPS_DICT["fp8"][B200_KEY] = 9000e12
-PEAK_FLOPS_DICT["int8"][B200_KEY] = 9000e12
-PEAK_FLOPS_DICT["fp4"][B200_KEY] = 18000e12
-PEAK_FLOPS_DICT["int4"][B200_KEY] = 18000e12
-
-PEAK_FLOPS_DICT["bfloat16"][B300_KEY] = 5000e12
-PEAK_FLOPS_DICT["float16"][B300_KEY] = 5000e12
-PEAK_FLOPS_DICT["fp8"][B300_KEY] = 10000e12
-PEAK_FLOPS_DICT["int8"][B300_KEY] = 10000e12
-PEAK_FLOPS_DICT["fp4"][B300_KEY] = 20000e12
-PEAK_FLOPS_DICT["int4"][B300_KEY] = 20000e12
 
 
 GPU_TYPE_MAP = {
@@ -508,7 +511,10 @@ def compute_for_run(
         )
         flops_per_token = params_per_token_TB * 1e12 * 2
         flops_per_s = flops_per_token * throughput_tok_s
-        return flops_per_s / (num_gpus * peak_flops / 2)
+        # No /2 here: PEAK_FLOPS_DICT is already on the dense basis for every vendor. The
+        # halving used to stand in for that conversion, but it was applied to AMD entries
+        # that were dense to begin with, overstating their S-MFU 2x against NVIDIA's.
+        return flops_per_s / (num_gpus * peak_flops)
 
     if (
         isinstance(profile_prefill_len, (int, float)) and profile_prefill_len > 0
@@ -566,6 +572,7 @@ def compute_for_run(
             "num_gpus": num_gpus,
             "peak_bandwidth_tb_s": hardware_specs["peak_bandwidth_tb"],
             "peak_flops_tf_s": hardware_specs["peak_flops_tf"],
+            "peak_flops_basis": PEAK_FLOPS_BASIS,
         },
         "activation": {
             "avg_expert_activation_prefill": prefill_act,
