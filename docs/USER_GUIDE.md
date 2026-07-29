@@ -54,13 +54,13 @@ the TEASBench commit for provenance).
 
 - **SWE-bench Lite** additionally needs a Python environment on the login node
   with `agent_cap`, `swe-rex` and `swebench` installed, plus a SWE-agent checkout
-  patched by AgentCAP's `scripts/patch_sweagent_streaming.py`. See §4.7 — on EIDF
+  patched by AgentCAP's `scripts/patch_sweagent_streaming.py`. See §4.8 — on EIDF
   this benchmark runs from the login node, not as an unattended Job.
 
 > **EIDF does not grant pods RBAC**, so `eidf/rbac/teasbench-runner-rbac.yaml`
 > and the in-cluster preflight (§4.6) do not apply here. They are kept for a
 > cluster that does grant it. On EIDF, SWE-bench always uses
-> `PortForwardK8sProvider` — see §4.7.
+> `PortForwardK8sProvider` — see §4.8.
 
 ### Vast.ai only
 
@@ -175,14 +175,15 @@ Check both:
 kubectl -n eidf230ns logs <pod> -c mcp-atlas-sidecar
 ```
 
-**SWE-bench Lite** — *not* an unattended Job on EIDF. See §4.7: the driver runs
+**SWE-bench Lite** — *not* an unattended Job on EIDF. See §4.8: the driver runs
 on a login node and creates the Jobs itself. The GPUs are still used through a
 Kubernetes Job, as always — only the driver process sits outside the cluster.
 
 ### 4.6 Preflight for in-cluster mode (not applicable on EIDF)
 
 > **Skip this on EIDF.** It tests `InClusterK8sProvider`, which needs pod RBAC
-> that EIDF does not grant. Kept for a cluster that does. On EIDF go to §4.7.
+> that EIDF does not grant. Kept for a cluster that does. On EIDF go to §4.7
+> (mechanism check) and §4.8 (running it).
 
 In-cluster SWE-bench depends on two facts about the cluster that are worth
 confirming *before* a GPU job queues, because both fail late and confusingly:
@@ -232,7 +233,53 @@ ServiceAccount.
 If the routability check fails, in-cluster mode is unusable on this cluster; use
 `PortForwardK8sProvider` (§7.3), which needs neither assumption.
 
-### 4.7 SWE-bench Lite smoke test (EIDF)
+### 4.7 Preflight: check the port-forward mechanism
+
+Everything SWE-bench does on EIDF rests on `PortForwardK8sProvider`, so check it
+before committing GPU time. This runs **on a login node**, not as a Job, because
+that is where the provider itself runs. It uses your own kubectl credentials and
+needs no ServiceAccount and no RBAC manifest — which is exactly why this is the
+path EIDF can support.
+
+**Fast probe** (~1 min, no GPU):
+
+```bash
+python3 eidf/preflight/preflight_portforward.py --namespace eidf230ns
+```
+
+It drives the **real** `PortForwardK8sProvider` — OS port allocation, the
+`kubectl port-forward` spawn, the readiness poll, the tunnel-babysitter thread
+and cleanup on release — plus the `kubectl cp` / `kubectl exec` path the
+SWE-bench evaluator uses. Only the sandbox container's payload is substituted
+(busybox serving an `is_alive` file instead of a multi-GB image pip-installing
+swe-rex), because what is under test is the tunnel mechanism, not swe-rex.
+
+The check most worth reading is this one:
+
+```
+  PASS  tunnel still alive after 10s (babysitter working)
+```
+
+A `kubectl port-forward` that dies quietly mid-task is the failure the
+babysitter thread exists to prevent, and the one that would otherwise surface as
+an inexplicable task failure deep into a long run.
+
+The permission unique to this path is `create pods/portforward`; the in-cluster
+provider never needs it, because it talks to pod IPs directly.
+
+**Full-fidelity probe** (minutes, still no GPU):
+
+```bash
+python3 eidf/preflight/preflight_portforward.py --namespace eidf230ns --real-image
+```
+
+`--real-image` drops the busybox substitution for a genuine
+`docker.io/swebench/sweb.eval.x86_64.*` image, additionally proving the multi-GB
+pull works and that `swe-rex` installs and runs inside the instance image — an
+old conda env where a dependency clash is plausible. Pass an instance id to
+override the default (`--real-image django__django-11099`).
+
+### 4.8 SWE-bench Lite on EIDF
 
 **EIDF does not grant pods RBAC**, so SWE-bench here always uses
 `PortForwardK8sProvider`, with the **driver** running on a login node.
@@ -241,29 +288,30 @@ If the routability check fails, in-cluster mode is unusable on this cluster; use
 
 The driver moving off the cluster does **not** mean Kubernetes is bypassed. The
 model runs on GPUs through a Job, exactly as every other TEASBench run does.
-Three kinds of Job are created, all with *your* kubectl credentials:
+Four components, three of them Kubernetes Jobs, all created with *your*
+credentials — and all of it handled for you:
 
 | Component | Where | GPU | Created by |
 |---|---|---|---|
-| **Driver** (`agent_cap.agents`) | login-node VM | no | you, in a shell |
-| **Engine** (sglang/vllm serving the model) | Kubernetes Job | **yes** | you, before the run |
+| **Driver** (`agent_cap.agents`) | login-node VM | no | you, by running the generated script |
+| **Engine** (sglang/vllm serving the model) | Kubernetes Job | **yes** | the driver, at start-up |
 | **Sandbox** (swe-rex, one per task) | Kubernetes Job | no | the driver, at run time |
 | **Eval** (official grading) | Kubernetes Job | no | the driver, at run time |
 
 The driver reaches the engine and each sandbox over `kubectl port-forward`.
 
 Why this is allowed when in-cluster mode is not: *you* may create Jobs and
-port-forward — the §4.8 preflight confirms both on EIDF. What EIDF refuses is
-granting those rights to a **pod's ServiceAccount**. Running the driver as
-yourself sidesteps that entirely.
+port-forward — §4.7 confirms both on EIDF. What EIDF refuses is granting those
+rights to a **pod's ServiceAccount**. Running the driver as yourself sidesteps
+that entirely.
 
 IMO AnswerBench and MCP Atlas are unaffected and still run as ordinary
 unattended Jobs, because neither touches the Kubernetes API.
 
 #### Running it
 
-The pipeline handles all of it. Generation emits **two** files for a SWE-bench
-row on EIDF instead of one:
+The pipeline handles all of it, including the engine. Generation emits **two**
+files for a SWE-bench row on EIDF instead of one:
 
 ```bash
 cd pipeline
@@ -285,78 +333,29 @@ bash out/sglang-gptoss120b-swe-bench-lite-nt100-h200x1.sh
 The script checks prerequisites, submits the engine Job, waits for the model to
 load, opens and babysits the tunnel, runs the benchmark, pushes the results, and
 **deletes the engine Job on exit** — success, failure or Ctrl-C — so an aborted
-run cannot leave GPUs allocated. You never submit the engine manifest by hand.
+run cannot leave GPUs allocated. You never start an engine or submit the engine
+manifest by hand.
 
 Useful flags: `--resume`, `--no-push`, `--namespace`, `--output-root`. Override
 `SWEAGENT_DIR` / `AGENTCAP_DIR` if your checkouts are not in the default places.
 
-Before the first real run, check the mechanism cheaply — three steps, cheapest
-first:
+#### Smoke test first
 
-**1. Check the mechanism** (~1 min, no GPU):
-
-```bash
-python3 eidf/preflight/preflight_portforward.py --namespace eidf230ns
-```
-
-**2. Check the real sandbox image** (minutes, still no GPU):
+The 2-task row in `experiments/smoke_tests_agentic.csv` is the same thing at
+small scale — same driver, same engine Job, same sandboxes, same grading:
 
 ```bash
-python3 eidf/preflight/preflight_portforward.py --namespace eidf230ns --real-image
+cd pipeline
+~/pyvenvs/teasbench/bin/python generate.py \
+    --csv_file=../experiments/smoke_tests_agentic.csv --target_dir=./out
+bash out/vllm-gptoss120b-swe-bench-lite-nt2-a100x1.sh
 ```
-
-`--real-image` drops the busybox substitution and uses a genuine
-`docker.io/swebench/sweb.eval.x86_64.*` image, so it also proves the multi-GB
-pull works and that `swe-rex` installs and runs inside the instance image — an
-old conda env where a dependency clash is plausible. Pass an instance id to
-override the default (`--real-image django__django-11099`).
-
-**3. End-to-end, 2 tasks** (needs an LLM endpoint reachable from the login node):
-
-```bash
-bash eidf/smoke/smoke_swebench_portforward.sh --llm-url http://127.0.0.1:8000/v1
-```
-
-This checks prerequisites first and refuses to start if any fail — including
-whether your SWE-agent checkout is streaming-patched, which if missed produces a
-complete run with empty metrics. It then runs the real agent → sandbox → grading
-path and reports where the outputs landed, plus whether any sandbox Jobs leaked.
 
 A low or zero accuracy on 2 tasks is normal and not a failure signal; what
 matters is that every stage ran and wrote its outputs.
 
-### 4.8 Preflight for the port-forward fallback
-
-If you are going down the fallback route, check it the same way — but note this
-one runs **on a login node**, not as a Job, because that is where the provider
-itself runs. It uses your own kubectl credentials and needs no ServiceAccount
-and no RBAC manifest, which is the whole reason it is the fallback.
-
-```bash
-python3 eidf/preflight/preflight_portforward.py --namespace eidf230ns
-```
-
-It drives the **real** `PortForwardK8sProvider` — OS port allocation, the
-`kubectl port-forward` spawn, the readiness poll, the tunnel-babysitter thread
-and cleanup on release — plus the `kubectl cp` / `kubectl exec` path the
-SWE-bench evaluator uses. Only the sandbox container's payload is substituted
-(busybox serving an `is_alive` file instead of a multi-GB image pip-installing
-swe-rex), because what is under test is the tunnel mechanism, not swe-rex. No
-GPU, seconds rather than minutes.
-
-The check most worth reading is this one:
-
-```
-  PASS  tunnel still alive after 10s (babysitter working)
-```
-
-A `kubectl port-forward` that dies quietly mid-task is the failure this provider's
-babysitter thread exists to prevent, and the one that would otherwise surface as
-an inexplicable task failure deep into a long SWE-bench run.
-
-The permission unique to this path is `create pods/portforward`; the in-cluster
-provider never needs it, because it talks to pod IPs directly.
-
+Run §4.7 first — if the mechanism is broken, this fails for that reason after
+queueing for a GPU.
 ---
 
 ## 5. Running MoE on Vast.ai
@@ -486,7 +485,7 @@ If sandbox creation fails with a `kubectl` permissions error, either apply
 `eidf/rbac/teasbench-runner-rbac.yaml`, or switch to the login-node fallback by
 pointing the run at `PortForwardK8sProvider` instead of `InClusterK8sProvider` —
 that provider uses *your* kubectl credentials via port-forwarding rather than
-the pod's ServiceAccount. Confirm it works first with §4.8.
+the pod's ServiceAccount. Confirm it works first with §4.7.
 
 ### 7.4 MCP Atlas scores lower than expected
 
