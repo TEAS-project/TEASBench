@@ -394,6 +394,7 @@ def compute_for_run(
     metrics: dict, hf_cfg, gpu_key: str, num_gpus: int, prec_str: str,
     avg_prefill_len: float, avg_decode_ctx_len: float,
     force_batch_size_one: bool = False,
+    concurrent: bool = False,
 ) -> dict:
     perf = metrics.get("performance") or {}
     ea = metrics.get("expert_activation") or {}
@@ -520,15 +521,31 @@ def compute_for_run(
         prefill_tp = float(profile_prefill_len) / ttft
     else:
         prefill_tp = prefill_tps or (avg_prefill_len / ttft if avg_prefill_len else 0)
-    prefill_smbu = smbu(prefill_act, ttft, kv_size_prefill_TB) if prefill_act > 0 else None
+    # S-MBU wants the duration of ONE forward pass, not one request's time to first token: it
+    # divides the bytes a pass moves by the time that pass took. Runs from before the harness split
+    # the two report the per-pass mean under `ttft`, so fall back to it and keep them comparable.
+    pass_s = perf.get("prefill_pass_latency_s") or ttft
+    prefill_smbu = smbu(prefill_act, pass_s, kv_size_prefill_TB) if prefill_act > 0 else None
     prefill_smfu = smfu(prefill_tp) if prefill_tp > 0 else None
 
     if isinstance(profile_decode_bs, (int, float)) and profile_decode_bs > 0:
         decoding_tp = float(profile_decode_bs) / tpot
+    elif concurrent:
+        # A concurrent run without a measured decode batch has no node-level rate:
+        # 1/tpot is a single-stream rate, several-fold under what the node served.
+        # Publishing it would silently misprice everything downstream (energy divides
+        # node power by this rate), so withhold the rate instead.
+        decoding_tp = None
     else:
         decoding_tp = output_tps or (1.0 / tpot)
-    decode_smbu = smbu(decode_act, tpot, kv_size_decode_TB) if decode_act > 0 else None
-    decode_smfu = smfu(decoding_tp) if decoding_tp > 0 else None
+    # The decode KV term needs the run's own context length; without a usable token
+    # count avg_decode_ctx_len is 0 and S-MBU would silently publish a KV-less value
+    # that understates long-context runs. Withhold it instead.
+    decode_smbu = (
+        smbu(decode_act, tpot, kv_size_decode_TB)
+        if decode_act > 0 and avg_decode_ctx_len > 0 else None
+    )
+    decode_smfu = smfu(decoding_tp) if decoding_tp else None
 
     # Backstop: utilisation > 100% is physically impossible (bad clock, cache-inflated
     # prefill accounting, or a mislabeled precision peak). Null it rather than emit an
@@ -691,6 +708,7 @@ def main() -> int:
             metrics, hf_cfg, gpu_key, meta_num_gpus, prec_str,
             prefill_len, decode_ctx_len,
             force_batch_size_one=info["batch_size_dir"].startswith("batch-size-1"),
+            concurrent=info["batch_size_dir"].startswith("batch-size-default"),
         )
         if "skipped" in result:
             skipped += 1

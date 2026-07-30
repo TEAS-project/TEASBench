@@ -307,6 +307,25 @@ def need_rent_prices_message(needed: list[str], have: dict[str, float]) -> str:
 
 
 
+def profile_usable(ttft, tpot, batch_profile: dict) -> bool:
+    """True when build_cost_metrics can take the batch_token_profile path.
+
+    A partial profile (e.g. a withheld token count) must fail this whole test:
+    on concurrent runs the single-stream fallback overstates cost by roughly the
+    achieved batch, so the caller skips those runs rather than falling back.
+    """
+    decode_bs = batch_profile.get("decode_avg_batch_size")
+    decode_tok = batch_profile.get("decode_generated_tokens_per_request")
+    prefill_bs = batch_profile.get("prefill_avg_batch_size")
+    return (
+        isinstance(ttft, (int, float))
+        and isinstance(tpot, (int, float)) and tpot > 0
+        and isinstance(decode_bs, (int, float)) and decode_bs > 0
+        and isinstance(decode_tok, (int, float)) and decode_tok >= 0
+        and isinstance(prefill_bs, (int, float)) and prefill_bs > 0
+    )
+
+
 def build_cost_metrics(
     *,
     price_per_s: float,
@@ -335,13 +354,7 @@ def build_cost_metrics(
     prefill_tokens_per_request = batch_profile.get("prefill_tokens_per_request")
     price_per_hour = price_per_s * 3600.0
 
-    if (
-        isinstance(ttft, (int, float))
-        and isinstance(tpot, (int, float)) and tpot > 0
-        and isinstance(decode_avg_batch_size, (int, float)) and decode_avg_batch_size > 0
-        and isinstance(decode_tokens_per_request, (int, float)) and decode_tokens_per_request >= 0
-        and isinstance(prefill_avg_batch_size, (int, float)) and prefill_avg_batch_size > 0
-    ):
+    if profile_usable(ttft, tpot, batch_profile):
         prefill_seconds_per_request = ttft / prefill_avg_batch_size
         decode_seconds_per_request = (tpot * decode_tokens_per_request) / decode_avg_batch_size
         request_seconds = prefill_seconds_per_request + decode_seconds_per_request
@@ -747,12 +760,36 @@ def main() -> int:
             skipped += 1
             continue
 
-        # Concurrent run with no measured batch profile: the single-stream fallback would inflate
-        # cost 10-20x for a run that actually batched. Skip it — a blank is more honest than a
+        # batch-size-1 pins concurrency server-side, so both average batch sizes are 1.0 by
+        # construction. A profile violating that bound is an accounting artefact, not a
+        # measurement — discard it rather than price on it. Costing then takes the
+        # single-stream fallback, whose arithmetic is exact at batch 1 (cost/1M = tpot x price)
+        # and whose per-request cost rests on e2e rather than a token count from the same
+        # suspect block. The violating values stay untouched in metrics.json so the audit can
+        # keep flagging them; the sidecar records the drop below.
+        single = any(p == "batch-size-1" for p in f.parts)
+        profile_invalid = None
+        if single and batch_profile:
+            off = {
+                k: batch_profile[k]
+                for k in ("prefill_avg_batch_size", "decode_avg_batch_size")
+                if isinstance(batch_profile.get(k), (int, float))
+                and abs(batch_profile[k] - 1.0) > 1e-9
+            }
+            if off:
+                profile_invalid = {
+                    "reason": "avg batch size violates the single-stream bound of 1.0; "
+                              "profile not used for costing",
+                    "recorded": off,
+                }
+                batch_profile = {}
+
+        # Concurrent run whose batch profile cannot price it (absent, or partial — a missing
+        # field routes build_cost_metrics to the single-stream fallback, which inflates cost
+        # 10-20x for a run that actually batched). Skip it — a blank is more honest than a
         # fabricated number. Single-query runs keep the fallback (single-stream is their real cost).
         concurrent = any(p.startswith("batch-size-default") for p in f.parts)
-        decode_batch = batch_profile.get("decode_avg_batch_size")
-        if concurrent and not (isinstance(decode_batch, (int, float)) and decode_batch > 0):
+        if concurrent and not profile_usable(ttft, tpot, batch_profile):
             # Remove any previously-committed cost so the skip is effective, not shadowed by a stale file.
             stale = cost_path_for(f)
             if stale.exists() and not args.dry_run:
@@ -777,6 +814,8 @@ def main() -> int:
                 "tpot_s": tpot,
             },
         }
+        if profile_invalid:
+            payload["batch_profile_invalid"] = profile_invalid
 
         if gpu_key in rent_prices:
             price_per_gpu_h = rent_prices[gpu_key]
