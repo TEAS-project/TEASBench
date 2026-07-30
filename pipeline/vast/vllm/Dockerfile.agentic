@@ -49,10 +49,10 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 # modal, but installing at build time keeps startup cost off the rented GPU clock.
 # On Vast.ai the SWE-bench sandbox substrate is Modal, which swe-rex supports
 # natively -- so unlike EIDF there is no sandbox provider and no kubectl here.
-RUN python3 -m pip install --no-cache-dir \
+RUN python3 -m pip install --ignore-installed --no-cache-dir \
         'swe-rex>=1.4.0' 'swebench>=2.0' modal boto3 && \
     git clone https://github.com/SWE-agent/SWE-agent.git /opt/swe_agent && \
-    python3 -m pip install --no-cache-dir -e /opt/swe_agent
+    python3 -m pip install --ignore-installed --no-cache-dir -e /opt/swe_agent
 
 # Patch SWE-agent's single litellm.completion call to route through
 # agent_cap.sweagent_streaming, which is what captures per-call TTFT/TPOT and the
