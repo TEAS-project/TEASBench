@@ -87,11 +87,13 @@ echo "=============================================================="
 
 ENGINE_JOB=""
 PF_PID=""
+LOGS_PID=""
 
 cleanup() {
     local rc=$?
     echo
     echo "[cleanup] tearing down"
+    [ -n "$LOGS_PID" ] && kill "$LOGS_PID" 2>/dev/null && echo "  engine log stream stopped"
     [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null && echo "  port-forward stopped"
     if [ -n "$ENGINE_JOB" ]; then
         # The engine holds GPUs; deleting it is the single most important thing
@@ -158,6 +160,12 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 [ -n "$ENGINE_POD" ] || { echo "ERROR: engine pod not Running within ${ENGINE_TIMEOUT}s" >&2; exit 1; }
 echo "  pod: $ENGINE_POD"
+
+# The server's own stdout/stderr (weight loading, warnings, crashes) is
+# otherwise invisible while we sit in the readiness poll below.
+echo "  streaming engine logs -> $RUN_DIR/engine.log"
+kubectl -n "$NAMESPACE" logs -f "$ENGINE_POD" 2>&1 | tee -a "$RUN_DIR/engine.log" &
+LOGS_PID=$!
 
 # OS-assigned local port: a fixed one collides with a stale forward from a
 # previous crashed run, which would silently target the wrong engine.
