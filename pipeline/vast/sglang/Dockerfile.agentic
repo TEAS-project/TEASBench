@@ -54,6 +54,15 @@ RUN python3 -m pip install --no-cache-dir \
     git clone https://github.com/SWE-agent/SWE-agent.git /opt/swe_agent && \
     python3 -m pip install --ignore-installed --no-cache-dir -e /opt/swe_agent
 
+# SWE-agent has just pulled in versions of huggingface-hub and tokenizers that
+# are too new for the sglang image's bundled transformers/engine. Re-pin them
+# to the versions transformers expects.
+RUN python3 -m pip install --no-cache-dir \
+        'huggingface-hub>=0.34.0,<1.0' 'tokenizers>=0.22.0,<=0.23.0'
+
+# agent_cap drives a Jupyter kernel so we also need this and ipykernel.
+RUN python3 -m pip install --no-cache-dir jupyter_client ipykernel
+
 # Patch SWE-agent's single litellm.completion call to route through
 # agent_cap.sweagent_streaming, which is what captures per-call TTFT/TPOT and the
 # visible/reasoning/cached token split. Without this the agentic metrics are empty.
