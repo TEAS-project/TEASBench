@@ -134,6 +134,10 @@ spec:
             mv metrics*.json metrics.json
             mv detailed_results* detailed_results.jsonl
             mv output_data*.jsonl output_data.jsonl
+            # The sglang recorder writes its raw per-forward-pass dump under the
+            # recorder dir (not the model dir the cp above gathers), so collect it
+            # explicitly; absent on engines that do not write one.
+            find "${SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR:-$HOME/expert_records}" -name 'expert_distribution_record.jsonl' -exec cp {} $RUN_DIR/ \; 2>/dev/null || true
                         
             echo "Server stopped. Copying files to pvc..."
 
