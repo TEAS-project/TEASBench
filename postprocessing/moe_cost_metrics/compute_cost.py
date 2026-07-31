@@ -319,20 +319,21 @@ def need_rent_prices_message(needed: list[str], have: dict[str, float]) -> str:
 
 
 def decode_profile_usable(tpot, batch_profile: dict) -> bool:
-    """True when the DECODE-derived outputs can be computed: the per-1M output-token
-    cost and the decode seconds. These need only `tpot` and the decode fields —
-    a missing prefill batch does not affect them.
+    """True when the core DECODE-derived outputs can be computed: the per-1M
+    output-token cost and the effective output rate. These need only `tpot` and
+    `decode_avg_batch_size` — a missing prefill batch does not affect them, and
+    the decode token count is deliberately not required: it feeds only the
+    per-request seconds/cost outputs, which report null when it is withheld
+    rather than taking the per-1M cost down with them.
 
-    A partial decode profile must still fail: on concurrent runs the single-stream
+    A missing decode batch must still fail: on concurrent runs the single-stream
     fallback overstates cost by roughly the achieved batch, so the caller skips
     those runs rather than falling back.
     """
     decode_bs = batch_profile.get("decode_avg_batch_size")
-    decode_tok = batch_profile.get("decode_generated_tokens_per_request")
     return (
         isinstance(tpot, (int, float)) and tpot > 0
         and isinstance(decode_bs, (int, float)) and decode_bs > 0
-        and isinstance(decode_tok, (int, float)) and decode_tok >= 0
     )
 
 
@@ -387,20 +388,27 @@ def build_cost_metrics(
         # they are the only outputs that depend on it, and the per-1M output-token
         # cost below is computed from the decode fields alone.
         have_prefill = prefill_profile_usable(ttft, batch_profile)
+        have_decode_tok = isinstance(decode_tokens_per_request, (int, float)) and decode_tokens_per_request >= 0
         prefill_seconds_per_request = (ttft / prefill_avg_batch_size) if have_prefill else None
-        decode_seconds_per_request = (tpot * decode_tokens_per_request) / decode_avg_batch_size
+        decode_seconds_per_request = (
+            (tpot * decode_tokens_per_request) / decode_avg_batch_size
+            if have_decode_tok else None
+        )
         request_seconds = (
             prefill_seconds_per_request + decode_seconds_per_request
-            if have_prefill else None
+            if have_prefill and have_decode_tok else None
         )
         output_token_seconds = tpot / decode_avg_batch_size
         effective_output_tokens_per_s = decode_avg_batch_size / tpot
-        avg_cost_per_request_usd = (request_seconds * price_per_s) if have_prefill else None
+        avg_cost_per_request_usd = (request_seconds * price_per_s) if request_seconds is not None else None
         avg_cost_per_1m_output_tokens_usd = output_token_seconds * 1_000_000 * price_per_s
         prefill_cost_per_request_usd = (
             prefill_seconds_per_request * price_per_s if have_prefill else None
         )
-        decode_cost_per_request_usd = decode_seconds_per_request * price_per_s
+        decode_cost_per_request_usd = (
+            decode_seconds_per_request * price_per_s
+            if decode_seconds_per_request is not None else None
+        )
         prefill_tokens_per_s = None
         if have_prefill and isinstance(prefill_tokens_per_request, (int, float)) and prefill_tokens_per_request > 0:
             prefill_tokens_per_s = prefill_tokens_per_request * prefill_avg_batch_size / ttft
@@ -410,7 +418,7 @@ def build_cost_metrics(
             "method": "batch_token_profile",
             "prefill_avg_batch_size": float(prefill_avg_batch_size) if have_prefill else None,
             "decode_avg_batch_size": float(decode_avg_batch_size),
-            "decode_generated_tokens_per_request": float(decode_tokens_per_request),
+            "decode_generated_tokens_per_request": float(decode_tokens_per_request) if have_decode_tok else None,
             "effective_output_tokens_per_s": effective_output_tokens_per_s,
             "formula": "price_per_second_usd * tpot_s / decode_avg_batch_size * 1e6",
             "breakdown": {
@@ -431,7 +439,7 @@ def build_cost_metrics(
                         if isinstance(prefill_tokens_per_request, (int, float))
                         else None
                     ),
-                    "decode_generated_tokens_per_request": float(decode_tokens_per_request),
+                    "decode_generated_tokens_per_request": float(decode_tokens_per_request) if have_decode_tok else None,
                 },
                 "throughput": {
                     "effective_output_tokens_per_s": effective_output_tokens_per_s,
