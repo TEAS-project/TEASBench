@@ -714,6 +714,14 @@ def main() -> int:
             skipped += 1
             reason = str(result["skipped"]).split(",")[0]
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            # A withheld ttft/tpot invalidates any sidecar computed from the run's earlier
+            # values; remove it so the skip is effective, not shadowed by a stale file.
+            # Environmental skips (missing hardware spec, and the config/model skips above)
+            # keep the existing sidecar — a transient lookup failure must not delete it.
+            if reason == "ttft/tpot missing":
+                stale = sparsity_path_for(f)
+                if stale.exists() and not args.dry_run:
+                    stale.unlink()
             continue
 
         payload = {
