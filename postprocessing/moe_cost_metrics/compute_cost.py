@@ -104,6 +104,17 @@ GPU_SPECS: dict[str, dict] = {
         "tdp_w": 300,
         "tdp_source": "https://docs.tenstorrent.com/aibs/blackhole/",
     },
+    # Cerebras publishes no CS-3 list price: the figure is derived from the Galaxy-1
+    # contract ($100M / 32 nodes = $3.13M) less bundled services, and the public range
+    # spans $1.56M (bulk) to ~$4M (full MemoryX). CS-3 is buy-only, so this estimate is
+    # the whole cost basis for its cells — unlike every other entry here, which cites a
+    # vendor or retail price. The unit is one CS-3 system.
+    "cs3": {
+        "price_per_unit_usd": 2500000.0,
+        "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
+        "tdp_w": 23000,
+        "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
+    },
 }
 
 CPU_SPECS: dict[str, dict] = {
