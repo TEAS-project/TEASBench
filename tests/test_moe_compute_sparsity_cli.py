@@ -12,7 +12,14 @@ class DummyCfg:
 
 class MoeComputeSparsityTests(unittest.TestCase):
 
-    def test_prefill_smfu_throughput_uses_prefill_batch_size(self):
+    def test_prefill_throughput_is_per_request_not_scaled_by_prefill_batch(self):
+        """Prefill throughput is one request's tokens over its TTFT.
+
+        It is deliberately NOT multiplied by prefill_avg_batch_size: TTFT is a
+        single request's time to first token, so the batch's other prefills are
+        not all realised within it. Scaling by the batch over-counted throughput
+        and pushed S-MFU above 100%.
+        """
         metrics = {
             "performance": {"ttft": 0.5, "tpot": 0.01},
             "expert_activation": {
@@ -44,7 +51,11 @@ class MoeComputeSparsityTests(unittest.TestCase):
             avg_prefill_len=60.0, avg_decode_ctx_len=210.0,
         )
 
-        self.assertEqual(result["prefill"]["prefill_tokens_per_s"], 400.0)
+        # 20 prefill tokens per request / 0.5 s TTFT -- the batch of 10 does not enter.
+        self.assertEqual(result["prefill"]["prefill_tokens_per_s"], 40.0)
+        # Regression guard: 400.0 is the abandoned batch-scaled value.
+        self.assertNotEqual(result["prefill"]["prefill_tokens_per_s"], 400.0)
+        # Decode DOES scale with its batch: 16 sequences / 0.01 s per step.
         self.assertEqual(result["decode"]["output_tokens_per_s"], 1600.0)
         self.assertGreater(result["prefill"]["S_MFU"], 0.0)
         self.assertGreater(result["decode"]["S_MFU"], 0.0)

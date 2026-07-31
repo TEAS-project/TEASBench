@@ -318,22 +318,39 @@ def need_rent_prices_message(needed: list[str], have: dict[str, float]) -> str:
 
 
 
-def profile_usable(ttft, tpot, batch_profile: dict) -> bool:
-    """True when build_cost_metrics can take the batch_token_profile path.
+def decode_profile_usable(tpot, batch_profile: dict) -> bool:
+    """True when the DECODE-derived outputs can be computed: the per-1M output-token
+    cost and the decode seconds. These need only `tpot` and the decode fields —
+    a missing prefill batch does not affect them.
 
-    A partial profile (e.g. a withheld token count) must fail this whole test:
-    on concurrent runs the single-stream fallback overstates cost by roughly the
-    achieved batch, so the caller skips those runs rather than falling back.
+    A partial decode profile must still fail: on concurrent runs the single-stream
+    fallback overstates cost by roughly the achieved batch, so the caller skips
+    those runs rather than falling back.
     """
     decode_bs = batch_profile.get("decode_avg_batch_size")
     decode_tok = batch_profile.get("decode_generated_tokens_per_request")
+    return (
+        isinstance(tpot, (int, float)) and tpot > 0
+        and isinstance(decode_bs, (int, float)) and decode_bs > 0
+        and isinstance(decode_tok, (int, float)) and decode_tok >= 0
+    )
+
+
+def prefill_profile_usable(ttft, batch_profile: dict) -> bool:
+    """True when the PREFILL-derived outputs can be computed: the prefill seconds,
+    the per-request cost that includes them, and the prefill token rate. A run whose
+    prefill batch is withheld reports these as null and keeps its decode cost."""
     prefill_bs = batch_profile.get("prefill_avg_batch_size")
     return (
         isinstance(ttft, (int, float))
-        and isinstance(tpot, (int, float)) and tpot > 0
-        and isinstance(decode_bs, (int, float)) and decode_bs > 0
-        and isinstance(decode_tok, (int, float)) and decode_tok >= 0
         and isinstance(prefill_bs, (int, float)) and prefill_bs > 0
+    )
+
+
+def profile_usable(ttft, tpot, batch_profile: dict) -> bool:
+    """True when BOTH halves are computable — the full batch_token_profile path."""
+    return decode_profile_usable(tpot, batch_profile) and prefill_profile_usable(
+        ttft, batch_profile
     )
 
 
@@ -365,24 +382,33 @@ def build_cost_metrics(
     prefill_tokens_per_request = batch_profile.get("prefill_tokens_per_request")
     price_per_hour = price_per_s * 3600.0
 
-    if profile_usable(ttft, tpot, batch_profile):
-        prefill_seconds_per_request = ttft / prefill_avg_batch_size
+    if decode_profile_usable(tpot, batch_profile):
+        # Prefill terms are withheld, not estimated, when the prefill batch is null:
+        # they are the only outputs that depend on it, and the per-1M output-token
+        # cost below is computed from the decode fields alone.
+        have_prefill = prefill_profile_usable(ttft, batch_profile)
+        prefill_seconds_per_request = (ttft / prefill_avg_batch_size) if have_prefill else None
         decode_seconds_per_request = (tpot * decode_tokens_per_request) / decode_avg_batch_size
-        request_seconds = prefill_seconds_per_request + decode_seconds_per_request
+        request_seconds = (
+            prefill_seconds_per_request + decode_seconds_per_request
+            if have_prefill else None
+        )
         output_token_seconds = tpot / decode_avg_batch_size
         effective_output_tokens_per_s = decode_avg_batch_size / tpot
-        avg_cost_per_request_usd = request_seconds * price_per_s
+        avg_cost_per_request_usd = (request_seconds * price_per_s) if have_prefill else None
         avg_cost_per_1m_output_tokens_usd = output_token_seconds * 1_000_000 * price_per_s
-        prefill_cost_per_request_usd = prefill_seconds_per_request * price_per_s
+        prefill_cost_per_request_usd = (
+            prefill_seconds_per_request * price_per_s if have_prefill else None
+        )
         decode_cost_per_request_usd = decode_seconds_per_request * price_per_s
         prefill_tokens_per_s = None
-        if isinstance(prefill_tokens_per_request, (int, float)) and prefill_tokens_per_request > 0:
+        if have_prefill and isinstance(prefill_tokens_per_request, (int, float)) and prefill_tokens_per_request > 0:
             prefill_tokens_per_s = prefill_tokens_per_request * prefill_avg_batch_size / ttft
         return {
             "avg_cost_per_request_usd": avg_cost_per_request_usd,
             "avg_cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
             "method": "batch_token_profile",
-            "prefill_avg_batch_size": float(prefill_avg_batch_size),
+            "prefill_avg_batch_size": float(prefill_avg_batch_size) if have_prefill else None,
             "decode_avg_batch_size": float(decode_avg_batch_size),
             "decode_generated_tokens_per_request": float(decode_tokens_per_request),
             "effective_output_tokens_per_s": effective_output_tokens_per_s,
@@ -398,7 +424,7 @@ def build_cost_metrics(
                     "tpot_s": tpot,
                 },
                 "batch_profile": {
-                    "prefill_avg_batch_size": float(prefill_avg_batch_size),
+                    "prefill_avg_batch_size": float(prefill_avg_batch_size) if have_prefill else None,
                     "decode_avg_batch_size": float(decode_avg_batch_size),
                     "prefill_tokens_per_request": (
                         float(prefill_tokens_per_request)
@@ -800,7 +826,7 @@ def main() -> int:
         # 10-20x for a run that actually batched). Skip it — a blank is more honest than a
         # fabricated number. Single-query runs keep the fallback (single-stream is their real cost).
         concurrent = any(p.startswith("batch-size-default") for p in f.parts)
-        if concurrent and not profile_usable(ttft, tpot, batch_profile):
+        if concurrent and not decode_profile_usable(tpot, batch_profile):
             # Remove any previously-committed cost so the skip is effective, not shadowed by a stale file.
             stale = cost_path_for(f)
             if stale.exists() and not args.dry_run:
