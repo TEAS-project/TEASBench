@@ -6,6 +6,12 @@ Two top-level metrics (identical schema for rent and buy):
   - avg_cost_per_request_usd
   - avg_cost_per_1M_output_tokens_usd
 
+Each rent/buy block also carries a `wall` sub-block pricing the whole-run wall clock:
+  - node_seconds_per_request = e2e_s (run makespan / N requests)
+  - cost_per_request_usd     = price_per_second * node_seconds_per_request
+This basis needs no batch profile, so it is present even on concurrent runs whose
+profile cannot support the per-token metrics (those runs get a wall-only block).
+
 When batch_token_profile is available, continuous-batching cost is amortized as:
   - prefill_seconds_per_request = TTFT / prefill_avg_batch_size
   - decode_seconds_per_request  = TPOT * decode_tokens_per_request / decode_avg_batch_size
@@ -504,6 +510,21 @@ def build_cost_metrics(
         },
     }
 
+def build_wall_block(price_per_s: float, e2e_s: float) -> dict:
+    """Wall-clock per-request cost: the node's whole run time divided over its requests.
+
+    e2e_s is the run makespan / N, so price * e2e_s charges every second the node spent
+    on the run — prefill, queueing and gaps included — to the requests it served. It is
+    a different quantity from avg_cost_per_request_usd, which charges engine-attributable
+    prefill+decode time only.
+    """
+    return {
+        "node_seconds_per_request": e2e_s,
+        "cost_per_request_usd": e2e_s * price_per_s,
+        "formula": "price_per_second_usd * node_seconds_per_request",
+    }
+
+
 def build_buy_block(
     gpu_key: str,
     num_gpus: int,
@@ -521,6 +542,7 @@ def build_buy_block(
     electricity_usd_per_kwh: float,
     scale_other_capital: float,
     buy_price_quote_time: Optional[str] = None,
+    include_token_cost: bool = True,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
     host = gpu_host_cpu.get(gpu_key)
@@ -571,13 +593,14 @@ def build_buy_block(
         "amortized_capital_usd_per_hour": amort_per_h,
         "energy_usd_per_hour": energy_per_h,
         "effective_hourly_rate_usd": effective_per_h,
-        "cost": build_cost_metrics(
+        "wall": build_wall_block(effective_per_s, e2e_s),
+        **({"cost": build_cost_metrics(
             price_per_s=effective_per_s,
             e2e_s=e2e_s,
             ttft=ttft,
             tpot=tpot,
             batch_profile=batch_profile,
-        ),
+        )} if include_token_cost else {}),
     }
 
 
@@ -779,7 +802,7 @@ def main() -> int:
 
     written = 0
     skipped = 0
-    skipped_no_profile = 0
+    wall_only = 0
     for f in metrics_files:
         info = describe_run(f, root)
         parsed = parse_gpu_dir(info["gpu_dir"])
@@ -801,7 +824,7 @@ def main() -> int:
             request_rate = perf.get("request/s")
             if request_rate:
                 e2e_s = 1.0 / request_rate
-        if e2e_s is None or tpot is None:
+        if e2e_s is None:
             skipped += 1
             continue
 
@@ -829,18 +852,16 @@ def main() -> int:
                 }
                 batch_profile = {}
 
-        # Concurrent run whose batch profile cannot price it (absent, or partial — a missing
-        # field routes build_cost_metrics to the single-stream fallback, which inflates cost
-        # 10-20x for a run that actually batched). Skip it — a blank is more honest than a
-        # fabricated number. Single-query runs keep the fallback (single-stream is their real cost).
+        # Concurrent run whose batch profile cannot price the per-token metrics (absent, or
+        # partial — a missing field routes build_cost_metrics to the single-stream fallback,
+        # which inflates cost 10-20x for a run that actually batched). Those runs keep their
+        # wall-clock per-request cost, which needs no profile, and omit the `cost` block —
+        # a blank per-token cost is more honest than a fabricated one. Single-query runs
+        # keep the fallback (single-stream is their real cost).
         concurrent = any(p.startswith("batch-size-default") for p in f.parts)
-        if concurrent and not decode_profile_usable(tpot, batch_profile):
-            # Remove any previously-committed cost so the skip is effective, not shadowed by a stale file.
-            stale = cost_path_for(f)
-            if stale.exists() and not args.dry_run:
-                stale.unlink()
-            skipped_no_profile += 1
-            continue
+        token_cost_ok = tpot is not None and not (concurrent and not decode_profile_usable(tpot, batch_profile))
+        if not token_cost_ok:
+            wall_only += 1
 
         payload = {
             "recorded_at": recorded_at,
@@ -872,14 +893,16 @@ def main() -> int:
                 "total_hourly_rate_usd": hourly_rate,
                 "price_per_second_usd": price_per_s,
                 "price_source": rent_price_sources.get(gpu_key, DEFAULT_RENT_PRICE_SOURCE),
-                "cost": build_cost_metrics(
+                "wall": build_wall_block(price_per_s, e2e_s),
+            }
+            if token_cost_ok:
+                payload["rent"]["cost"] = build_cost_metrics(
                     price_per_s=price_per_s,
                     e2e_s=e2e_s,
                     ttft=ttft,
                     tpot=tpot,
                     batch_profile=batch_profile,
-                ),
-            }
+                )
 
         buy = build_buy_block(
             gpu_key, num_gpus, e2e_s, ttft, tpot, batch_profile,
@@ -890,6 +913,7 @@ def main() -> int:
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
             buy_price_quote_time=buy_price_quote_time,
+            include_token_cost=token_cost_ok,
         )
         if buy is not None:
             payload["buy"] = buy
@@ -901,8 +925,8 @@ def main() -> int:
             out_path.write_text(json.dumps(payload, indent=2) + "\n")
         written += 1
 
-    print(f"\nWrote {written} cost JSON files (skipped {skipped}, "
-          f"skipped {skipped_no_profile} concurrent runs with no batch profile)")
+    print(f"\nWrote {written} cost JSON files (skipped {skipped}; "
+          f"{wall_only} concurrent runs with no batch profile carry wall-clock cost only)")
     return 0
 
 

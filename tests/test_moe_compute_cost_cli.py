@@ -107,6 +107,87 @@ class MoeComputeCostCliTests(unittest.TestCase):
             self.assertEqual(cost["buy"]["base_lifetime_hours"], 1000.0)
             self.assertEqual(cost["buy"]["utilisation"], 0.25)
 
+    def test_wall_block_present_on_rent_and_buy(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = make_batched_run(root)
+
+            subprocess.run([
+                sys.executable, str(SCRIPT),
+                "--root", str(root / "moe"),
+                "--rent-price", "b200=3.6",
+            ], check=True, cwd=REPO, text=True, capture_output=True)
+
+            cost = json.loads((run / "cost.json").read_text())
+            rent_wall = cost["rent"]["wall"]
+            self.assertEqual(rent_wall["node_seconds_per_request"], 10.0)
+            self.assertAlmostEqual(rent_wall["cost_per_request_usd"], 3.6 / 3600 * 10.0)
+            buy_wall = cost["buy"]["wall"]
+            self.assertEqual(buy_wall["node_seconds_per_request"], 10.0)
+            self.assertAlmostEqual(
+                buy_wall["cost_per_request_usd"],
+                cost["buy"]["effective_hourly_rate_usd"] / 3600 * 10.0,
+            )
+
+    def test_concurrent_run_without_profile_gets_wall_only_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = root / "moe" / "vastai" / "sglang" / "gpt-oss-120b" / "gsm8k_256samples" / "b200x1" / "batch-size-default" / "20260101-0000"
+            run.mkdir(parents=True)
+            (run / "metrics.json").write_text(json.dumps({
+                "performance": {"e2e_s": 10.0, "ttft": 0.2, "tpot": 0.01},
+            }))
+            (run / "metadata.json").write_text(json.dumps({"system_environment": {"inference_engine_version": "test"}}))
+
+            subprocess.run([
+                sys.executable, str(SCRIPT),
+                "--root", str(root / "moe"),
+                "--rent-price", "b200=3.6",
+            ], check=True, cwd=REPO, text=True, capture_output=True)
+
+            cost = json.loads((run / "cost.json").read_text())
+            self.assertNotIn("cost", cost["rent"])
+            self.assertNotIn("cost", cost["buy"])
+            self.assertAlmostEqual(cost["rent"]["wall"]["cost_per_request_usd"], 0.01)
+            self.assertIn("wall", cost["buy"])
+
+    def test_single_stream_run_keeps_token_cost_beside_wall(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = make_run(root)  # batch-size-1, no batch profile
+
+            subprocess.run([
+                sys.executable, str(SCRIPT),
+                "--root", str(root / "moe"),
+                "--rent-price", "b200=3.6",
+            ], check=True, cwd=REPO, text=True, capture_output=True)
+
+            cost = json.loads((run / "cost.json").read_text())
+            self.assertIn("cost", cost["rent"])
+            self.assertEqual(cost["rent"]["cost"]["method"], "latency_tpot_no_batch_profile")
+            self.assertAlmostEqual(cost["rent"]["wall"]["cost_per_request_usd"], 0.01)
+
+    def test_newer_schema_recovers_e2e_from_request_rate(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = root / "moe" / "vastai" / "sglang" / "gpt-oss-120b" / "gsm8k_256samples" / "b200x1" / "batch-size-1" / "20260101-0000"
+            run.mkdir(parents=True)
+            (run / "metrics.json").write_text(json.dumps({
+                "performance": {"request/s": 0.1, "ttft": 0.1, "tpot": 0.002},
+            }))
+            (run / "metadata.json").write_text(json.dumps({"system_environment": {"inference_engine_version": "test"}}))
+
+            subprocess.run([
+                sys.executable, str(SCRIPT),
+                "--root", str(root / "moe"),
+                "--rent-price", "b200=3.6",
+            ], check=True, cwd=REPO, text=True, capture_output=True)
+
+            cost = json.loads((run / "cost.json").read_text())
+            self.assertEqual(cost["performance"]["e2e_s"], 10.0)
+            self.assertEqual(cost["rent"]["wall"]["node_seconds_per_request"], 10.0)
+            self.assertAlmostEqual(cost["rent"]["wall"]["cost_per_request_usd"], 0.01)
+
     def test_invalid_utilisation_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
