@@ -491,9 +491,14 @@ def compute_for_run(
         }
 
     def smbu(activation: float, time_s: float, kv_TB: float) -> float:
+        # `activation` is the recorder's mean of unique routed experts over ALL
+        # layers (dense layers contribute zeros), so total routed-expert loads
+        # are activation x n_layers; shared experts and routers exist per MoE
+        # layer only. On all-MoE models the two forms coincide.
         bytes_loaded_TB = (
             n_layers * attn_size_per_token_TB
-            + num_moe_layers * (activation * expert_size_TB + shared_size_TB + router_size_TB)
+            + n_layers * activation * expert_size_TB
+            + num_moe_layers * (shared_size_TB + router_size_TB)
             + num_dense_layers * dense_size_TB
             + kv_TB
         )
