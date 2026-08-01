@@ -412,18 +412,41 @@ def _per_token_scale(output_tokens: float) -> float:
     return float("nan")
 
 
-def achieved_concurrency(perf: dict, latencies: list[float]) -> float:
+def achieved_concurrency(perf: dict, latencies: list[float], n_tasks=None) -> float:
     """Mean tasks in flight = total task-seconds / wall-clock seconds; 1.0 when not derivable.
 
     A run that executes tasks concurrently finishes N of them in far less than N x avg_e2e, so
     charging each task the whole node for its own wall time bills the node once per task in flight.
     Costs are therefore amortised over this value, which keeps a concurrent run comparable with a
-    serial one."""
+    serial one. Runs shipping no per-task rows but recording avg_e2e_latency_s use the identity
+    sum(latencies) == avg_e2e_latency_s * n_tasks, so the fallback measures the same quantity."""
+    # Wall recovery is uniform across the three agentic wall-time fields:
+    # total_wall_time_min is the field defined as the run wall; a producer that omits
+    # it writes the run wall in e2e_s (the swe/mcp producer outright; the IMO forks as
+    # the serial task loop's total, the same quantity on a serial run).
+    # avg_e2e_latency_s is never a wall - it is the per-task mean.
+    # Guard: a wall is physically >= the longest task; an e2e_s below max(latencies)
+    # is a per-request MEAN from some future producer and must not be read as a wall,
+    # or concurrency would inflate toward N and undercost every task.
     wall_min = perf.get("total_wall_time_min")
-    if not wall_min or not latencies:
+    if wall_min:
+        wall_s = wall_min * 60.0
+    else:
+        wall_s = perf.get("e2e_s")
+        if wall_s and latencies and wall_s < max(latencies):
+            wall_s = None
+        elif wall_s and not latencies and perf.get("avg_e2e_latency_s") and wall_s < perf["avg_e2e_latency_s"]:
+            wall_s = None  # same guard without rows: a wall is >= the mean too
+    if not wall_s:
         return 1.0
-    c = sum(latencies) / (wall_min * 60.0)
-    return c if c >= 1.0 else 1.0
+    if latencies:
+        c = sum(latencies) / wall_s
+        return c if c >= 1.0 else 1.0
+    avg = perf.get("avg_e2e_latency_s")
+    if avg and n_tasks:
+        c = avg * n_tasks / wall_s
+        return c if c >= 1.0 else 1.0
+    return 1.0
 
 
 def compute_costs_lumped(
@@ -651,7 +674,8 @@ def main() -> int:
 
         # Runs that omit the end-to-end summary fields still record each task individually.
         latencies = task_latencies(f)
-        concurrency = achieved_concurrency(perf, latencies)
+        n_tasks = (metrics.get("quality") or {}).get("total_examples")
+        concurrency = achieved_concurrency(perf, latencies, n_tasks)
         e2e_source = "metrics"
         if avg_e2e is None:
             if latencies:

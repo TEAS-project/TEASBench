@@ -51,8 +51,8 @@ class AgenticComputeCostCliTests(unittest.TestCase):
             ], check=True, cwd=REPO, text=True, capture_output=True)
 
             cost = json.loads((run / "cost.json").read_text())
-            self.assertEqual(cost["agentic"]["llm_active_s_est"], 5.0)
-            self.assertEqual(cost["agentic"]["tool_wait_s_est"], 5.0)
+            self.assertEqual(cost["agentic"]["llm_active_s"], 5.0)
+            self.assertEqual(cost["agentic"]["tool_wait_s"], 5.0)
 
             active = cost["buy"]["cost"]["active_resource"]
             reserved = cost["buy"]["cost"]["reserved_worker"]
