@@ -55,6 +55,9 @@ variables_defaults:
         flag: "--max-model-len"
       gpu_memory_fraction:
         flag: "--gpu_memory_utilization"
+      kv_cache_dtype:
+        flag: "--kv-cache-dtype"
+
 
   client_flags:
     hf_model_path:
@@ -600,7 +603,19 @@ rules:
       gpu:
         - "H100"
     server_flags:
-      max_context: 200k
+      max_context: "200k"
+
+  - match:
+      model:
+        - "Qwen3-235B-A22B-Instruct-2507-FP8"
+        - "Qwen3-235B-A22B-Instruct-2507"
+      inference_engine:
+        - "vllm"
+      gpu:
+        - "H200"
+    server_flags:
+      max_context: "200k"
+      kv_cache_dtype: "fp8_e4m3"
 
       
 # Activate fixed-length mode
