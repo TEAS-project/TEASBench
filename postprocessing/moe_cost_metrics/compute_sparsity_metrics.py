@@ -424,6 +424,7 @@ def compute_for_run(
     avg_prefill_len: float, avg_decode_ctx_len: float,
     force_batch_size_one: bool = False,
     concurrent: bool = False,
+    checkpoint_dtype_served: bool = True,
 ) -> dict:
     perf = metrics.get("performance") or {}
     ea = metrics.get("expert_activation") or {}
@@ -468,6 +469,15 @@ def compute_for_run(
     cfg_d = hf_cfg._d
     resolved_prec, prec_source = resolve_precision(prec_str, cfg_d)
     prec_str = resolved_prec
+    # The recorded precision is the checkpoint's dtype, which is what vLLM/SGLang serve. An
+    # engine with its own load-time quantization may serve something narrower the profiler
+    # cannot see, so on those engines a checkpoint-inherited precision is not evidence of the
+    # bytes actually moved: withhold the precision-dependent metrics until the run attests
+    # its serving precision (a quantization_config on the checkpoint still counts — the
+    # engine loads those weights as stored).
+    precision_evidenced = (
+        checkpoint_dtype_served or prec_source != "metadata.model_config.precision"
+    )
 
     n_layers = cfg_d.get("num_hidden_layers")
     d_model = cfg_d.get("hidden_size") or cfg_d.get("d_model")
@@ -568,9 +578,12 @@ def compute_for_run(
     is_dense = num_moe_layers == 0
     prefill_smbu = (
         smbu(prefill_act, pass_s, kv_size_prefill_TB)
-        if prefill_act > 0 or is_dense else None
+        if (prefill_act > 0 or is_dense) and precision_evidenced else None
     )
-    prefill_smfu = smfu(prefill_tp) if prefill_tp > 0 and peak_flops > 0 else None
+    prefill_smfu = (
+        smfu(prefill_tp)
+        if prefill_tp > 0 and peak_flops > 0 and precision_evidenced else None
+    )
 
     if isinstance(profile_decode_bs, (int, float)) and profile_decode_bs > 0:
         decoding_tp = float(profile_decode_bs) / tpot
@@ -587,9 +600,12 @@ def compute_for_run(
     # that understates long-context runs. Withhold it instead.
     decode_smbu = (
         smbu(decode_act, tpot, kv_size_decode_TB)
-        if (decode_act > 0 or is_dense) and avg_decode_ctx_len > 0 else None
+        if (decode_act > 0 or is_dense) and avg_decode_ctx_len > 0
+        and precision_evidenced else None
     )
-    decode_smfu = smfu(decoding_tp) if decoding_tp and peak_flops > 0 else None
+    decode_smfu = (
+        smfu(decoding_tp) if decoding_tp and peak_flops > 0 and precision_evidenced else None
+    )
 
     # Backstop: utilisation > 100% is physically impossible (bad clock, cache-inflated
     # prefill accounting, or a mislabeled precision peak). Null it rather than emit an
@@ -757,6 +773,9 @@ def main() -> int:
             prefill_len, decode_ctx_len,
             force_batch_size_one=info["batch_size_dir"].startswith("batch-size-1"),
             concurrent=info["batch_size_dir"].startswith("batch-size-default"),
+            # kai (KernelAgentIR on Tenstorrent) quantizes at load time, so the checkpoint
+            # dtype the profiler records is not what the engine necessarily served.
+            checkpoint_dtype_served=info["framework"] != "kai",
         )
         if "skipped" in result:
             skipped += 1
