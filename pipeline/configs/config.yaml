@@ -33,6 +33,10 @@ variables_defaults:
         value: "3600"
       gpu_memory_fraction:
         flag: "--mem-fraction-static"
+      host:
+        flag: "--host"
+      trust_remote_code:
+        flag: "--trust-remote-code"
     vllm:
       port:
         flag: "--port"
@@ -57,7 +61,8 @@ variables_defaults:
         flag: "--gpu_memory_utilization"
       kv_cache_dtype:
         flag: "--kv-cache-dtype"
-
+      trust_remote_code:
+        flag: "--trust-remote-code"
 
   client_flags:
     hf_model_path:
@@ -157,6 +162,8 @@ variables_defaults:
 
 # Rules for conditional inclusion and values of variables depending on experiment parameters.
 # 'match' keys are ANDed together; list values within a key are ORed.
+# A match value can also be {not: [...]} to match when the parameter's value
+# is NOT in the given list (or not equal, if a single scalar is given).
 # server_flags / client_flags name canonical params (as defined above)
 # and supply the value to pass to that flag.
 rules:
@@ -166,12 +173,32 @@ rules:
   - match:
       inference_engine:
         - "sglang"
+    client_flags:
+      backend: "sglang"
+
+# Expert-distribution recording only makes sense for MoE models,
+# so exclude the dense Qwen3.5-4B model here.
+  - match:
+      inference_engine:
+        - "sglang"
+      model:
+        not:
+          - "Qwen3.5-4B"
     extra_container_env:
       value: |
         - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
           value: "/dev/shm/sglang_expert_distribution_recorder"
-    client_flags:
-      backend: "sglang"
+
+# Dense models have no experts to record, so restrict profiling to compute cost only.
+  - match:
+      inference_engine:
+        - "sglang"
+      model:
+        - "Qwen3.5-4B"
+    extra_container_env:
+      value: |
+        - name: MOE_CAP_PROFILING_ONLY
+          value: "1"
 
   - match:
       inference_engine:
@@ -192,6 +219,29 @@ rules:
         - "Kimi-K2.5"
     server_flags:
       reasoning_parser: "kimi_k2"
+
+# Qwen3-4B is a dense model; run both engines' servers on localhost and
+# restrict profiling to compute cost only via MOE_CAP_PROFILING_ONLY.
+  - match:
+      model:
+        - "Qwen3-4B"
+    server_flags:
+      host: "127.0.0.1"
+      trust_remote_code: true
+      reasoning_parser: "qwen3"
+    extra_container_env:
+      value: |
+        - name: MOE_CAP_PROFILING_ONLY
+          value: "1"
+
+# Qwen3-4B and Qwen3.5-4B are dense models with no experts, so omit the
+# expert-distribution-recording flag from the server command entirely.
+  - match:
+      model:
+        - "Qwen3-4B"
+        - "Qwen3.5-4B"
+    server_flags:
+      expert_recording: null
 
   - match: 
       model:
