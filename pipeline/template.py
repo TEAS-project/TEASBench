@@ -185,6 +185,7 @@ class Template:
         # Resolve static variables
         extra_env = self.resolve_generic_variable("extra_container_env", config, matching_rules, parameters)
         arena_dl = self.resolve_generic_variable("download_arena_hard_baseline_answers", config, matching_rules, parameters)
+        expert_dist_copy_cmd = self.resolve_generic_variable("expert_distribution_copy_command", config, matching_rules, parameters)
         
         # Construct Image Name: base + version + variant
         img_cfg = self.resolve_generic_variable("image", config, matching_rules, parameters)
@@ -201,6 +202,7 @@ class Template:
             "@image_name@": image_name,
             "@extra_container_env@": extra_env,
             "@download_arena_hard_baseline_answers@": arena_dl,
+            "@expert_distribution_copy_command@": expert_dist_copy_cmd,
             "@server_start_command@": server_cmd,
             "@client_run_command@": client_cmd,
             "@hf_model_path@": parameters.get("hf_model_path"),

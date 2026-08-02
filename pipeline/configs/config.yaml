@@ -51,9 +51,6 @@ variables_defaults:
         flag: "--model"
       tensor_parallel_size:
         flag: "--tensor-parallel-size"
-      expert_recording:
-        flag: "--enable-expert-distribution-metrics"
-        value: true
       batch_size:
         flag: "--max_num_seqs"
       max_context:
@@ -120,7 +117,6 @@ variables_defaults:
         - hf_model_path
         - port
         - host
-        - expert_recording
         - tensor_parallel_size
 
   # Base settings 
@@ -154,8 +150,10 @@ variables_defaults:
     value:
     
   download_arena_hard_baseline_answers:
-    value: 
+    value:
 
+  expert_distribution_copy_command:
+    value:
 
 
 
@@ -186,6 +184,7 @@ rules:
     client_flags:
       backend: "vllm"
 
+
 # For SGLang need to set SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
 # to tell MoE-CAP to record expert distribution on server side. 
 # Expert-distribution recording only makes sense for MoE models, 
@@ -200,6 +199,9 @@ rules:
       value: |
         - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
           value: "/dev/shm/sglang_expert_distribution_recorder"
+    expert_distribution_copy_command:
+      value: |
+        find "$SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR" -name 'expert_distribution_record.jsonl' -exec cp {} $RUN_DIR/ \; 2>/dev/null || true
 
 
 ##################################
