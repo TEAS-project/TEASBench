@@ -37,6 +37,7 @@ variables_defaults:
         flag: "--host"
       trust_remote_code:
         flag: "--trust-remote-code"
+
     vllm:
       port:
         flag: "--port"
@@ -100,6 +101,8 @@ variables_defaults:
     output_length:
       flag: "--target-output-tokens"
       from_parameter: output_length
+    profiling_only:
+      flag: "--profiling-only"
 
 
   # Base settings 
@@ -168,46 +171,68 @@ variables_defaults:
 # and supply the value to pass to that flag.
 rules:
 
-
+#######################################
 # Rules based on inference engine alone
+#######################################
   - match:
       inference_engine:
         - "sglang"
     client_flags:
       backend: "sglang"
 
-# Expert-distribution recording only makes sense for MoE models,
-# so exclude the dense Qwen3.5-4B model here.
-  - match:
-      inference_engine:
-        - "sglang"
-      model:
-        not:
-          - "Qwen3.5-4B"
-    extra_container_env:
-      value: |
-        - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
-          value: "/dev/shm/sglang_expert_distribution_recorder"
-
-# Dense models have no experts to record, so restrict profiling to compute cost only.
-  - match:
-      inference_engine:
-        - "sglang"
-      model:
-        - "Qwen3.5-4B"
-    extra_container_env:
-      value: |
-        - name: MOE_CAP_PROFILING_ONLY
-          value: "1"
-
   - match:
       inference_engine:
         - "vllm"
     client_flags:
       backend: "vllm"
-        
 
-# Rules based on model alone
+# For SGLang need to set SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
+# to tell MoE-CAP to record expert distribution on server side. 
+# Expert-distribution recording only makes sense for MoE models, 
+# so exclude any non-MoE (e.g. dense models)
+  - match:
+      inference_engine:
+        - "sglang"
+      model:
+        not:
+          - "Qwen3-4B"
+    extra_container_env:
+      value: |
+        - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
+          value: "/dev/shm/sglang_expert_distribution_recorder"
+
+
+##################################
+# Rules for non-MoE (dense) models
+##################################
+
+# For profiling only (no expert distribution recording)
+# need to set MOE_CAP_PROFILING_ONLY for MoE-CAP to handle
+# SGLang correctly:
+  - match:
+      inference_engine:
+        - "sglang"
+      model:
+        - "Qwen3-4B"
+    extra_container_env:
+      value: |
+        - name: MOE_CAP_PROFILING_ONLY
+          value: "1"
+
+# Omit expert-distribution-recording flag from server command
+# and tell MoE-CAP client to profile only
+  - match:
+      model:
+        - "Qwen3-4B"
+    server_flags:
+      expert_recording: null
+    client_flags:
+      profiling_only: true
+
+
+#####################################
+# Rules based on specific model alone
+#####################################
   - match:
       model:
         - "DeepSeek-R1"
@@ -220,8 +245,7 @@ rules:
     server_flags:
       reasoning_parser: "kimi_k2"
 
-# Qwen3-4B is a dense model; run both engines' servers on localhost and
-# restrict profiling to compute cost only via MOE_CAP_PROFILING_ONLY.
+# Qwen3-4B is a dense model; run both engines' servers on localhost
   - match:
       model:
         - "Qwen3-4B"
@@ -229,19 +253,6 @@ rules:
       host: "127.0.0.1"
       trust_remote_code: true
       reasoning_parser: "qwen3"
-    extra_container_env:
-      value: |
-        - name: MOE_CAP_PROFILING_ONLY
-          value: "1"
-
-# Qwen3-4B and Qwen3.5-4B are dense models with no experts, so omit the
-# expert-distribution-recording flag from the server command entirely.
-  - match:
-      model:
-        - "Qwen3-4B"
-        - "Qwen3.5-4B"
-    server_flags:
-      expert_recording: null
 
   - match: 
       model:
@@ -250,8 +261,9 @@ rules:
     server_flags:
       model_load_timeout: 3600
 
-
+#################################
 # Rules based on batch size alone
+#################################
   - match:
       batch_size:
         - "1"
@@ -260,7 +272,9 @@ rules:
     client_flags:
       batch_size: "1"
 
+##############################
 # Rules based on dataset alone
+##############################
   - match: 
       dataset:
         - "arena-hard"
@@ -278,8 +292,9 @@ rules:
               name: elm-openai-key-ap
               key: key
 
-
+###############################
 # Rules based on hardware alone
+###############################
   - match:
       gpu:
         - "A100"
@@ -293,8 +308,9 @@ rules:
       image:
         cuda_variant: "-cu130"
 
-
+###########################################
 # Rules based on model and inference engine
+###########################################
   - match:
       model:
         - "gpt-oss-20b"
@@ -313,8 +329,9 @@ rules:
     server_flags:
       reasoning_parser: "openai_gptoss"
 
-
+#########################################################################
 # Memory requirement tweaks for models that only barely fit in GPU memory
+#########################################################################
   - match:
       model:
         - "gpt-oss-120b"
@@ -385,8 +402,9 @@ rules:
       max_context: "200k"
       kv_cache_dtype: "fp8_e4m3"
 
-
-# Activate fixed-length mode
+###################
+# Fixed-length mode
+###################
   - match:
       input_length: "<defined>"
     client_flags:
