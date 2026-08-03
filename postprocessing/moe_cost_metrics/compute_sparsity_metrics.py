@@ -14,9 +14,9 @@ Per the paper:
 Where S_activated counts only the experts actually loaded
   (avg_expert_activation_{prefill,decode} from the runner's trace).
 
-This script delegates to MoE-CAP's own per-model calculators
-(qwen_utils, qwen3_utils, deepseek_utils, default for gpt-oss / Mixtral)
-so the answers match `moe_cap` exactly. KV-cache and attention-compute
+Parameter accounting is local to this script: MLA and GQA attention are
+counted separately, as are shared and routed experts, and the hardware
+peaks come from the catalogs below. KV-cache and attention-compute
 terms are set to 0 because the aggregated metrics here do not carry
 per-request prefill/output lengths — the reported S-MBU is therefore a
 lower bound (weights-only) and S-MFU is a lower bound (no attention
@@ -36,34 +36,31 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, "/home/sicheng/MoE-CAP")
-
-try:
-    from moe_cap.utils.hardware_utils import (  # noqa: E402
-        MEM_BW_DICT,
-        get_peak_bw,
-    )
-except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
-    MEM_BW_DICT = {
-        "NVIDIA-A100-SXM4-80GB": 2.04e12,
-        "NVIDIA-H100-HBM3-80GB": 3.35e12,
-        "NVIDIA-H200-141GB": 4.8e12,
-        "NVIDIA-B200-183GB": 8.0e12,
-        "NVIDIA-B300-269GB": 8.0e12,
-        "AMD-Instinct-MI355X-288GB": 8.0e12,
-    }
-
-    def get_peak_bw(gpu_key):
-        return MEM_BW_DICT.get(gpu_key, 0)
-
-# Edge parts absent from MoE-CAP's datacentre catalog. Vendor primary figures:
+# Bandwidth is owned here for the same reason as peak FLOPS below: vendors quote it on
+# different bases, and a second catalog patched over a first is how a corrected figure gets
+# silently reverted. One table per axis, nothing overriding it later in the module.
+#
+# Sources are the vendor datasheets listed in the peak-FLOPS block below, plus the two edge
+# parts those datacentre datasheets do not cover:
 #   GB10 (DGX Spark)          273 GB/s LPDDR5X   https://www.nvidia.com/en-us/products/workstations/dgx-spark/
 #   Blackhole p150b           512 GB/s GDDR6     https://docs.tenstorrent.com/aibs/blackhole/specifications.html
-MEM_BW_DICT.setdefault("NVIDIA-GB10", 273e9)
-MEM_BW_DICT.setdefault("Tenstorrent-Blackhole-P150b", 512e9)
+MEM_BW_DICT = {
+    "NVIDIA-A100-SXM4-80GB": 2.04e12,
+    "NVIDIA-H100-HBM3-80GB": 3.35e12,
+    "NVIDIA-H200-141GB": 4.8e12,
+    "NVIDIA-B200-183GB": 8.0e12,
+    "NVIDIA-B300-269GB": 8.0e12,
+    "AMD-Instinct-MI355X-288GB": 8.0e12,
+    "NVIDIA-GB10": 273e9,
+    "Tenstorrent-Blackhole-P150b": 512e9,
+}
 
 
-# Peak FLOPS is owned here rather than imported from MoE-CAP, because vendors quote it on
+def get_peak_bw(gpu_key):
+    return MEM_BW_DICT.get(gpu_key, 0)
+
+
+# Peak FLOPS is owned here for the same reason, because vendors quote it on
 # different bases and mixing them silently biases S-MFU across vendors.
 #
 # Every entry is DENSE, and S-MFU divides by the value as written. Each names its
@@ -210,12 +207,7 @@ def kv_per_token_entries(cfg_d: dict, n_layers: int, d_head: int, n_kv_heads: in
     return 2 * n_layers * d_head * n_kv_heads
 
 
-B200_KEY = "NVIDIA-B200-183GB"
 B300_KEY = "NVIDIA-B300-269GB"
-
-# Blackwell bandwidth is patched over whatever MoE-CAP supplies.
-MEM_BW_DICT.setdefault(B300_KEY, 8000e9)
-MEM_BW_DICT[B200_KEY] = 8000e9
 
 
 GPU_TYPE_MAP = {
