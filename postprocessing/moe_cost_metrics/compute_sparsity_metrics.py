@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Compute S-MBU and S-MFU per the MoE-CAP paper (arXiv 2412.07067 v6, Eqs. 4-5)
-for every metrics file in the moe/ tree that has non-zero expert_activation.
+for every metrics file in the moe/ tree. S-MFU is always computed; S-MBU needs
+the run's own expert_activation trace and is null without one — except on dense
+models, where there are no experts to trace and the bytes term is fully
+determined by the config, so S-MBU reduces to plain MBU and is always computed.
 
 Per the paper:
   S-MBU = B_achieved / B_peak,  B_achieved = (S_activated + S_KV) / TPOT
@@ -38,9 +41,7 @@ sys.path.insert(0, "/home/sicheng/MoE-CAP")
 try:
     from moe_cap.utils.hardware_utils import (  # noqa: E402
         MEM_BW_DICT,
-        PEAK_FLOPS_DICT,
         get_peak_bw,
-        get_peak_flops,
     )
 except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
     MEM_BW_DICT = {
@@ -51,62 +52,114 @@ except Exception:  # pragma: no cover - exercised when MoE-CAP deps are absent.
         "NVIDIA-B300-269GB": 8.0e12,
         "AMD-Instinct-MI355X-288GB": 8.0e12,
     }
-    PEAK_FLOPS_DICT = {
-        "bfloat16": {
-            "NVIDIA-A100-SXM4-80GB": 624e12,
-            "NVIDIA-H100-HBM3-80GB": 1979e12,
-            "NVIDIA-H200-141GB": 1979e12,
-            "NVIDIA-B200-183GB": 4500e12,
-            "NVIDIA-B300-269GB": 5000e12,
-            "AMD-Instinct-MI355X-288GB": 2500e12,
-        },
-        "float16": {
-            "NVIDIA-A100-SXM4-80GB": 624e12,
-            "NVIDIA-H100-HBM3-80GB": 1979e12,
-            "NVIDIA-H200-141GB": 1979e12,
-            "NVIDIA-B200-183GB": 4500e12,
-            "NVIDIA-B300-269GB": 5000e12,
-            "AMD-Instinct-MI355X-288GB": 2500e12,
-        },
-        "fp8": {
-            "NVIDIA-A100-SXM4-80GB": 624e12,  # A100 has no FP8 tensor cores -> upcasts to bf16
-            "NVIDIA-H100-HBM3-80GB": 3958e12,
-            "NVIDIA-H200-141GB": 3958e12,
-            "NVIDIA-B200-183GB": 9000e12,
-            "NVIDIA-B300-269GB": 10000e12,
-            "AMD-Instinct-MI355X-288GB": 5050e12,
-        },
-        "int8": {
-            "NVIDIA-A100-SXM4-80GB": 1248e12,
-            "NVIDIA-H100-HBM3-80GB": 3958e12,
-            "NVIDIA-H200-141GB": 3958e12,
-            "NVIDIA-B200-183GB": 9000e12,
-            "NVIDIA-B300-269GB": 10000e12,
-            "AMD-Instinct-MI355X-288GB": 5050e12,
-        },
-        "fp4": {
-            "NVIDIA-A100-SXM4-80GB": 624e12,  # A100 has no FP4 tensor cores -> mxfp4 upcasts to bf16
-            "NVIDIA-H100-HBM3-80GB": 3958e12,
-            "NVIDIA-H200-141GB": 3958e12,
-            "NVIDIA-B200-183GB": 18000e12,
-            "NVIDIA-B300-269GB": 20000e12,
-            "AMD-Instinct-MI355X-288GB": 10100e12,
-        },
-        "int4": {
-            "NVIDIA-A100-SXM4-80GB": 2496e12,
-            "NVIDIA-H100-HBM3-80GB": 3958e12,
-            "NVIDIA-H200-141GB": 3958e12,
-            "NVIDIA-B200-183GB": 18000e12,
-            "NVIDIA-B300-269GB": 20000e12,
-            "AMD-Instinct-MI355X-288GB": 10100e12,
-        },
-    }
 
     def get_peak_bw(gpu_key):
         return MEM_BW_DICT.get(gpu_key, 0)
 
-    def get_peak_flops(gpu_key, precision="bfloat16"):
-        return PEAK_FLOPS_DICT.get((precision or "").lower(), {}).get(gpu_key, 0)
+# Edge parts absent from MoE-CAP's datacentre catalog. Vendor primary figures:
+#   GB10 (DGX Spark)          273 GB/s LPDDR5X   https://www.nvidia.com/en-us/products/workstations/dgx-spark/
+#   Blackhole p150b           512 GB/s GDDR6     https://docs.tenstorrent.com/aibs/blackhole/specifications.html
+MEM_BW_DICT.setdefault("NVIDIA-GB10", 273e9)
+MEM_BW_DICT.setdefault("Tenstorrent-Blackhole-P150b", 512e9)
+
+
+# Peak FLOPS is owned here rather than imported from MoE-CAP, because vendors quote it on
+# different bases and mixing them silently biases S-MFU across vendors.
+#
+# Every entry is DENSE, and S-MFU divides by the value as written. Each names its
+# with-sparsity counterpart inline where the vendor publishes one. The bases differ by
+# vendor and part:
+#   - H100/H200 datasheets lead with the with-sparsity figure; dense is half.
+#   - A100's leads with dense (312) and footnotes the sparse one (624).
+#   - Blackwell prints both. B300 NVFP4 is the one row where sparse is 1.33x dense rather
+#     than 2x: the uplift over B200 is on the dense figure.
+#   - AMD's main column is dense. It publishes 2x sparse rates for FP16/BF16/INT8 and
+#     OCP-FP8 only; MXFP4/6/8 are marked N/A for sparsity.
+#
+# Blackwell figures are HGX 8-GPU board specs divided by 8 — the form factor the measured
+# parts report (`NVIDIA-B300-SXM6-AC-269GB`, air-cooled SXM), and one basis for both cards.
+#
+# Sources (vendor primary, dense figures):
+#   A100        https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf
+#   H100/H200   https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306
+#   B200/B300   https://www.nvidia.com/en-us/data-center/hgx/
+#   MI355X      AMD Instinct MI355X GPU datasheet (amd.com)
+#   GB10        https://www.nvidia.com/en-us/products/workstations/dgx-spark/ — NVIDIA
+#               publishes one figure, 1 PFLOP FP4 with sparsity. The dense FP4 entry halves
+#               it (the NVIDIA convention above) and each wider precision halves again,
+#               mirroring the B200 ladder. Derived, not datasheet, below FP4.
+#   Blackhole   deliberately absent: Tenstorrent publishes only a BLOCKFP8 figure (664
+#               TFLOPS at the 120-core spec), no FP16/BF16 rate, so bf16 runs have no
+#               defensible denominator and publish a null S-MFU.
+PEAK_FLOPS_BASIS = "dense"
+PEAK_FLOPS_DICT = {
+    "bfloat16": {
+        "NVIDIA-A100-SXM4-80GB": 312e12,      # 624 w/ sparsity
+        "NVIDIA-H100-HBM3-80GB": 989.5e12,    # 1979 w/ sparsity
+        "NVIDIA-H200-141GB": 989.5e12,        # 1979 w/ sparsity
+        "NVIDIA-B200-183GB": 2250e12,         # 4500 w/ sparsity
+        "NVIDIA-B300-269GB": 2250e12,         # 4500 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 2500e12,
+        "NVIDIA-GB10": 125e12,
+    },
+    "float16": {
+        "NVIDIA-A100-SXM4-80GB": 312e12,
+        "NVIDIA-H100-HBM3-80GB": 989.5e12,
+        "NVIDIA-H200-141GB": 989.5e12,
+        "NVIDIA-B200-183GB": 2250e12,
+        "NVIDIA-B300-269GB": 2250e12,
+        "AMD-Instinct-MI355X-288GB": 2500e12,
+        "NVIDIA-GB10": 125e12,
+    },
+    "fp8": {
+        "NVIDIA-A100-SXM4-80GB": 312e12,      # A100 has no FP8 tensor cores -> upcasts to bf16
+        "NVIDIA-H100-HBM3-80GB": 1979e12,     # 3958 w/ sparsity
+        "NVIDIA-H200-141GB": 1979e12,
+        "NVIDIA-B200-183GB": 4500e12,         # 9000 w/ sparsity
+        "NVIDIA-B300-269GB": 4500e12,         # 9000 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 5050e12,
+        "NVIDIA-GB10": 250e12,
+    },
+    "int8": {
+        "NVIDIA-A100-SXM4-80GB": 624e12,      # 1248 w/ sparsity
+        "NVIDIA-H100-HBM3-80GB": 1979e12,
+        "NVIDIA-H200-141GB": 1979e12,
+        "NVIDIA-B200-183GB": 4500e12,          # 9000 w/ sparsity
+        # Blackwell Ultra's INT8 tensor path is far narrower than B200's: 3 POPS per HGX
+        # board against 72.
+        "NVIDIA-B300-269GB": 187.5e12,         # 375 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 5050e12,
+    },
+    "fp4": {
+        "NVIDIA-A100-SXM4-80GB": 312e12,      # A100 has no FP4 tensor cores -> mxfp4 upcasts to bf16
+        "NVIDIA-H100-HBM3-80GB": 1979e12,     # no FP4 tensor cores -> FP8 path
+        "NVIDIA-H200-141GB": 1979e12,
+        "NVIDIA-B200-183GB": 9000e12,         # 18000 w/ sparsity
+        # The HGX board is rated 144 | 108 PFLOPS NVFP4 (with-sparsity | dense), so
+        # sparse is 1.33x dense here. The GB300 NVL72 tray is quoted at 15 PF dense and
+        # runs higher clocks than the air-cooled SXM modules these runs use.
+        "NVIDIA-B300-269GB": 13500e12,        # 18000 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 10100e12,
+        "NVIDIA-GB10": 500e12,
+    },
+    # `int4` is reached by weight-only 4-bit checkpoints (compressed-tensors
+    # `num_bits=4 type=int`), which dequantise before the matmul rather than using a native
+    # INT4 tensor path; only A100 has one. Each entry mirrors the card's fp4 rate. That is a
+    # modelling assumption rather than a datasheet figure: the exact denominator is whatever
+    # precision the kernel computes in, which the run does not record.
+    "int4": {
+        "NVIDIA-A100-SXM4-80GB": 1248e12,     # 2496 w/ sparsity; Ampere has a real INT4 path
+        "NVIDIA-H100-HBM3-80GB": 1979e12,
+        "NVIDIA-H200-141GB": 1979e12,
+        "NVIDIA-B200-183GB": 9000e12,
+        "NVIDIA-B300-269GB": 13500e12,
+        "AMD-Instinct-MI355X-288GB": 10100e12,
+    },
+}
+
+
+def get_peak_flops(gpu_key, precision="bfloat16"):
+    return PEAK_FLOPS_DICT.get((precision or "").lower(), {}).get(gpu_key, 0)
 
 
 DATASET_TOKEN_PROFILE = {
@@ -160,27 +213,9 @@ def kv_per_token_entries(cfg_d: dict, n_layers: int, d_head: int, n_kv_heads: in
 B200_KEY = "NVIDIA-B200-183GB"
 B300_KEY = "NVIDIA-B300-269GB"
 
+# Blackwell bandwidth is patched over whatever MoE-CAP supplies.
 MEM_BW_DICT.setdefault(B300_KEY, 8000e9)
 MEM_BW_DICT[B200_KEY] = 8000e9
-
-for _p in PEAK_FLOPS_DICT:
-    PEAK_FLOPS_DICT[_p].setdefault(
-        B300_KEY, PEAK_FLOPS_DICT[_p].get(B200_KEY, 0)
-    )
-
-PEAK_FLOPS_DICT["bfloat16"][B200_KEY] = 4500e12
-PEAK_FLOPS_DICT["float16"][B200_KEY] = 4500e12
-PEAK_FLOPS_DICT["fp8"][B200_KEY] = 9000e12
-PEAK_FLOPS_DICT["int8"][B200_KEY] = 9000e12
-PEAK_FLOPS_DICT["fp4"][B200_KEY] = 18000e12
-PEAK_FLOPS_DICT["int4"][B200_KEY] = 18000e12
-
-PEAK_FLOPS_DICT["bfloat16"][B300_KEY] = 5000e12
-PEAK_FLOPS_DICT["float16"][B300_KEY] = 5000e12
-PEAK_FLOPS_DICT["fp8"][B300_KEY] = 10000e12
-PEAK_FLOPS_DICT["int8"][B300_KEY] = 10000e12
-PEAK_FLOPS_DICT["fp4"][B300_KEY] = 20000e12
-PEAK_FLOPS_DICT["int4"][B300_KEY] = 20000e12
 
 
 GPU_TYPE_MAP = {
@@ -194,6 +229,8 @@ GPU_TYPE_MAP = {
     "NVIDIA-H100-HBM3-80GB": "NVIDIA-H100-HBM3-80GB",
     "NVIDIA-H200-140GB": "NVIDIA-H200-141GB",
     "NVIDIA-H200-141GB": "NVIDIA-H200-141GB",
+    "NVIDIA-GB10": "NVIDIA-GB10",
+    "Tenstorrent-Blackhole-P150b": "Tenstorrent-Blackhole-P150b",
 }
 
 GPU_KEY_FALLBACK = {
@@ -203,6 +240,8 @@ GPU_KEY_FALLBACK = {
     "b200": "NVIDIA-B200-183GB",
     "b300": B300_KEY,
     "mi355x": "AMD-Instinct-MI355X-288GB",
+    "gb10": "NVIDIA-GB10",
+    "blackhole-p150b": "Tenstorrent-Blackhole-P150b",
 }
 
 MODEL_REPO_MAP = {
@@ -310,25 +349,6 @@ def describe_run(path: Path, root: Path) -> dict:
     }
 
 
-def build_activation_lookup(metrics_files: list[Path], root: Path) -> dict[tuple, tuple[float, float, str]]:
-    table: dict[tuple, tuple[float, float, str]] = {}
-    for f in metrics_files:
-        info = describe_run(f, root)
-        try:
-            metrics = json.loads(f.read_text())
-        except Exception:
-            continue
-        ea = metrics.get("expert_activation") or {}
-        p = ea.get("avg_expert_activation_prefill") or 0
-        de = ea.get("avg_expert_activation_decode") or 0
-        if p <= 0 and de <= 0:
-            continue
-        key = (info["model"], info["dataset"], info["batch_size_dir"])
-        if key not in table:
-            table[key] = (p, de, f"{info['location']}/{info['framework']}/{Path(f).parent.relative_to(root)}")
-    return table
-
-
 def _swap_prefix(name: str, old: str, new: str) -> str:
     if name == f"{old}.json":
         return f"{new}.json"
@@ -390,21 +410,35 @@ def _layer_partition(cfg_d: dict, n_layers: int) -> tuple[int, int]:
             if (li not in mlp_only) and ((li + 1) % step == 0)
         )
         return n_moe, n_layers - n_moe
+    # A config with no expert count is a dense model: every FFN layer is loaded on
+    # every step, so all layers are dense and none carries experts or a router.
+    if not any(cfg_d.get(k) for k in (
+        "num_local_experts", "num_experts", "n_routed_experts", "num_experts_per_tok"
+    )):
+        return 0, n_layers
     return n_layers, 0
 
 
 def compute_for_run(
     metrics: dict, hf_cfg, gpu_key: str, num_gpus: int, prec_str: str,
     avg_prefill_len: float, avg_decode_ctx_len: float,
-    borrowed_activation: Optional[tuple[float, float, str]] = None,
     force_batch_size_one: bool = False,
+    concurrent: bool = False,
+    checkpoint_dtype_served: bool = True,
 ) -> dict:
     perf = metrics.get("performance") or {}
     ea = metrics.get("expert_activation") or {}
+    # Expert activation is used only by S-MBU, and only the run's own trace is used. It counts the
+    # experts a step actually loaded, which depends on the realised batch, so it is a property of
+    # this engine on this accelerator and does not carry across from another run: within one model,
+    # workload and batch regime it varies several-fold across accelerators. Only SGLang's runner
+    # records it, and not on every run; a run without one publishes a null S-MBU, not an imputed one.
+    # Dense models are the exception: with no experts to activate, every FFN is loaded on every
+    # step and S-MBU is computed from the config alone (see is_dense below).
+    # S-MFU is unaffected -- it uses the architectural top_k, not the measured activation.
     prefill_act = ea.get("avg_expert_activation_prefill") or 0
     decode_act = ea.get("avg_expert_activation_decode") or 0
-    if prefill_act <= 0 and decode_act <= 0 and borrowed_activation is not None:
-        prefill_act, decode_act, _activation_source = borrowed_activation
+    has_activation = prefill_act > 0 or decode_act > 0
     ttft = perf.get("ttft")
     tpot = perf.get("tpot")
     batch_profile = metrics.get("batch_token_profile") or {}
@@ -428,8 +462,6 @@ def compute_for_run(
     ):
         avg_decode_ctx_len = float(profile_prefill_len) + float(profile_decode_tokens) / 2.0
 
-    if prefill_act <= 0 and decode_act <= 0:
-        return {"skipped": "expert_activation missing or zero"}
     if ttft is None or tpot is None or not ttft or not tpot:
         return {"skipped": "ttft/tpot missing"}
 
@@ -437,6 +469,15 @@ def compute_for_run(
     cfg_d = hf_cfg._d
     resolved_prec, prec_source = resolve_precision(prec_str, cfg_d)
     prec_str = resolved_prec
+    # The recorded precision is the checkpoint's dtype, which is what vLLM/SGLang serve. An
+    # engine with its own load-time quantization may serve something narrower the profiler
+    # cannot see, so on those engines a checkpoint-inherited precision is not evidence of the
+    # bytes actually moved: withhold the precision-dependent metrics until the run attests
+    # its serving precision (a quantization_config on the checkpoint still counts — the
+    # engine loads those weights as stored).
+    precision_evidenced = (
+        checkpoint_dtype_served or prec_source != "metadata.model_config.precision"
+    )
 
     n_layers = cfg_d.get("num_hidden_layers")
     d_model = cfg_d.get("hidden_size") or cfg_d.get("d_model")
@@ -484,16 +525,23 @@ def compute_for_run(
 
     peak_bw = get_peak_bw(gpu_key)
     peak_flops = get_peak_flops(gpu_key, precision=prec_str.lower())
-    if peak_bw <= 0 or peak_flops <= 0:
+    # Bandwidth gates the whole sidecar; a missing FLOPS peak nulls S-MFU alone, so a card
+    # with a published bandwidth but no per-precision compute figure still gets S-MBU.
+    if peak_bw <= 0:
         return {
             "skipped": f"no hardware spec for {gpu_key} @ {prec_str}",
             "gpu_key": gpu_key,
         }
 
     def smbu(activation: float, time_s: float, kv_TB: float) -> float:
+        # `activation` is the recorder's mean of unique routed experts over ALL
+        # layers (dense layers contribute zeros), so total routed-expert loads
+        # are activation x n_layers; shared experts and routers exist per MoE
+        # layer only. On all-MoE models the two forms coincide.
         bytes_loaded_TB = (
             n_layers * attn_size_per_token_TB
-            + num_moe_layers * (activation * expert_size_TB + shared_size_TB + router_size_TB)
+            + n_layers * activation * expert_size_TB
+            + num_moe_layers * (shared_size_TB + router_size_TB)
             + num_dense_layers * dense_size_TB
             + kv_TB
         )
@@ -508,7 +556,8 @@ def compute_for_run(
         )
         flops_per_token = params_per_token_TB * 1e12 * 2
         flops_per_s = flops_per_token * throughput_tok_s
-        return flops_per_s / (num_gpus * peak_flops / 2)
+        # PEAK_FLOPS_DICT is dense for every vendor, so the peak divides in as written.
+        return flops_per_s / (num_gpus * peak_flops)
 
     if (
         isinstance(profile_prefill_len, (int, float)) and profile_prefill_len > 0
@@ -520,15 +569,43 @@ def compute_for_run(
         prefill_tp = float(profile_prefill_len) / ttft
     else:
         prefill_tp = prefill_tps or (avg_prefill_len / ttft if avg_prefill_len else 0)
-    prefill_smbu = smbu(prefill_act, ttft, kv_size_prefill_TB) if prefill_act > 0 else None
-    prefill_smfu = smfu(prefill_tp) if prefill_tp > 0 else None
+    # S-MBU wants the duration of ONE forward pass, not one request's time to first token: it
+    # divides the bytes a pass moves by the time that pass took. Runs from before the harness split
+    # the two report the per-pass mean under `ttft`, so fall back to it and keep them comparable.
+    pass_s = perf.get("prefill_pass_latency_s") or ttft
+    # A dense model needs no activation trace: with zero MoE layers the bytes term is
+    # attention + full FFN + KV, all from the config, so S-MBU reduces to plain MBU.
+    is_dense = num_moe_layers == 0
+    prefill_smbu = (
+        smbu(prefill_act, pass_s, kv_size_prefill_TB)
+        if (prefill_act > 0 or is_dense) and precision_evidenced else None
+    )
+    prefill_smfu = (
+        smfu(prefill_tp)
+        if prefill_tp > 0 and peak_flops > 0 and precision_evidenced else None
+    )
 
     if isinstance(profile_decode_bs, (int, float)) and profile_decode_bs > 0:
         decoding_tp = float(profile_decode_bs) / tpot
+    elif concurrent:
+        # A concurrent run without a measured decode batch has no node-level rate:
+        # 1/tpot is a single-stream rate, several-fold under what the node served.
+        # Publishing it would silently misprice everything downstream (energy divides
+        # node power by this rate), so withhold the rate instead.
+        decoding_tp = None
     else:
         decoding_tp = output_tps or (1.0 / tpot)
-    decode_smbu = smbu(decode_act, tpot, kv_size_decode_TB) if decode_act > 0 else None
-    decode_smfu = smfu(decoding_tp) if decoding_tp > 0 else None
+    # The decode KV term needs the run's own context length; without a usable token
+    # count avg_decode_ctx_len is 0 and S-MBU would silently publish a KV-less value
+    # that understates long-context runs. Withhold it instead.
+    decode_smbu = (
+        smbu(decode_act, tpot, kv_size_decode_TB)
+        if (decode_act > 0 or is_dense) and avg_decode_ctx_len > 0
+        and precision_evidenced else None
+    )
+    decode_smfu = (
+        smfu(decoding_tp) if decoding_tp and peak_flops > 0 and precision_evidenced else None
+    )
 
     # Backstop: utilisation > 100% is physically impossible (bad clock, cache-inflated
     # prefill accounting, or a mislabeled precision peak). Null it rather than emit an
@@ -566,10 +643,16 @@ def compute_for_run(
             "num_gpus": num_gpus,
             "peak_bandwidth_tb_s": hardware_specs["peak_bandwidth_tb"],
             "peak_flops_tf_s": hardware_specs["peak_flops_tf"],
+            "peak_flops_basis": PEAK_FLOPS_BASIS,
         },
         "activation": {
-            "avg_expert_activation_prefill": prefill_act,
-            "avg_expert_activation_decode": decode_act,
+            "avg_expert_activation_prefill": prefill_act if has_activation else None,
+            "avg_expert_activation_decode": decode_act if has_activation else None,
+            "activation_source": (
+                "measured" if has_activation
+                else "not-applicable-dense" if is_dense
+                else "unavailable"
+            ),
         },
         "prefill": {
             "ttft_s": ttft,
@@ -617,8 +700,6 @@ def main() -> int:
         print(f"error: no metrics files under {root}", file=sys.stderr)
         return 2
 
-    activation_lookup = build_activation_lookup(metrics_files, root)
-    print(f"Activation lookup built from {len(activation_lookup)} (model, dataset, batch) keys.", file=sys.stderr)
 
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     recorded_at = now.isoformat().replace("+00:00", "Z")
@@ -687,19 +768,27 @@ def main() -> int:
         else:
             decode_ctx_len = 0.0
 
-        borrowed = activation_lookup.get(
-            (info["model"], info["dataset"], info["batch_size_dir"])
-        )
         result = compute_for_run(
             metrics, hf_cfg, gpu_key, meta_num_gpus, prec_str,
             prefill_len, decode_ctx_len,
-            borrowed_activation=borrowed,
             force_batch_size_one=info["batch_size_dir"].startswith("batch-size-1"),
+            concurrent=info["batch_size_dir"].startswith("batch-size-default"),
+            # kai (KernelAgentIR on Tenstorrent) quantizes at load time, so the checkpoint
+            # dtype the profiler records is not what the engine necessarily served.
+            checkpoint_dtype_served=info["framework"] != "kai",
         )
         if "skipped" in result:
             skipped += 1
             reason = str(result["skipped"]).split(",")[0]
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            # A withheld ttft/tpot invalidates any sidecar computed from the run's earlier
+            # values; remove it so the skip is effective, not shadowed by a stale file.
+            # Environmental skips (missing hardware spec, and the config/model skips above)
+            # keep the existing sidecar — a transient lookup failure must not delete it.
+            if reason == "ttft/tpot missing":
+                stale = sparsity_path_for(f)
+                if stale.exists() and not args.dry_run:
+                    stale.unlink()
             continue
 
         payload = {

@@ -4,7 +4,7 @@ import yaml
 import os
 import re
 import subprocess
-from utils import needs_login_node_driver, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, TEAS_GPU_NAME_MAP
+from utils import needs_login_node_driver, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
 
 DEFINED_SENTINEL = "<defined>"
 
@@ -18,6 +18,17 @@ class Template:
             experiment_value = experiment_parameters.get(parameter)
             if rule_value == DEFINED_SENTINEL:
                 if experiment_value is None or experiment_value == "":
+                    return False
+                continue
+            if isinstance(rule_value, dict) and "not" in rule_value:
+                excluded = rule_value["not"]
+                if not isinstance(excluded, list):
+                    excluded = [excluded]
+                if DEFINED_SENTINEL in excluded:
+                    if experiment_value is not None and experiment_value != "":
+                        return False
+                    excluded = [e for e in excluded if e != DEFINED_SENTINEL]
+                if experiment_value in excluded:
                     return False
                 continue
             if isinstance(rule_value, list):
@@ -193,6 +204,7 @@ class Template:
 
         extra_env = self.resolve_generic_variable("extra_container_env", config, matching_rules, parameters)
         arena_dl = self.resolve_generic_variable("download_arena_hard_baseline_answers", config, matching_rules, parameters)
+        expert_dist_copy_cmd = self.resolve_generic_variable("expert_distribution_copy_command", config, matching_rules, parameters)
 
         # Construct Image Name: base + version + variant
         img_cfg = self.resolve_generic_variable("image", config, matching_rules, parameters)
@@ -204,6 +216,7 @@ class Template:
             "@image_name@": image_name,
             "@extra_container_env@": extra_env,
             "@download_arena_hard_baseline_answers@": arena_dl,
+            "@expert_distribution_copy_command@": expert_dist_copy_cmd,
             "@server_start_command@": server_cmd,
             "@client_run_command@": client_cmd,
             "@hf_model_path@": parameters.get("hf_model_path"),
@@ -320,6 +333,7 @@ class Template:
             "@num_gpu@": str(parameters.get("num_gpu")),
             "@gpu_product@": str(parameters.get("gpu_product")),
             "@results_repo@": results_repo,
+            "@pvc_archive_dir@": PVC_ARCHIVE_DIR,
             "@output_repo_dir@": results_repo_dir(parameters),
             "@teasbench_commit@": teasbench_commit
         }

@@ -1,6 +1,6 @@
 # `compute_sparsity_metrics.py` — S-MBU and S-MFU per MoE-CAP
 
-Writes one `sparsity_*.json` sidecar next to every `metrics_*.json` (or `metrics.json`) that has — or can borrow — `expert_activation`. Formulas follow [MoE-CAP, arXiv 2412.07067 v6](https://arxiv.org/html/2412.07067v6), Eqs. 4-5.
+Writes one `sparsity_*.json` sidecar next to every `metrics_*.json` (or `metrics.json`) the run tree holds. S-MBU needs the run's own `expert_activation` trace and is null without it; S-MFU does not and is always published. Formulas follow [MoE-CAP, arXiv 2412.07067 v6](https://arxiv.org/html/2412.07067v6), Eqs. 4-5.
 
 ## 1. Formulas (paper convention)
 
@@ -20,7 +20,7 @@ F_token = 2 × (
   + n_moe_layers × (top_k × expert_params + shared × expert_params + router_params)
   + n_dense_layers × dense_ffn_params
 )
-F_peak_dense = peak_flops_sparse / 2     # MoE-CAP convention
+F_peak_dense = peak_flops                # table is already dense; see §4
 ```
 
 `activation` is the **number of distinct experts touched per layer** for that step (from the runner's `avg_expert_activation_{prefill,decode}` trace). `top_k` is the **per-token** activated experts (architecture constant).
@@ -67,16 +67,34 @@ Reads HF `config.json` `quantization_config` (overrides runner metadata, which r
 
 Provenance recorded in `inputs.precision_source`.
 
-## 4. Verified hardware peak (MoE-CAP convention: table = sparse, `/2` in denominator = dense)
+## 4. Verified hardware peak (table = **dense**, no `/2` in the denominator)
 
-| GPU key | HBM BW | BF16 sparse | FP8 sparse | INT4 sparse | FP4 sparse | Source |
-|---|---:|---:|---:|---:|---:|---|
-| `NVIDIA-A100-SXM4-80GB` | 2.04 TB/s | 624 | 1248 | 2496 | 1248 (= INT8) | MoE-CAP table; A100 datasheet |
-| `NVIDIA-H100-HBM3-80GB` | 3.35 TB/s | 1979 | 3958 | 3958 | 3958 | MoE-CAP table; H100 datasheet |
-| `NVIDIA-H200-141GB` | 4.80 TB/s | 1979 | 3958 | 3958 | 3958 | MoE-CAP table; H200 datasheet |
-| `NVIDIA-B200-183GB` | 8.00 TB/s | **4500** | **9000** | **18000** | **18000** | NVIDIA HGX B200 PCF + Lenovo lp2226 — overridden from MoE-CAP's dense entries to correct the table-is-dense bug |
-| `NVIDIA-B300-269GB` | 8.00 TB/s | **5000** | **10000** | **20000** | **20000** | NVIDIA Blackwell Ultra datasheet (gb300-nvl72) — added (MoE-CAP doesn't ship B300) |
-| `AMD-Instinct-MI355X-288GB` | 8.00 TB/s | 2500 | 5050 | 10100 | 10100 | MoE-CAP table; AMD MI355X official |
+TEASBench owns this table rather than importing MoE-CAP's, because vendors quote peak on
+different bases and mixing them biases S-MFU across vendors. Every figure below is dense.
+
+| GPU key | HBM BW | BF16 | FP8 | INT8 | FP4 | INT4 | Source |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `NVIDIA-A100-SXM4-80GB` | 2.04 TB/s | 312 | 312¹ | 624 | 312¹ | 1248 | A100 datasheet (leads dense; 2× sparse footnoted) |
+| `NVIDIA-H100-HBM3-80GB` | 3.35 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H100 datasheet (leads with-sparsity) |
+| `NVIDIA-H200-141GB` | 4.80 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H200 datasheet (same die as H100) |
+| `NVIDIA-B200-183GB` | 8.00 TB/s | 2250 | 4500 | 4500 | 9000 | 9000³ | NVIDIA HGX page, 8-GPU board ÷ 8 |
+| `NVIDIA-B300-269GB` | 8.00 TB/s | 2250 | 4500 | **187.5** | **13500** | 13500³ | NVIDIA HGX page, 8-GPU board ÷ 8 |
+| `AMD-Instinct-MI355X-288GB` | 8.00 TB/s | 2500 | 5050 | 5050 | 10100 | 10100³ | AMD Instinct MI355X GPU datasheet |
+
+¹ No FP8/FP4 tensor path on Ampere; falls back to the BF16 rate.
+² No FP4 tensor path on Hopper; falls back to the FP8 rate.
+³ Weight-only 4-bit checkpoints dequantise before the matmul, so this mirrors the card's FP4
+rate as a modelling assumption rather than a datasheet figure. Only A100 has a native INT4
+path. See the `int4` comment in the script.
+
+**Two B300 rows sit apart from the pattern.** NVFP4 is rated `144 | 108` PFLOPS
+(with-sparsity | dense) per 8-GPU board, so sparse is 1.33× dense rather than 2× — the uplift
+over B200 is on the dense figure. And INT8 is 3 POPS per board against B200's 72.
+
+**The Blackwell figures are HGX board specs ÷ 8.** The measured parts report
+`NVIDIA-B300-SXM6-AC-269GB` — air-cooled SXM modules. The GB300 NVL72 tray runs higher clocks
+and is quoted at 15 PF dense NVFP4; the HGX basis matches the hardware and keeps B200 and
+B300 comparable.
 
 All units TFLOPS. Per-GPU keys also augmented for `int8`, `fp4`, `int4` so the precision dispatch always finds a value.
 
@@ -94,15 +112,21 @@ Used as fallbacks to materialize the KV-cache term (S-MBU) and derive throughput
 | `longbench_v1` | 10,000 | 10,110 |
 | `longbench_v2` | 10,000 | 10,110 |
 
-## 6. Activation borrowing (vllm runs)
+## 6. Activation is per-run; S-MBU is null without it
 
-vllm metrics files have `expert_activation = 0` (only sglang's runner emits the trace). The script:
+Expert activation counts the experts a decode step actually loaded. That depends on the realised
+batch, so it is a property of *this* engine on *this* accelerator and is not transferable between
+runs. Only sglang's runner records it, and not on every run; no vllm run currently carries one.
 
-1. Scans every metrics file with non-zero activation, indexes them by `(model, dataset, batch_size_dir)`.
-2. For any run with zero activation, looks up that key and borrows the activation values (keeping its own `ttft`/`tpot`).
-3. Records the donor path in `sparsity.activation.source` (e.g. `amd/sglang/.../mi355xx4/batch-size-1/20260501-2342`).
+A run without its own trace publishes `activation_source: "unavailable"`, null activation values and
+a **null S-MBU**, rather than an imputed number. `inputs.precision_source` and this field are the two
+provenance markers on the sidecar.
 
-Same-key combinations across vllm and sglang are well-correlated because activation is a property of the model + dataset + batch policy, not the runner.
+**S-MFU is unaffected.** It uses the architectural `top_k`, not the measured activation, so every run
+publishes it — including the ones with no trace, which previously produced no sidecar at all.
+
+Within a single `(model, dataset, batch_size_dir)` group the measured activations vary several-fold
+across accelerators, which is why one run's value cannot stand in for another's.
 
 ## 7. Output schema (`sparsity_*.json`)
 
@@ -138,9 +162,11 @@ Same-key combinations across vllm and sglang are well-correlated because activat
       "gpu_key": "NVIDIA-B300-269GB",
       "num_gpus": 1,
       "peak_bandwidth_tb_s": 8.0,
-      "peak_flops_tf_s": 20000.0
+      "peak_flops_tf_s": 13500.0,
+      "peak_flops_basis": "dense"
     },
     "activation": {
+      "activation_source": "measured",
       "avg_expert_activation_prefill": 75.39,
       "avg_expert_activation_decode": 4.00
     },
@@ -162,16 +188,13 @@ Same-key combinations across vllm and sglang are well-correlated because activat
 
 ## 8. Verified counts (current run)
 
-```
-metrics files found:               389
-sparsity JSONs written:            370
-  └─ sglang (own activation):      197
-  └─ vllm   (borrowed activation): 173
-skipped:                            19
-  └─ no donor activation at same key:  8
-  └─ ttft/tpot missing (early profiler): 11
-activation lookup keys:             36
-```
+The script prints its own tallies on each run — metrics files found, sidecars written,
+`measured` against `unavailable`, and the skip reasons. Read them from the run rather than
+from here, so this section cannot go stale.
+
+Only sglang's runner records the trace, and not on every run; no vllm run currently carries
+one. Runs whose `gpu_key` does not resolve are skipped before a sidecar is written, so the
+`measured` count sits slightly below the number of metrics files holding a trace.
 
 ## 9. Reproduction
 
@@ -191,6 +214,6 @@ Outputs are sidecar files: `sparsity_<suffix>.json` (or `sparsity.json`) next to
 ## 10. Caveats
 
 1. **`attention_score = 0`** — Q·K^T and (scores·V) compute scales with context length; not subtracted from the metrics file in aggregate form. S-MFU undercounts attention compute slightly (negligible at small context, ~10% at 10K ctx).
-2. **MoE-CAP `peak_flops / 2`** convention assumes tables hold **sparse** peaks. B200 / B300 entries are explicitly normalized to sparse here (MoE-CAP shipped B200 as dense — a known upstream inconsistency that would have made our S-MFU 2× high on B200/B300).
+2. **Peak FLOPS is dense throughout**, so the denominator is the table value as written. The table is owned here rather than imported from MoE-CAP, which keeps one basis across vendors, and `inputs.peak_flops_basis` records it per sidecar.
 3. **gpt-oss-120b mxfp4** has `self_attn` + `mlp.router` kept at BF16; we apply fp4 uniformly. Attention params ≈ 0.8% of total weights → error is negligible.
-4. **Activation borrowing** assumes `(model, dataset, batch_size_dir)` is enough to predict activation — true to first order, since activation is dominated by routing behavior of the model on the input distribution, not the runner. The donor path is recorded in every sidecar for audit.
+4. **Activation is never borrowed.** It depends on the batch a run realised, so it is a property of that engine on that accelerator, varying several-fold across accelerators within one model, workload and batch regime. A run without its own trace publishes a null S-MBU, and `activation_source` records which case applies.

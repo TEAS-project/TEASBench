@@ -6,6 +6,12 @@ Two top-level metrics (identical schema for rent and buy):
   - avg_cost_per_request_usd
   - avg_cost_per_1M_output_tokens_usd
 
+Each rent/buy block also carries a `wall` sub-block pricing the whole-run wall clock:
+  - node_seconds_per_request = e2e_s (run makespan / N requests)
+  - cost_per_request_usd     = price_per_second * node_seconds_per_request
+This basis needs no batch profile, so it is present even on concurrent runs whose
+profile cannot support the per-token metrics (those runs get a wall-only block).
+
 When batch_token_profile is available, continuous-batching cost is amortized as:
   - prefill_seconds_per_request = TTFT / prefill_avg_batch_size
   - decode_seconds_per_request  = TPOT * decode_tokens_per_request / decode_avg_batch_size
@@ -103,6 +109,17 @@ GPU_SPECS: dict[str, dict] = {
         "price_source": "https://tenstorrent.com/en/hardware/cards",
         "tdp_w": 300,
         "tdp_source": "https://docs.tenstorrent.com/aibs/blackhole/",
+    },
+    # Cerebras publishes no CS-3 list price: the figure is derived from the Galaxy-1
+    # contract ($100M / 32 nodes = $3.13M) less bundled services, and the public range
+    # spans $1.56M (bulk) to ~$4M (full MemoryX). CS-3 is buy-only, so this estimate is
+    # the whole cost basis for its cells — unlike every other entry here, which cites a
+    # vendor or retail price. The unit is one CS-3 system.
+    "cs3": {
+        "price_per_unit_usd": 2500000.0,
+        "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
+        "tdp_w": 23000,
+        "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
     },
 }
 
@@ -307,6 +324,43 @@ def need_rent_prices_message(needed: list[str], have: dict[str, float]) -> str:
 
 
 
+def decode_profile_usable(tpot, batch_profile: dict) -> bool:
+    """True when the core DECODE-derived outputs can be computed: the per-1M
+    output-token cost and the effective output rate. These need only `tpot` and
+    `decode_avg_batch_size` — a missing prefill batch does not affect them, and
+    the decode token count is deliberately not required: it feeds only the
+    per-request seconds/cost outputs, which report null when it is withheld
+    rather than taking the per-1M cost down with them.
+
+    A missing decode batch must still fail: on concurrent runs the single-stream
+    fallback overstates cost by roughly the achieved batch, so the caller skips
+    those runs rather than falling back.
+    """
+    decode_bs = batch_profile.get("decode_avg_batch_size")
+    return (
+        isinstance(tpot, (int, float)) and tpot > 0
+        and isinstance(decode_bs, (int, float)) and decode_bs > 0
+    )
+
+
+def prefill_profile_usable(ttft, batch_profile: dict) -> bool:
+    """True when the PREFILL-derived outputs can be computed: the prefill seconds,
+    the per-request cost that includes them, and the prefill token rate. A run whose
+    prefill batch is withheld reports these as null and keeps its decode cost."""
+    prefill_bs = batch_profile.get("prefill_avg_batch_size")
+    return (
+        isinstance(ttft, (int, float))
+        and isinstance(prefill_bs, (int, float)) and prefill_bs > 0
+    )
+
+
+def profile_usable(ttft, tpot, batch_profile: dict) -> bool:
+    """True when BOTH halves are computable — the full batch_token_profile path."""
+    return decode_profile_usable(tpot, batch_profile) and prefill_profile_usable(
+        ttft, batch_profile
+    )
+
+
 def build_cost_metrics(
     *,
     price_per_s: float,
@@ -335,32 +389,42 @@ def build_cost_metrics(
     prefill_tokens_per_request = batch_profile.get("prefill_tokens_per_request")
     price_per_hour = price_per_s * 3600.0
 
-    if (
-        isinstance(ttft, (int, float))
-        and isinstance(tpot, (int, float)) and tpot > 0
-        and isinstance(decode_avg_batch_size, (int, float)) and decode_avg_batch_size > 0
-        and isinstance(decode_tokens_per_request, (int, float)) and decode_tokens_per_request >= 0
-        and isinstance(prefill_avg_batch_size, (int, float)) and prefill_avg_batch_size > 0
-    ):
-        prefill_seconds_per_request = ttft / prefill_avg_batch_size
-        decode_seconds_per_request = (tpot * decode_tokens_per_request) / decode_avg_batch_size
-        request_seconds = prefill_seconds_per_request + decode_seconds_per_request
+    if decode_profile_usable(tpot, batch_profile):
+        # Prefill terms are withheld, not estimated, when the prefill batch is null:
+        # they are the only outputs that depend on it, and the per-1M output-token
+        # cost below is computed from the decode fields alone.
+        have_prefill = prefill_profile_usable(ttft, batch_profile)
+        have_decode_tok = isinstance(decode_tokens_per_request, (int, float)) and decode_tokens_per_request >= 0
+        prefill_seconds_per_request = (ttft / prefill_avg_batch_size) if have_prefill else None
+        decode_seconds_per_request = (
+            (tpot * decode_tokens_per_request) / decode_avg_batch_size
+            if have_decode_tok else None
+        )
+        request_seconds = (
+            prefill_seconds_per_request + decode_seconds_per_request
+            if have_prefill and have_decode_tok else None
+        )
         output_token_seconds = tpot / decode_avg_batch_size
         effective_output_tokens_per_s = decode_avg_batch_size / tpot
-        avg_cost_per_request_usd = request_seconds * price_per_s
+        avg_cost_per_request_usd = (request_seconds * price_per_s) if request_seconds is not None else None
         avg_cost_per_1m_output_tokens_usd = output_token_seconds * 1_000_000 * price_per_s
-        prefill_cost_per_request_usd = prefill_seconds_per_request * price_per_s
-        decode_cost_per_request_usd = decode_seconds_per_request * price_per_s
+        prefill_cost_per_request_usd = (
+            prefill_seconds_per_request * price_per_s if have_prefill else None
+        )
+        decode_cost_per_request_usd = (
+            decode_seconds_per_request * price_per_s
+            if decode_seconds_per_request is not None else None
+        )
         prefill_tokens_per_s = None
-        if isinstance(prefill_tokens_per_request, (int, float)) and prefill_tokens_per_request > 0:
+        if have_prefill and isinstance(prefill_tokens_per_request, (int, float)) and prefill_tokens_per_request > 0:
             prefill_tokens_per_s = prefill_tokens_per_request * prefill_avg_batch_size / ttft
         return {
             "avg_cost_per_request_usd": avg_cost_per_request_usd,
             "avg_cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
             "method": "batch_token_profile",
-            "prefill_avg_batch_size": float(prefill_avg_batch_size),
+            "prefill_avg_batch_size": float(prefill_avg_batch_size) if have_prefill else None,
             "decode_avg_batch_size": float(decode_avg_batch_size),
-            "decode_generated_tokens_per_request": float(decode_tokens_per_request),
+            "decode_generated_tokens_per_request": float(decode_tokens_per_request) if have_decode_tok else None,
             "effective_output_tokens_per_s": effective_output_tokens_per_s,
             "formula": "price_per_second_usd * tpot_s / decode_avg_batch_size * 1e6",
             "breakdown": {
@@ -374,14 +438,14 @@ def build_cost_metrics(
                     "tpot_s": tpot,
                 },
                 "batch_profile": {
-                    "prefill_avg_batch_size": float(prefill_avg_batch_size),
+                    "prefill_avg_batch_size": float(prefill_avg_batch_size) if have_prefill else None,
                     "decode_avg_batch_size": float(decode_avg_batch_size),
                     "prefill_tokens_per_request": (
                         float(prefill_tokens_per_request)
                         if isinstance(prefill_tokens_per_request, (int, float))
                         else None
                     ),
-                    "decode_generated_tokens_per_request": float(decode_tokens_per_request),
+                    "decode_generated_tokens_per_request": float(decode_tokens_per_request) if have_decode_tok else None,
                 },
                 "throughput": {
                     "effective_output_tokens_per_s": effective_output_tokens_per_s,
@@ -446,6 +510,21 @@ def build_cost_metrics(
         },
     }
 
+def build_wall_block(price_per_s: float, e2e_s: float) -> dict:
+    """Wall-clock per-request cost: the node's whole run time divided over its requests.
+
+    e2e_s is the run makespan / N, so price * e2e_s charges every second the node spent
+    on the run — prefill, queueing and gaps included — to the requests it served. It is
+    a different quantity from avg_cost_per_request_usd, which charges engine-attributable
+    prefill+decode time only.
+    """
+    return {
+        "node_seconds_per_request": e2e_s,
+        "cost_per_request_usd": e2e_s * price_per_s,
+        "formula": "price_per_second_usd * node_seconds_per_request",
+    }
+
+
 def build_buy_block(
     gpu_key: str,
     num_gpus: int,
@@ -463,6 +542,7 @@ def build_buy_block(
     electricity_usd_per_kwh: float,
     scale_other_capital: float,
     buy_price_quote_time: Optional[str] = None,
+    include_token_cost: bool = True,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
     host = gpu_host_cpu.get(gpu_key)
@@ -513,13 +593,14 @@ def build_buy_block(
         "amortized_capital_usd_per_hour": amort_per_h,
         "energy_usd_per_hour": energy_per_h,
         "effective_hourly_rate_usd": effective_per_h,
-        "cost": build_cost_metrics(
+        "wall": build_wall_block(effective_per_s, e2e_s),
+        **({"cost": build_cost_metrics(
             price_per_s=effective_per_s,
             e2e_s=e2e_s,
             ttft=ttft,
             tpot=tpot,
             batch_profile=batch_profile,
-        ),
+        )} if include_token_cost else {}),
     }
 
 
@@ -721,7 +802,7 @@ def main() -> int:
 
     written = 0
     skipped = 0
-    skipped_no_profile = 0
+    wall_only = 0
     for f in metrics_files:
         info = describe_run(f, root)
         parsed = parse_gpu_dir(info["gpu_dir"])
@@ -743,22 +824,44 @@ def main() -> int:
             request_rate = perf.get("request/s")
             if request_rate:
                 e2e_s = 1.0 / request_rate
-        if e2e_s is None or tpot is None:
+        if e2e_s is None:
             skipped += 1
             continue
 
-        # Concurrent run with no measured batch profile: the single-stream fallback would inflate
-        # cost 10-20x for a run that actually batched. Skip it — a blank is more honest than a
-        # fabricated number. Single-query runs keep the fallback (single-stream is their real cost).
+        # batch-size-1 pins concurrency server-side, so both average batch sizes are 1.0 by
+        # construction. A profile violating that bound is an accounting artefact, not a
+        # measurement — discard it rather than price on it. Costing then takes the
+        # single-stream fallback, whose arithmetic is exact at batch 1 (cost/1M = tpot x price)
+        # and whose per-request cost rests on e2e rather than a token count from the same
+        # suspect block. The violating values stay untouched in metrics.json so the audit can
+        # keep flagging them; the sidecar records the drop below.
+        single = any(p == "batch-size-1" for p in f.parts)
+        profile_invalid = None
+        if single and batch_profile:
+            off = {
+                k: batch_profile[k]
+                for k in ("prefill_avg_batch_size", "decode_avg_batch_size")
+                if isinstance(batch_profile.get(k), (int, float))
+                and abs(batch_profile[k] - 1.0) > 1e-9
+            }
+            if off:
+                profile_invalid = {
+                    "reason": "avg batch size violates the single-stream bound of 1.0; "
+                              "profile not used for costing",
+                    "recorded": off,
+                }
+                batch_profile = {}
+
+        # Concurrent run whose batch profile cannot price the per-token metrics (absent, or
+        # partial — a missing field routes build_cost_metrics to the single-stream fallback,
+        # which inflates cost 10-20x for a run that actually batched). Those runs keep their
+        # wall-clock per-request cost, which needs no profile, and omit the `cost` block —
+        # a blank per-token cost is more honest than a fabricated one. Single-query runs
+        # keep the fallback (single-stream is their real cost).
         concurrent = any(p.startswith("batch-size-default") for p in f.parts)
-        decode_batch = batch_profile.get("decode_avg_batch_size")
-        if concurrent and not (isinstance(decode_batch, (int, float)) and decode_batch > 0):
-            # Remove any previously-committed cost so the skip is effective, not shadowed by a stale file.
-            stale = cost_path_for(f)
-            if stale.exists() and not args.dry_run:
-                stale.unlink()
-            skipped_no_profile += 1
-            continue
+        token_cost_ok = tpot is not None and not (concurrent and not decode_profile_usable(tpot, batch_profile))
+        if not token_cost_ok:
+            wall_only += 1
 
         payload = {
             "recorded_at": recorded_at,
@@ -777,6 +880,8 @@ def main() -> int:
                 "tpot_s": tpot,
             },
         }
+        if profile_invalid:
+            payload["batch_profile_invalid"] = profile_invalid
 
         if gpu_key in rent_prices:
             price_per_gpu_h = rent_prices[gpu_key]
@@ -788,14 +893,16 @@ def main() -> int:
                 "total_hourly_rate_usd": hourly_rate,
                 "price_per_second_usd": price_per_s,
                 "price_source": rent_price_sources.get(gpu_key, DEFAULT_RENT_PRICE_SOURCE),
-                "cost": build_cost_metrics(
+                "wall": build_wall_block(price_per_s, e2e_s),
+            }
+            if token_cost_ok:
+                payload["rent"]["cost"] = build_cost_metrics(
                     price_per_s=price_per_s,
                     e2e_s=e2e_s,
                     ttft=ttft,
                     tpot=tpot,
                     batch_profile=batch_profile,
-                ),
-            }
+                )
 
         buy = build_buy_block(
             gpu_key, num_gpus, e2e_s, ttft, tpot, batch_profile,
@@ -806,6 +913,7 @@ def main() -> int:
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
             buy_price_quote_time=buy_price_quote_time,
+            include_token_cost=token_cost_ok,
         )
         if buy is not None:
             payload["buy"] = buy
@@ -817,8 +925,8 @@ def main() -> int:
             out_path.write_text(json.dumps(payload, indent=2) + "\n")
         written += 1
 
-    print(f"\nWrote {written} cost JSON files (skipped {skipped}, "
-          f"skipped {skipped_no_profile} concurrent runs with no batch profile)")
+    print(f"\nWrote {written} cost JSON files (skipped {skipped}; "
+          f"{wall_only} concurrent runs with no batch profile carry wall-clock cost only)")
     return 0
 
 

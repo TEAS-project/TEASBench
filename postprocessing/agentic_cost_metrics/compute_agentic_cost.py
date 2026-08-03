@@ -19,8 +19,14 @@ mixing conventions:
   reserved_worker: charge both GPU and CPU for full end-to-end wall time as a
                    single-task/exclusive-worker upper bound.
 
-For transparency the cost JSON also reports an estimated time breakdown:
-  llm_active_s = ttft * avg_num_requests + tpot * avg_total_output_tokens
+The time breakdown below is not only reported, it drives `active_resource`:
+`llm_active_s` becomes the GPU-billable seconds and `tool_wait_s` the CPU-billable
+seconds, so a change to `prefill_s` moves the published buy cost.
+  prefill_s    = mean per-task total of the per-turn `prefill_time_s` records,
+                 falling back to `ttft * avg_num_requests` where those records
+                 are absent or cover only part of a task (`prefill_source`
+                 says which). See task_prefill_times().
+  llm_active_s = prefill_s + tpot * avg_total_output_tokens
   tool_wait_s  = max(0, avg_e2e_latency_s - llm_active_s)
 
 Output: a sibling JSON (`cost.json` / `cost_<suffix>.json`) is written next
@@ -206,6 +212,70 @@ def task_latencies(metrics_path: Path) -> list[float]:
     return latencies
 
 
+def task_prefill_times(
+    metrics_path: Path,
+    avg_num_requests: Optional[float],
+    avg_total_output_tokens: Optional[float],
+) -> list[float]:
+    """Per-task total prefill time (s), summed over a task's turns, or [].
+
+    `performance.ttft` does not mean the same thing across the agentic suite. SWE-bench and
+    MCP-Atlas publish a per-turn value, so `avg_num_requests * ttft` estimates the task total.
+    The IMO runners accumulate prefill across the turn loop and publish that sum as
+    `avg_ttft_ms`, so for those runs `ttft` is itself the task total: measured on the tree,
+    `ttft` over the per-task prefill total is 1.000 on every IMO run, against 0.03 (SWE) and
+    0.11 (MCP).
+
+    Summing the records answers the question without depending on which convention a run
+    follows. Runs also differ in layout -- most write one row per turn, some one row per task
+    -- and grouping on `example_index` gives the task total under either.
+
+    What matters is that the rows account for the whole task, which is checked against the
+    run's independently recorded output-token total: a row set spanning every turn sums to it,
+    while one holding only each task's first turn lands near 1/turns. Returns [] when the rows
+    cannot be grouped or fall short, and the caller falls back to `avg_num_requests * ttft`.
+
+    Without an output-token column there is nothing to check against, and the fallback counts
+    rows per task instead. That test cannot tell a per-task layout from a truncated per-turn
+    one, so it rejects both. No run currently reaches it.
+    """
+    files = sorted(metrics_path.parent.glob("detailed-results_*.jsonl"))
+    if not files:
+        return []
+    prefill: dict = {}
+    out_tokens: dict = {}
+    rows = 0
+    try:
+        with files[0].open() as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                value = record.get("prefill_time_s")
+                if value is None:
+                    continue
+                key = record.get("example_index")
+                if key is None:
+                    return []  # ungroupable: every row would collapse onto one task
+                rows += 1
+                prefill[key] = prefill.get(key, 0.0) + float(value)
+                tokens = record.get("output_tokens")
+                if tokens is not None:
+                    out_tokens[key] = out_tokens.get(key, 0.0) + float(tokens)
+    except (OSError, ValueError):
+        return []
+    if len(prefill) < 2:
+        return []
+    if avg_total_output_tokens and len(out_tokens) == len(prefill):
+        covered = sum(out_tokens.values()) / len(out_tokens)
+        return list(prefill.values()) if covered >= 0.8 * avg_total_output_tokens else []
+    # No output-token column to check against; fall back to counting rows per task.
+    if avg_num_requests and rows / len(prefill) < 0.8 * avg_num_requests:
+        return []
+    return list(prefill.values())
+
+
 def _percentile(values: list[float], pct: int) -> float:
     """Nearest-rank percentile."""
     ordered = sorted(values)
@@ -342,18 +412,41 @@ def _per_token_scale(output_tokens: float) -> float:
     return float("nan")
 
 
-def achieved_concurrency(perf: dict, latencies: list[float]) -> float:
+def achieved_concurrency(perf: dict, latencies: list[float], n_tasks=None) -> float:
     """Mean tasks in flight = total task-seconds / wall-clock seconds; 1.0 when not derivable.
 
     A run that executes tasks concurrently finishes N of them in far less than N x avg_e2e, so
     charging each task the whole node for its own wall time bills the node once per task in flight.
     Costs are therefore amortised over this value, which keeps a concurrent run comparable with a
-    serial one."""
+    serial one. Runs shipping no per-task rows but recording avg_e2e_latency_s use the identity
+    sum(latencies) == avg_e2e_latency_s * n_tasks, so the fallback measures the same quantity."""
+    # Wall recovery is uniform across the three agentic wall-time fields:
+    # total_wall_time_min is the field defined as the run wall; a producer that omits
+    # it writes the run wall in e2e_s (the swe/mcp producer outright; the IMO forks as
+    # the serial task loop's total, the same quantity on a serial run).
+    # avg_e2e_latency_s is never a wall - it is the per-task mean.
+    # Guard: a wall is physically >= the longest task; an e2e_s below max(latencies)
+    # is a per-request MEAN from some future producer and must not be read as a wall,
+    # or concurrency would inflate toward N and undercost every task.
     wall_min = perf.get("total_wall_time_min")
-    if not wall_min or not latencies:
+    if wall_min:
+        wall_s = wall_min * 60.0
+    else:
+        wall_s = perf.get("e2e_s")
+        if wall_s and latencies and wall_s < max(latencies):
+            wall_s = None
+        elif wall_s and not latencies and perf.get("avg_e2e_latency_s") and wall_s < perf["avg_e2e_latency_s"]:
+            wall_s = None  # same guard without rows: a wall is >= the mean too
+    if not wall_s:
         return 1.0
-    c = sum(latencies) / (wall_min * 60.0)
-    return c if c >= 1.0 else 1.0
+    if latencies:
+        c = sum(latencies) / wall_s
+        return c if c >= 1.0 else 1.0
+    avg = perf.get("avg_e2e_latency_s")
+    if avg and n_tasks:
+        c = avg * n_tasks / wall_s
+        return c if c >= 1.0 else 1.0
+    return 1.0
 
 
 def compute_costs_lumped(
@@ -581,7 +674,8 @@ def main() -> int:
 
         # Runs that omit the end-to-end summary fields still record each task individually.
         latencies = task_latencies(f)
-        concurrency = achieved_concurrency(perf, latencies)
+        n_tasks = (metrics.get("quality") or {}).get("total_examples")
+        concurrency = achieved_concurrency(perf, latencies, n_tasks)
         e2e_source = "metrics"
         if avg_e2e is None:
             if latencies:
@@ -596,14 +690,35 @@ def main() -> int:
             skipped += 1
             continue
 
-        llm_active_s = (num_req or 0) * ttft + out_tok * tpot
+        # Prefill comes from the per-turn records where they support it, and falls back to the
+        # num_req * ttft estimate otherwise. See task_prefill_times() for why ttft cannot be
+        # used directly across the suite.
+        prefill_times = task_prefill_times(f, num_req, out_tok)
+        if prefill_times:
+            prefill_s = sum(prefill_times) / len(prefill_times)
+            prefill_source = "measured"
+        else:
+            prefill_s = (num_req or 0) * ttft
+            prefill_source = "derived"
+
+        llm_active_s = prefill_s + out_tok * tpot
         tool_wait_s = max(0.0, avg_e2e - llm_active_s)
 
         p99_llm_active_s = None
         p99_tool_wait_s = None
-        if p99_e2e is not None and p99_ttft is not None and p99_tpot is not None:
-            p99_llm_active_s = (num_req or 0) * p99_ttft + out_tok * p99_tpot
-            p99_tool_wait_s = max(0.0, p99_e2e - p99_llm_active_s)
+        if p99_e2e is not None and p99_tpot is not None:
+            # The p99 prefill term comes from the same per-task series as the mean, so the two
+            # figures share a basis. Without this the average becomes physically possible while
+            # the p99 keeps the double-count.
+            if prefill_times:
+                p99_prefill_s = _percentile(prefill_times, 99)
+            elif p99_ttft is not None:
+                p99_prefill_s = (num_req or 0) * p99_ttft
+            else:
+                p99_prefill_s = None
+            if p99_prefill_s is not None:
+                p99_llm_active_s = p99_prefill_s + out_tok * p99_tpot
+                p99_tool_wait_s = max(0.0, p99_e2e - p99_llm_active_s)
 
         payload = {
             "recorded_at": recorded_at,
@@ -631,6 +746,8 @@ def main() -> int:
                 "avg_num_requests": num_req,
                 "avg_tool_call_count": tool_calls,
                 "avg_total_output_tokens": out_tok,
+                "prefill_s": prefill_s,
+                "prefill_source": prefill_source,
                 "llm_active_s": llm_active_s,
                 "tool_wait_s": tool_wait_s,
                 "p99_llm_active_s": p99_llm_active_s,

@@ -16,7 +16,8 @@ MODEL_SHORT_NAME_MAP={
     "Qwen3-235B-A22B-Instruct-2507": "qwen3-235b",
     "Qwen3-235B-A22B-Instruct-2507-FP8": "qwen3-235b-fp8",
     "DeepSeek-R1": "deepseek-r1",
-    "Kimi-K2.5": "kimi-k2.5"
+    "Kimi-K2.5": "kimi-k2.5",
+    "Qwen3-4B": "qwen3-4b"
 }
 
 DATASET_SHORT_NAME_MAP={
@@ -39,7 +40,8 @@ HF_MODEL_MAP={
     "Qwen3-235B-A22B-Instruct-2507": "Qwen/Qwen3-235B-A22B-Instruct-2507",
     "Qwen3-235B-A22B-Instruct-2507-FP8": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
     "DeepSeek-R1": "deepseek-ai/DeepSeek-R1",
-    "Kimi-K2.5": "moonshotai/Kimi-K2.5"
+    "Kimi-K2.5": "moonshotai/Kimi-K2.5",
+    "Qwen3-4B": "Qwen/Qwen3-4B"
 }
 
 # Container disc space to request per model on Vast.ai (--disk, in GB).
@@ -62,6 +64,12 @@ EIDF_GPU_MAP={
     "H100":"NVIDIA-H100-80GB-HBM3",
     "H200":"NVIDIA-H200"
 }
+
+# Directory name under $TEAS_OUTPUT_DIR on the PVC where jobs archive their full run
+# output. Deliberately distinct from the results_repo (git) name: the PVC copy is a
+# plain archive, never a git working tree, so it must not collide with a directory a
+# job's throwaway /dev/shm clone of the results repo might also be named after.
+PVC_ARCHIVE_DIR = "TEAS_Development_Results_Private-archive-nogit"
 
 VAST_GPU_MAP={
     "A100": "A100_SXM4",

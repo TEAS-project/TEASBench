@@ -33,6 +33,11 @@ variables_defaults:
         value: "3600"
       gpu_memory_fraction:
         flag: "--mem-fraction-static"
+      host:
+        flag: "--host"
+      trust_remote_code:
+        flag: "--trust-remote-code"
+
     vllm:
       port:
         flag: "--port"
@@ -46,9 +51,6 @@ variables_defaults:
         flag: "--model"
       tensor_parallel_size:
         flag: "--tensor-parallel-size"
-      expert_recording:
-        flag: "--enable-expert-distribution-metrics"
-        value: true
       batch_size:
         flag: "--max_num_seqs"
       max_context:
@@ -57,7 +59,8 @@ variables_defaults:
         flag: "--gpu_memory_utilization"
       kv_cache_dtype:
         flag: "--kv-cache-dtype"
-
+      trust_remote_code:
+        flag: "--trust-remote-code"
 
   client_flags:
     hf_model_path:
@@ -75,7 +78,6 @@ variables_defaults:
       flag: "--backend"
     chat_api:
       flag: "--use-chat-api"
-      value: true
     output_dir:
       flag: "--output_dir"
       value: "$RUN_DIR"
@@ -95,6 +97,8 @@ variables_defaults:
     output_length:
       flag: "--target-output-tokens"
       from_parameter: output_length
+    profiling_only:
+      flag: "--profiling-only"
 
 
   # Base settings 
@@ -112,7 +116,6 @@ variables_defaults:
         - hf_model_path
         - port
         - host
-        - expert_recording
         - tensor_parallel_size
 
   # Base settings
@@ -124,7 +127,6 @@ variables_defaults:
       - num_samples
       - api_url
       - backend
-      - chat_api
       - output_dir
       - input_length
       - output_length
@@ -428,8 +430,10 @@ variables_defaults:
     value:
     
   download_arena_hard_baseline_answers:
-    value: 
+    value:
 
+  expert_distribution_copy_command:
+    value:
 
 
 
@@ -439,30 +443,99 @@ variables_defaults:
 
 # Rules for conditional inclusion and values of variables depending on experiment parameters.
 # 'match' keys are ANDed together; list values within a key are ORed.
+# A match value can also be {not: [...]} to match when the parameter's value
+# is NOT in the given list (or not equal, if a single scalar is given).
 # server_flags / client_flags name canonical params (as defined above)
 # and supply the value to pass to that flag.
 rules:
 
-
+#######################################
 # Rules based on inference engine alone
+#######################################
+
+# always set SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR when# using sglang,
+# even for dense models despite no expert activation recording, otherwise
+# no core metrics
   - match:
       inference_engine:
         - "sglang"
+    client_flags:
+      backend: "sglang"
     extra_container_env:
       value: |
         - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
           value: "/dev/shm/sglang_expert_distribution_recorder"
-    client_flags:
-      backend: "sglang"
+
 
   - match:
       inference_engine:
         - "vllm"
     client_flags:
       backend: "vllm"
-        
 
-# Rules based on model alone
+
+# For SGLang need to set SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
+# to tell MoE-CAP to record expert distribution on server side. 
+# Expert-distribution recording only makes sense for MoE models, 
+# so exclude any non-MoE (e.g. dense models)
+  - match:
+      inference_engine:
+        - "sglang"
+      model:
+        not:
+          - "Qwen3-4B"
+    expert_distribution_copy_command:
+      value: |
+        find "$SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR" -name 'expert_distribution_record.jsonl' -exec cp {} $RUN_DIR/ \; 2>/dev/null || true
+
+  - match:
+      inference_engine:
+        - "vllm"
+      model:
+        not:
+          - "Qwen3-4B"
+      input_length:
+        not:
+          - "<defined>"
+      output_length:
+        not:
+          - "<defined>"
+    client_flags:
+      chat_api: true
+
+
+
+##################################
+# Rules for non-MoE (dense) models
+##################################
+
+# For profiling only (no expert distribution recording)
+# need to set MOE_CAP_PROFILING_ONLY for MoE-CAP to handle
+# SGLang correctly:
+  - match:
+      inference_engine:
+        - "sglang"
+      model:
+        - "Qwen3-4B"
+    extra_container_env:
+      value: |
+        - name: MOE_CAP_PROFILING_ONLY
+          value: "1"
+
+# Omit expert-distribution-recording flag from server command
+# and tell MoE-CAP client to profile only
+  - match:
+      model:
+        - "Qwen3-4B"
+    server_flags:
+      expert_recording: null
+    client_flags:
+      profiling_only: true
+
+
+#####################################
+# Rules based on specific model alone
+#####################################
   - match:
       model:
         - "DeepSeek-R1"
@@ -475,6 +548,15 @@ rules:
     server_flags:
       reasoning_parser: "kimi_k2"
 
+# Qwen3-4B is a dense model; run both engines' servers on localhost
+  - match:
+      model:
+        - "Qwen3-4B"
+    server_flags:
+      host: "127.0.0.1"
+      trust_remote_code: true
+      reasoning_parser: "qwen3"
+
   - match: 
       model:
         - "Qwen3-235B-A22B-Instruct-2507-FP8"
@@ -482,8 +564,9 @@ rules:
     server_flags:
       model_load_timeout: 3600
 
-
+#################################
 # Rules based on batch size alone
+#################################
   - match:
       batch_size:
         - "1"
@@ -492,7 +575,9 @@ rules:
     client_flags:
       batch_size: "1"
 
+##############################
 # Rules based on dataset alone
+##############################
   - match: 
       dataset:
         - "arena-hard"
@@ -510,8 +595,9 @@ rules:
               name: elm-openai-key-ap
               key: key
 
-
+###############################
 # Rules based on hardware alone
+###############################
   - match:
       gpu:
         - "A100"
@@ -525,8 +611,9 @@ rules:
       image:
         cuda_variant: "-cu130"
 
-
+###########################################
 # Rules based on model and inference engine
+###########################################
   - match:
       model:
         - "gpt-oss-20b"
@@ -545,8 +632,9 @@ rules:
     server_flags:
       reasoning_parser: "openai_gptoss"
 
-
+#########################################################################
 # Memory requirement tweaks for models that only barely fit in GPU memory
+#########################################################################
   - match:
       model:
         - "gpt-oss-120b"
@@ -617,17 +705,27 @@ rules:
       max_context: "200k"
       kv_cache_dtype: "fp8_e4m3"
 
-      
-# Activate fixed-length mode
+###################
+# Fixed-length mode
+###################
+# Forced-length runs profile only. Two reasons, both measured: on vLLM the
+# non-profiling path routes through the expert recorder, which reports a decode
+# token count unrelated to the forced length (zero, or a pass count); and a
+# judge scoring output padded to the target length produces a number that means
+# nothing, at real API cost.
   - match:
       input_length: "<defined>"
     client_flags:
       fixed_length_mode: true
+      profiling_only: true
+      chat_api: null
 
   - match:
       output_length: "<defined>"
     client_flags:
       fixed_length_mode: true
+      profiling_only: true
+      chat_api: null
 
 
 ####################
