@@ -128,7 +128,6 @@ variables_defaults:
       - num_samples
       - api_url
       - backend
-      - chat_api
       - output_dir
       - input_length
       - output_length
@@ -207,6 +206,16 @@ rules:
     expert_distribution_copy_command:
       value: |
         find "$SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR" -name 'expert_distribution_record.jsonl' -exec cp {} $RUN_DIR/ \; 2>/dev/null || true
+
+  - match:
+      inference_engine:
+        - "vllm"
+      model:
+        not:
+          - "Qwen3-4B"
+    client_flags:
+      chat_api: true
+
 
 
 ##################################
