@@ -138,39 +138,86 @@ spec:
                         
             echo "Server stopped. Copying files to pvc..."
 
-            # Copy data out before any git commands so we have the data in case of any git issues
-            RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/$timestamp
-            mkdir -p $RUN_OUTPUT_DIR
-            cp -R $RUN_DIR/* $RUN_OUTPUT_DIR/
-            cp /mnt/shared/job-configs/${k8s_job_name}.yaml $RUN_OUTPUT_DIR/
+            # Archive EVERYTHING to the PVC first, before any git operation, so the data
+            # survives regardless of what happens with the results repo.
+            PVC_RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@pvc_archive_dir@/@output_repo_dir@/$timestamp
+            mkdir -p $PVC_RUN_OUTPUT_DIR
+            cp -R $RUN_DIR/* $PVC_RUN_OUTPUT_DIR/
+            cp /mnt/shared/job-configs/${k8s_job_name}.yaml $PVC_RUN_OUTPUT_DIR/
             rm /mnt/shared/job-configs/${k8s_job_name}.yaml
 
             # We've also moved our log so change where we are writing
-            exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
-            cd $RUN_OUTPUT_DIR           
+            exec &>> $PVC_RUN_OUTPUT_DIR/stdout_stderr.log
+            cd $PVC_RUN_OUTPUT_DIR
 
-            echo "Files copied to pvc at $RUN_OUTPUT_DIR"
+            echo "Files copied to pvc at $PVC_RUN_OUTPUT_DIR"
 
-            # Add commit IDs of MoE-CAP and TEASBench to metadata.json
-            jq --arg moe_cap_commit $MOE_CAP_COMMIT '.system_environment += {"teasbench_commit": "@teasbench_commit@", "moe_cap_commit": $moe_cap_commit}' $RUN_OUTPUT_DIR/metadata.json > tmp.json && mv tmp.json $RUN_OUTPUT_DIR/metadata.json
-            rm $RUN_OUTPUT_DIR/tmp.json
+            # Add commit IDs of MoE-CAP and TEASBench to metadata.json (on the PVC copy)
+            jq --arg moe_cap_commit $MOE_CAP_COMMIT '.system_environment += {"teasbench_commit": "@teasbench_commit@", "moe_cap_commit": $moe_cap_commit}' $PVC_RUN_OUTPUT_DIR/metadata.json > tmp.json && mv tmp.json $PVC_RUN_OUTPUT_DIR/metadata.json
 
             job_end_time=$(date +%s)
             job_duration=$((job_end_time - job_start_time))
             echo "Job took $job_duration seconds"
-            jq -n --arg job_duration $job_duration '{job: $job_duration}'  >> $RUN_OUTPUT_DIR/timings.json
+            jq -n --arg job_duration $job_duration '{job: $job_duration}'  >> $PVC_RUN_OUTPUT_DIR/timings.json
 
-            # Pull to refresh before committing and pushing
+            #############################################
+            # Publish curated subset to results repo    #
+            #############################################
+            # The PVC directory above is a pure archive shared by every job on this PVC and is
+            # never a git working tree. All git work happens in a throwaway clone in /dev/shm so
+            # that a fresh checkout can never collide with another job's untracked archive files,
+            # and concurrent pushes are handled by retrying with a rebase rather than by locking.
             GIT_TOKEN="${GIT_TOKEN%$'\n'}"   # remove trailing newline that causes issues
-            git pull "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
-            
-            # Commit data to results repository
-            git config user.email "autopush@eidf"
-            git config user.name "Pipeline Autopush"
-            
-            git add metrics*.json metadata*.json *.yaml timings.json
-            git commit -m "auto: @name_k8s@"
-            git push "https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+            REPO_URL="https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+            CLONE=/dev/shm/@results_repo@
+            PUBLISH_SUBDIR="@output_repo_dir@/$timestamp"
+
+            rm -rf "$CLONE"
+            if ! git clone --quiet "$REPO_URL" "$CLONE"; then
+                echo "RESULTS PUBLISH FAILED: could not clone results repo; data is in $PVC_RUN_OUTPUT_DIR"
+            else
+                git -C "$CLONE" config user.email "autopush@eidf"
+                git -C "$CLONE" config user.name "Pipeline Autopush"
+
+                LOCAL_RUN_OUTPUT_DIR="$CLONE/$PUBLISH_SUBDIR"
+                mkdir -p "$LOCAL_RUN_OUTPUT_DIR"
+
+                # Copy ONLY the files we publish, and copy them from the PVC archive: metadata.json
+                # has just been enriched with the commit IDs, timings.json has just had the job
+                # duration appended, and the job yaml exists only there -- none of that is in $RUN_DIR.
+                shopt -s nullglob
+                publish_files=( $PVC_RUN_OUTPUT_DIR/metrics*.json \
+                                $PVC_RUN_OUTPUT_DIR/metadata*.json \
+                                $PVC_RUN_OUTPUT_DIR/*.yaml \
+                                $PVC_RUN_OUTPUT_DIR/timings.json )
+                shopt -u nullglob
+                if [ ${#publish_files[@]} -gt 0 ]; then
+                    cp "${publish_files[@]}" "$LOCAL_RUN_OUTPUT_DIR"/
+                fi
+
+                # The clone's run dir contains only the files copied above, so -A stages exactly
+                # the intended subset and cannot abort the way a non-matching pathspec does.
+                git -C "$CLONE" add -A -- "$PUBLISH_SUBDIR"
+
+                if git -C "$CLONE" diff --cached --quiet; then
+                    echo "RESULTS PUBLISH FAILED: nothing staged for $PUBLISH_SUBDIR; data is in $PVC_RUN_OUTPUT_DIR"
+                else
+                    git -C "$CLONE" commit -q -m "auto: @name_k8s@"
+                    PUSHED=0
+                    for attempt in 1 2 3 4 5 6; do
+                        if git -C "$CLONE" push -q "$REPO_URL" HEAD:main; then PUSHED=1; break; fi
+                        echo "push attempt $attempt rejected; rebasing onto origin/main"
+                        git -C "$CLONE" pull --rebase -q "$REPO_URL" main || break
+                        sleep $(( (RANDOM % 20) + 5 ))
+                    done
+                    if [ $PUSHED -eq 1 ]; then
+                        echo "RESULTS PUBLISHED to $PUBLISH_SUBDIR"
+                    else
+                        echo "RESULTS PUBLISH FAILED after retries; data is in $PVC_RUN_OUTPUT_DIR"
+                    fi
+                fi
+                rm -rf "$CLONE"
+            fi
 
             echo "Finalising container"
         ports:
