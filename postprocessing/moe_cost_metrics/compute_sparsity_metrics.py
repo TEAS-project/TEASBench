@@ -44,12 +44,16 @@ from typing import Optional
 # parts those datacentre datasheets do not cover:
 #   GB10 (DGX Spark)          273 GB/s LPDDR5X   https://www.nvidia.com/en-us/products/workstations/dgx-spark/
 #   Blackhole p150b           512 GB/s GDDR6     https://docs.tenstorrent.com/aibs/blackhole/specifications.html
+#
+# The Blackwell entries are the HGX per-GPU column, 7.7 TB/s. Reading the NVL72 column of the
+# same table instead gives 8.0, which is what these held before, and the measured part is an
+# air-cooled SXM module rather than an NVL72 tray.
 MEM_BW_DICT = {
-    "NVIDIA-A100-SXM4-80GB": 2.04e12,
+    "NVIDIA-A100-SXM4-80GB": 2.039e12,
     "NVIDIA-H100-HBM3-80GB": 3.35e12,
     "NVIDIA-H200-141GB": 4.8e12,
-    "NVIDIA-B200-183GB": 8.0e12,
-    "NVIDIA-B300-269GB": 8.0e12,
+    "NVIDIA-B200-183GB": 7.7e12,
+    "NVIDIA-B300-269GB": 7.7e12,
     "AMD-Instinct-MI355X-288GB": 8.0e12,
     "NVIDIA-GB10": 273e9,
     "Tenstorrent-Blackhole-P150b": 512e9,
@@ -63,24 +67,31 @@ def get_peak_bw(gpu_key):
 # Peak FLOPS is owned here for the same reason, because vendors quote it on
 # different bases and mixing them silently biases S-MFU across vendors.
 #
-# Every entry is DENSE, and S-MFU divides by the value as written. Each names its
+# Every entry is DENSE and per GPU, and S-MFU divides by the value as written. Each names its
 # with-sparsity counterpart inline where the vendor publishes one. The bases differ by
 # vendor and part:
 #   - H100/H200 datasheets lead with the with-sparsity figure; dense is half.
 #   - A100's leads with dense (312) and footnotes the sparse one (624).
-#   - Blackwell prints both. B300 NVFP4 is the one row where sparse is 1.33x dense rather
-#     than 2x: the uplift over B200 is on the dense figure.
-#   - AMD's main column is dense. It publishes 2x sparse rates for FP16/BF16/INT8 and
-#     OCP-FP8 only; MXFP4/6/8 are marked N/A for sparsity.
+#   - Blackwell's per-GPU rows are with-sparsity and halve, except FP4, which prints
+#     `sparse | dense` outright and is taken as printed. Its board totals disagree with its
+#     own per-GPU rows there: HGX B300 reads 18 | 14 PFLOPS per GPU while the total on the
+#     same page reads 144 | 108, and 108/8 is 13.5. A per-GPU catalog follows the per-GPU row.
+#   - AMD names dense and with-sparsity as separate rows, and its sparse figures are 2.02x
+#     dense rather than 2x: OCP-FP8 reads 10.1 PFLOPS sparse against 5.0 dense, INT8 10.1
+#     POPS against 5.0. Halving the sparse row is what put FP8 and INT8 at 5050 here.
+#     MXFP4/6/8 have no sparsity row at all.
 #
-# Blackwell figures are HGX 8-GPU board specs divided by 8 — the form factor the measured
-# parts report (`NVIDIA-B300-SXM6-AC-269GB`, air-cooled SXM), and one basis for both cards.
+# The Blackwell figures are the HGX per-GPU columns, not the NVL72 ones: the measured part
+# reports `NVIDIA-B300-SXM6-AC-269GB`, an air-cooled SXM module. NVL72 trays run higher clocks
+# and are quoted above HGX on several rows — FP4 15 PFLOPS dense against 14, INT8 330 TOPS
+# against 307, bandwidth 8.0 TB/s against 7.7.
 #
-# Sources (vendor primary, dense figures):
+# Sources (vendor primary, per-GPU dense figures):
 #   A100        https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf
 #   H100/H200   https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306
-#   B200/B300   https://www.nvidia.com/en-us/data-center/hgx/
-#   MI355X      AMD Instinct MI355X GPU datasheet (amd.com)
+#   B200        https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+#   B300        https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-datasheet
+#   MI355X      https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
 #   GB10        https://www.nvidia.com/en-us/products/workstations/dgx-spark/ — NVIDIA
 #               publishes one figure, 1 PFLOP FP4 with sparsity. The dense FP4 entry halves
 #               it (the NVIDIA convention above) and each wider precision halves again,
@@ -114,7 +125,7 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H200-141GB": 1979e12,
         "NVIDIA-B200-183GB": 4500e12,         # 9000 w/ sparsity
         "NVIDIA-B300-269GB": 4500e12,         # 9000 w/ sparsity
-        "AMD-Instinct-MI355X-288GB": 5050e12,
+        "AMD-Instinct-MI355X-288GB": 5000e12, # 10100 w/ sparsity; the published dense row
         "NVIDIA-GB10": 250e12,
     },
     "int8": {
@@ -122,10 +133,10 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H100-HBM3-80GB": 1979e12,
         "NVIDIA-H200-141GB": 1979e12,
         "NVIDIA-B200-183GB": 4500e12,          # 9000 w/ sparsity
-        # Blackwell Ultra's INT8 tensor path is far narrower than B200's: 3 POPS per HGX
-        # board against 72.
-        "NVIDIA-B300-269GB": 187.5e12,         # 375 w/ sparsity
-        "AMD-Instinct-MI355X-288GB": 5050e12,
+        # Blackwell Ultra's INT8 tensor path is far narrower than B200's: 307 TOPS per GPU
+        # against 9 POPS, both with-sparsity figures from the same table.
+        "NVIDIA-B300-269GB": 153.5e12,         # 307 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 5000e12,  # 10100 w/ sparsity; the published dense row
         "NVIDIA-GB10": 250e12,                 # the fp8 rate, as on every card but A100/B300
     },
     "fp4": {
@@ -133,11 +144,12 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H100-HBM3-80GB": 1979e12,     # no FP4 tensor cores -> FP8 path
         "NVIDIA-H200-141GB": 1979e12,
         "NVIDIA-B200-183GB": 9000e12,         # 18000 w/ sparsity
-        # The HGX board is rated 144 | 108 PFLOPS NVFP4 (with-sparsity | dense), so
-        # sparse is 1.33x dense here. The GB300 NVL72 tray is quoted at 15 PF dense and
-        # runs higher clocks than the air-cooled SXM modules these runs use.
-        "NVIDIA-B300-269GB": 13500e12,        # 18000 w/ sparsity
-        "AMD-Instinct-MI355X-288GB": 10100e12,
+        # The one row NVIDIA prints as `sparse | dense` rather than sparse alone: HGX B300
+        # reads 18 | 14 PFLOPS per GPU, so dense is taken as printed rather than halved, and
+        # sparse is 1.29x dense here. The board total on the same page implies 13.5 (108
+        # PFLOPS across 8 GPUs), which is where this entry sat before.
+        "NVIDIA-B300-269GB": 14000e12,        # 18000 w/ sparsity
+        "AMD-Instinct-MI355X-288GB": 10100e12, # MXFP4; AMD publishes no sparsity row for it
         "NVIDIA-GB10": 500e12,
     },
     # `int4` is reached by weight-only 4-bit checkpoints (compressed-tensors
@@ -150,7 +162,7 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-H100-HBM3-80GB": 1979e12,
         "NVIDIA-H200-141GB": 1979e12,
         "NVIDIA-B200-183GB": 9000e12,
-        "NVIDIA-B300-269GB": 13500e12,
+        "NVIDIA-B300-269GB": 14000e12,
         "AMD-Instinct-MI355X-288GB": 10100e12,
         "NVIDIA-GB10": 500e12,
     },

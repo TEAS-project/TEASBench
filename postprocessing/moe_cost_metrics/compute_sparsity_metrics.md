@@ -70,16 +70,17 @@ Provenance recorded in `inputs.precision_source`.
 ## 4. Verified hardware peak (table = **dense**, no `/2` in the denominator)
 
 TEASBench owns this table rather than importing MoE-CAP's, because vendors quote peak on
-different bases and mixing them biases S-MFU across vendors. Every figure below is dense.
+different bases and mixing them biases S-MFU across vendors. Every figure below is dense and
+per GPU.
 
 | GPU key | HBM BW | BF16 | FP8 | INT8 | FP4 | INT4 | Source |
 |---|---:|---:|---:|---:|---:|---:|---|
-| `NVIDIA-A100-SXM4-80GB` | 2.04 TB/s | 312 | 312¹ | 624 | 312¹ | 1248 | A100 datasheet (leads dense; 2× sparse footnoted) |
+| `NVIDIA-A100-SXM4-80GB` | 2.039 TB/s | 312 | 312¹ | 624 | 312¹ | 1248 | A100 datasheet (leads dense; 2× sparse footnoted) |
 | `NVIDIA-H100-HBM3-80GB` | 3.35 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H100 datasheet (leads with-sparsity) |
 | `NVIDIA-H200-141GB` | 4.80 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H200 datasheet (same die as H100) |
-| `NVIDIA-B200-183GB` | 8.00 TB/s | 2250 | 4500 | 4500 | 9000 | 9000³ | NVIDIA HGX page, 8-GPU board ÷ 8 |
-| `NVIDIA-B300-269GB` | 8.00 TB/s | 2250 | 4500 | **187.5** | **13500** | 13500³ | NVIDIA HGX page, 8-GPU board ÷ 8 |
-| `AMD-Instinct-MI355X-288GB` | 8.00 TB/s | 2500 | 5050 | 5050 | 10100 | 10100³ | AMD Instinct MI355X GPU datasheet |
+| `NVIDIA-B200-183GB` | 7.70 TB/s | 2250 | 4500 | 4500 | 9000 | 9000³ | Blackwell datasheet, HGX B200 per-GPU column |
+| `NVIDIA-B300-269GB` | 7.70 TB/s | 2250 | 4500 | **153.5** | **14000** | 14000³ | Blackwell Ultra datasheet, HGX B300 per-GPU column |
+| `AMD-Instinct-MI355X-288GB` | 8.00 TB/s | 2500 | 5000 | 5000 | 10100 | 10100³ | MI355X product page, dense rows as published |
 | `NVIDIA-GB10` | 0.273 TB/s | 125⁴ | 250⁴ | 250⁴ | 500⁴ | 500³ | DGX Spark page (one published figure) |
 | `Tenstorrent-Blackhole-P150b` | 0.512 TB/s | — | — | — | — | — | Tenstorrent specifications⁵ |
 
@@ -94,16 +95,21 @@ Dense FP4 halves it, and each wider precision halves again, mirroring the B200 l
 120-core spec). Blackhole runs therefore publish S-MBU with a null S-MFU rather than divide by
 a denominator we cannot defend.
 
-**Two B300 rows sit apart from the pattern.** NVFP4 is rated `144 | 108` PFLOPS
-(with-sparsity | dense) per 8-GPU board, so sparse is 1.33× dense rather than 2× — the uplift
-over B200 is on the dense figure. And INT8 is 3 POPS per board against B200's 72.
+**Two B300 rows sit apart from the pattern.** Every other Blackwell row is published with
+sparsity and halved here; FP4 is the one NVIDIA prints as `sparse | dense` outright, `18 | 14`
+PFLOPS per GPU, so its dense figure is taken as printed. Sparse is therefore 1.29× dense
+rather than 2×, and the uplift over B200 is on the dense figure. And INT8 is 307 TOPS per GPU
+with sparsity against B200's 9 POPS — a ~29× narrower tensor path, so 153.5 TFLOPS dense.
 
-**The Blackwell figures are HGX board specs ÷ 8.** The measured parts report
-`NVIDIA-B300-SXM6-AC-269GB` — air-cooled SXM modules. The GB300 NVL72 tray runs higher clocks
-and is quoted at 15 PF dense NVFP4; the HGX basis matches the hardware and keeps B200 and
-B300 comparable.
+**The Blackwell figures are the per-GPU HGX columns.** The measured parts report
+`NVIDIA-B300-SXM6-AC-269GB` — air-cooled SXM modules, the HGX form factor. The NVL72 trays run
+higher clocks and are quoted above HGX on several rows (FP4 15 PFLOPS dense, INT8 330 TOPS,
+bandwidth 8.0 TB/s), so the HGX column is the one that matches the hardware and keeps B200 and
+B300 comparable. Where a datasheet's board total disagrees with its own per-GPU row — HGX B300
+FP4 totals `144 | 108` PFLOPS across 8 GPUs, implying 13.5 dense against the 14 printed
+per GPU — the per-GPU row governs, because S-MFU divides by `num_gpus × peak`.
 
-All units TFLOPS. Per-GPU keys also augmented for `int8`, `fp4`, `int4` so the precision dispatch always finds a value.
+All units TFLOPS, per GPU. Each precision dict in the script is a complete literal with nothing patched over it after the table is built, so the dispatch either finds a documented value or returns zero — as it does for Blackhole, em-dashed in every FLOPS column above, whose runs publish a null S-MFU rather than a guess.
 
 Metadata `gpu_type` strings normalized to the keys above; raw variants seen and mapped:
 `AMD-Instinct-MI355X`, `AMD-Instinct-MI355X-288GB`, `AMD--288GB`, `NVIDIA-A100-SXM4-80GB`, `NVIDIA-B200-180GB`, `NVIDIA-B200-183GB`, `NVIDIA-B300-SXM6-AC-269GB`, `NVIDIA-H100-HBM3-80GB`, `NVIDIA-H200-140GB`, `NVIDIA-H200-141GB`. `Unknown` falls back to the path prefix (`a100|h100|h200|b200|b300|mi355x`).
@@ -168,8 +174,8 @@ across accelerators, which is why one run's value cannot stand in for another's.
       "precision_source": "quantization_config.quant_method=mxfp4",
       "gpu_key": "NVIDIA-B300-269GB",
       "num_gpus": 1,
-      "peak_bandwidth_tb_s": 8.0,
-      "peak_flops_tf_s": 13500.0,
+      "peak_bandwidth_tb_s": 7.7,
+      "peak_flops_tf_s": 14000.0,
       "peak_flops_basis": "dense"
     },
     "activation": {
@@ -180,14 +186,14 @@ across accelerators, which is why one run's value cannot stand in for another's.
     "prefill": {
       "ttft_s": 0.079,
       "prefill_tokens_per_s": 126428.15,
-      "S_MBU": 0.0544,
-      "S_MFU": 0.1151
+      "S_MBU": 0.0565,
+      "S_MFU": 0.1110
     },
     "decode": {
       "tpot_s": 0.00518,
       "output_tokens_per_s": 193.11,
-      "S_MBU": 0.0594,
-      "S_MFU": 0.00021
+      "S_MBU": 0.0617,
+      "S_MFU": 0.00020
     }
   }
 }

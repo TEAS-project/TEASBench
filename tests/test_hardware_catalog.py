@@ -19,11 +19,11 @@ DOC = (
 # module used to rewrite B200 to 8 TB/s after the table was built, which made an attempt to
 # correct that number a no-op with nothing to show for it.
 DOCUMENTED_BW = {
-    "NVIDIA-A100-SXM4-80GB": 2.04e12,
+    "NVIDIA-A100-SXM4-80GB": 2.039e12,
     "NVIDIA-H100-HBM3-80GB": 3.35e12,
     "NVIDIA-H200-141GB": 4.8e12,
-    "NVIDIA-B200-183GB": 8.0e12,
-    "NVIDIA-B300-269GB": 8.0e12,
+    "NVIDIA-B200-183GB": 7.7e12,
+    "NVIDIA-B300-269GB": 7.7e12,
     "AMD-Instinct-MI355X-288GB": 8.0e12,
     "NVIDIA-GB10": 273e9,
     "Tenstorrent-Blackhole-P150b": 512e9,
@@ -34,14 +34,24 @@ DOC_COLUMNS = ("bfloat16", "fp8", "int8", "fp4", "int4")
 
 
 def _doc_rows():
-    """The hardware table from the published methodology, keyed by GPU key."""
+    """The hardware table from the published methodology, keyed by GPU key.
+
+    Row width is checked against the header because the cell comparison zips the two and zip
+    truncates to the shorter side: a row that lost cells to a bad edit would otherwise stop
+    checking the precisions past its end instead of failing.
+    """
     lines = DOC.read_text().splitlines()
     start = next(n for n, line in enumerate(lines) if line.startswith("| GPU key"))
+    width = len(lines[start].strip("|").split("|"))
     rows = {}
     for line in lines[start + 2:]:
         if not line.startswith("|"):
             break
         cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) != width:
+            raise AssertionError(
+                f"doc table row {cells[0]} holds {len(cells)} cells against the header's {width}"
+            )
         rows[cells[0].strip("`")] = cells[1:7]
     return rows
 
@@ -71,10 +81,18 @@ class HardwareCatalogTests(unittest.TestCase):
 
     def test_every_card_resolves_in_every_precision(self):
         # Precision dispatch takes whatever the run recorded. A card missing from one dict
-        # publishes a null S-MFU for those runs instead of an answer.
-        for card in PEAK_FLOPS_DICT["bfloat16"]:
+        # publishes a null S-MFU for those runs instead of an answer. Seeded from the union
+        # rather than from bfloat16, because the omission this guards against is exactly a
+        # card that is present in some precision dicts and absent from others.
+        for card in {c for d in PEAK_FLOPS_DICT.values() for c in d}:
             for precision in PRECISIONS:
                 self.assertGreater(get_peak_flops(card, precision), 0, f"{card} @ {precision}")
+
+    def test_float16_mirrors_bfloat16(self):
+        # The doc table has no FP16 column and the basis tests never index float16, so an
+        # entry here could be any multiple of the truth with nothing failing. Every card runs
+        # the two at the same rate, which makes the whole dict checkable in one line.
+        self.assertEqual(PEAK_FLOPS_DICT["float16"], PEAK_FLOPS_DICT["bfloat16"])
 
     def test_int4_mirrors_fp4_except_on_ampere(self):
         # Weight-only 4-bit checkpoints dequantise before the matmul, so the card's FP4 rate
@@ -95,14 +113,18 @@ class HardwareCatalogTests(unittest.TestCase):
         self.assertEqual(missing, set(), f"catalogued in code, absent from the doc table: {missing}")
 
     def test_doc_table_cells_match_the_catalog(self):
+        # delta only absorbs the float round-trip through the decimal cell text. It was 1e9,
+        # which is exactly the width of the A100 gap between a datasheet 2.039 TB/s and the
+        # rounded 2.04 the table used to print, so the check could not tell the two apart in
+        # either direction. Every documented cell is exact, so nothing needs the slack.
         for card, cells in _doc_rows().items():
             self.assertAlmostEqual(
-                _num(cells[0]) * 1e12, get_peak_bw(card), delta=1e9,
+                _num(cells[0]) * 1e12, get_peak_bw(card), delta=1e6,
                 msg=f"{card} bandwidth",
             )
             for cell, precision in zip(cells[1:], DOC_COLUMNS):
                 self.assertAlmostEqual(
-                    _num(cell) * 1e12, get_peak_flops(card, precision), delta=1e9,
+                    _num(cell) * 1e12, get_peak_flops(card, precision), delta=1e6,
                     msg=f"{card} {precision}",
                 )
 
