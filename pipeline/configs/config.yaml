@@ -172,11 +172,20 @@ rules:
 #######################################
 # Rules based on inference engine alone
 #######################################
+
+# always set SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR when# using sglang,
+# even for dense models despite no expert activation recording, otherwise
+# no core metrics
   - match:
       inference_engine:
         - "sglang"
     client_flags:
       backend: "sglang"
+    extra_container_env:
+      value: |
+        - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
+          value: "/dev/shm/sglang_expert_distribution_recorder"
+
 
   - match:
       inference_engine:
@@ -195,10 +204,6 @@ rules:
       model:
         not:
           - "Qwen3-4B"
-    extra_container_env:
-      value: |
-        - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
-          value: "/dev/shm/sglang_expert_distribution_recorder"
     expert_distribution_copy_command:
       value: |
         find "$SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR" -name 'expert_distribution_record.jsonl' -exec cp {} $RUN_DIR/ \; 2>/dev/null || true
