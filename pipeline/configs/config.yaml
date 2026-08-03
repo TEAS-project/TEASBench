@@ -78,7 +78,6 @@ variables_defaults:
       flag: "--backend"
     chat_api:
       flag: "--use-chat-api"
-      value: true
     output_dir:
       flag: "--output_dir"
       value: "$RUN_DIR"
@@ -213,6 +212,12 @@ rules:
       model:
         not:
           - "Qwen3-4B"
+      input_length:
+        not:
+          - "<defined>"
+      output_length:
+        not:
+          - "<defined>"
     client_flags:
       chat_api: true
 
@@ -431,10 +436,12 @@ rules:
     client_flags:
       fixed_length_mode: true
       profiling_only: true
+      chat_api: null
 
   - match:
       output_length: "<defined>"
     client_flags:
       fixed_length_mode: true
       profiling_only: true
+      chat_api: null
 
