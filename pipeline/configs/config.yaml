@@ -176,14 +176,14 @@ rules:
 # always set SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR when# using sglang,
 # even for dense models despite no expert activation recording, otherwise
 # no core metrics
-- match:
+  - match:
       inference_engine:
         - "sglang"
     client_flags:
       backend: "sglang"
     extra_container_env:
       value: |
-        - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR  
+        - name: SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR
           value: "/dev/shm/sglang_expert_distribution_recorder"
 
 
