@@ -47,14 +47,18 @@ def b64(text):
 def resolve_moe(template, config, args):
     """Resolve the server/client commands for one MoE-family CSV row.
 
-    Prints exactly four lines to stdout (UNCHANGED from before agentic
-    support was added -- run_benchmarks.sh's contract/parsing is untouched):
+    Prints five lines to stdout:
       1. the Huggingface model path (e.g. unsloth/gpt-oss-20b)
       2. the server command, base64-encoded
       3. the client command, base64-encoded
       4. env var exports needed before starting the server, base64-encoded
+      5. a fixed terminator, "END_MOE_CONTRACT"
     The commands are base64-encoded because they contain backslash-newline
     continuations, which otherwise break line-based parsing in bash.
+    We also need the terminator (line 5) to help bash parse this output
+    when field 4 is empty (i.e. no environment variables). Otherwise,
+    it's possible for run_benchmarks.sh to run out of input and crash.
+    Very similar to the terminator returned by resolve_agentic().
     """
     if args.dataset is None or args.num_samples is None:
         sys.exit("ERROR: --dataset and --num-samples are required for MoE rows "
@@ -83,6 +87,7 @@ def resolve_moe(template, config, args):
     print(b64(server_cmd))
     print(b64(client_cmd))
     print(b64(env_exports))
+    print("END_MOE_CONTRACT")
 
 def resolve_agentic(template, config, args):
     """Resolve the agentic_server/agentic_client commands (and the
@@ -204,10 +209,10 @@ def main():
 
     Family is selected the same way generate.py selects it: by whether
     --benchmark is set to one of utils.AGENTIC_BENCHMARKS (see
-    utils.benchmark_family). MoE rows (no --benchmark) print exactly the
-    original four-line contract, completely unchanged -- see resolve_moe's
-    docstring. Agentic rows print a ten-line contract with a leading
-    "agentic" line -- see resolve_agentic's docstring.
+    utils.benchmark_family). MoE rows (no --benchmark) print a five-line
+    contract ending in a fixed terminator -- see resolve_moe's docstring.
+    Agentic rows print a ten-line contract with a leading "agentic" line
+    -- see resolve_agentic's docstring.
     """
 
     # run_benchmarks.sh / run_agentic_benchmarks.sh provide these args
