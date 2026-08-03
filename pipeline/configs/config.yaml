@@ -412,13 +412,20 @@ rules:
 ###################
 # Fixed-length mode
 ###################
+# Forced-length runs profile only. Two reasons, both measured: on vLLM the
+# non-profiling path routes through the expert recorder, which reports a decode
+# token count unrelated to the forced length (zero, or a pass count); and a
+# judge scoring output padded to the target length produces a number that means
+# nothing, at real API cost.
   - match:
       input_length: "<defined>"
     client_flags:
       fixed_length_mode: true
+      profiling_only: true
 
   - match:
       output_length: "<defined>"
     client_flags:
       fixed_length_mode: true
+      profiling_only: true
 
