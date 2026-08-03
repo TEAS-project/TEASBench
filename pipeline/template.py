@@ -24,6 +24,10 @@ class Template:
                 excluded = rule_value["not"]
                 if not isinstance(excluded, list):
                     excluded = [excluded]
+                if DEFINED_SENTINEL in excluded:
+                    if experiment_value is not None and experiment_value != "":
+                        return False
+                    excluded = [e for e in excluded if e != DEFINED_SENTINEL]
                 if experiment_value in excluded:
                     return False
                 continue
