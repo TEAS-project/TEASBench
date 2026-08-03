@@ -126,6 +126,7 @@ PEAK_FLOPS_DICT = {
         # board against 72.
         "NVIDIA-B300-269GB": 187.5e12,         # 375 w/ sparsity
         "AMD-Instinct-MI355X-288GB": 5050e12,
+        "NVIDIA-GB10": 250e12,                 # the fp8 rate, as on every card but A100/B300
     },
     "fp4": {
         "NVIDIA-A100-SXM4-80GB": 312e12,      # A100 has no FP4 tensor cores -> mxfp4 upcasts to bf16
@@ -151,6 +152,7 @@ PEAK_FLOPS_DICT = {
         "NVIDIA-B200-183GB": 9000e12,
         "NVIDIA-B300-269GB": 13500e12,
         "AMD-Instinct-MI355X-288GB": 10100e12,
+        "NVIDIA-GB10": 500e12,
     },
 }
 

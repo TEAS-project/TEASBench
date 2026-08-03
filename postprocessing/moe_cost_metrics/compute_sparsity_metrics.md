@@ -80,12 +80,19 @@ different bases and mixing them biases S-MFU across vendors. Every figure below 
 | `NVIDIA-B200-183GB` | 8.00 TB/s | 2250 | 4500 | 4500 | 9000 | 9000³ | NVIDIA HGX page, 8-GPU board ÷ 8 |
 | `NVIDIA-B300-269GB` | 8.00 TB/s | 2250 | 4500 | **187.5** | **13500** | 13500³ | NVIDIA HGX page, 8-GPU board ÷ 8 |
 | `AMD-Instinct-MI355X-288GB` | 8.00 TB/s | 2500 | 5050 | 5050 | 10100 | 10100³ | AMD Instinct MI355X GPU datasheet |
+| `NVIDIA-GB10` | 0.273 TB/s | 125⁴ | 250⁴ | 250⁴ | 500⁴ | 500³ | DGX Spark page (one published figure) |
+| `Tenstorrent-Blackhole-P150b` | 0.512 TB/s | — | — | — | — | — | Tenstorrent specifications⁵ |
 
 ¹ No FP8/FP4 tensor path on Ampere; falls back to the BF16 rate.
 ² No FP4 tensor path on Hopper; falls back to the FP8 rate.
 ³ Weight-only 4-bit checkpoints dequantise before the matmul, so this mirrors the card's FP4
 rate as a modelling assumption rather than a datasheet figure. Only A100 has a native INT4
 path. See the `int4` comment in the script.
+⁴ Derived, not datasheet. NVIDIA publishes a single GB10 figure — 1 PFLOP FP4 with sparsity.
+Dense FP4 halves it, and each wider precision halves again, mirroring the B200 ladder.
+⁵ No dense FLOPS figure published: Tenstorrent quotes only a BLOCKFP8 rate (664 TFLOPS at the
+120-core spec). Blackhole runs therefore publish S-MBU with a null S-MFU rather than divide by
+a denominator we cannot defend.
 
 **Two B300 rows sit apart from the pattern.** NVFP4 is rated `144 | 108` PFLOPS
 (with-sparsity | dense) per 8-GPU board, so sparse is 1.33× dense rather than 2× — the uplift
