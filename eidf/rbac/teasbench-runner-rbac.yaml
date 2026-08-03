@@ -1,0 +1,55 @@
+# RBAC for teasbench.sandbox.k8s.InClusterK8sProvider.
+#
+# InClusterK8sProvider runs `kubectl` from inside a TEASBench Job pod to
+# create/watch/delete per-task sandbox and exec Jobs, and to `kubectl cp`/
+# `kubectl exec` into exec containers for harness evaluation. The default
+# in-cluster service account usually cannot do any of this, so this
+# ServiceAccount + Role + RoleBinding must be applied once, up front, by
+# someone with rights to create RBAC objects in the target namespace
+# (a self-service EIDF project member often does not have this).
+#
+# If your EIDF project does not permit applying this file, skip it and use
+# `sandbox_mode: port-forward` (teasbench.sandbox.k8s.PortForwardK8sProvider)
+# instead, driving the run from a login node where your own kubectl
+# credentials already have the necessary rights.
+#
+# The namespace below is templated as "eidf230ns" - change every occurrence
+# to your own EIDF project namespace before applying.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: teasbench-runner
+  namespace: eidf230ns
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: teasbench-runner
+  namespace: eidf230ns
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]  # kubectl exec, and kubectl cp (which tars data over exec)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: teasbench-runner
+  namespace: eidf230ns
+subjects:
+  - kind: ServiceAccount
+    name: teasbench-runner
+    namespace: eidf230ns
+roleRef:
+  kind: Role
+  name: teasbench-runner
+  apiGroup: rbac.authorization.k8s.io

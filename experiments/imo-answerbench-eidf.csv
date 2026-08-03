@@ -1,0 +1,7 @@
+family,benchmark,inference_engine,model,gpu,num_gpu,num_tasks,concurrency,batch_size
+agentic,imo-answerbench,sglang,gpt-oss-120b,A100,2,100,4,default
+agentic,imo-answerbench,sglang,gpt-oss-120b,H100,2,100,4,default
+agentic,imo-answerbench,sglang,gpt-oss-120b,H200,1,100,4,default
+agentic,imo-answerbench,vllm,gpt-oss-120b,A100,2,100,4,default
+agentic,imo-answerbench,vllm,gpt-oss-120b,H100,2,100,4,default
+agentic,imo-answerbench,vllm,gpt-oss-120b,H200,1,100,4,default

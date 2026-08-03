@@ -2,4 +2,18 @@ MoE-Benchmark/direct-test-scripts/configs/sglang*
 MoE-Benchmark/direct-test-scripts/configs/vllm*
 MoE-Benchmark/direct-test-scripts/configs_loop/sglang*
 MoE-Benchmark/direct-test-scripts/configs_loop/vllm*
+
+# Generated k8s manifests / Vast.ai launch scripts. pipeline/generate.py writes
+# these per experiment row; they are build products of experiments/*.csv plus
+# configs/config.yaml, so committing them would duplicate the source of truth
+# and go stale. docs/USER_GUIDE.md uses ./out as the worked example.
+out/
+pipeline/out/
+
+# Local venv created by pipeline/generate.sh
+pipeline/venv/
+
+__pycache__/
 *.pyc
+
+.DS_Store

@@ -118,7 +118,7 @@ variables_defaults:
         - host
         - tensor_parallel_size
 
-  # Base settings 
+  # Base settings
   client_command:
     base_command: "python3 -m moe_cap.runner.openai_api_profile"
     flags:
@@ -130,6 +130,288 @@ variables_defaults:
       - output_dir
       - input_length
       - output_length
+
+
+  ###################
+  # AGENTIC FAMILY  #
+  ###################
+  # Shared across all three agentic benchmarks (imo-answerbench, mcp-atlas,
+  # swe-bench-lite): a separate inference-engine server process
+  # (agentic_server_flags / agentic_server_command, ported verbatim from the
+  # imo-answerbench branch, where they are already well-tuned for both
+  # engines) plus agent_cap.agents as the client
+  # (agentic_client_flags / agentic_client_command). Per-benchmark
+  # differences -- which evaluator, which strategy, whether a tool-server
+  # sidecar is needed, ... -- are supplied entirely by the rules further
+  # below, never by forking pipeline/templates/agentic.yaml. See
+  # docs/agentic-pipeline-design.md for the full picture.
+
+  agentic_server_flags:
+    # --- Shared ---
+    hf_model_path:
+      flag: "--model-path"       # sglang: --model-path <hf_id>
+    model_id:
+      flag: "--model"
+      from_parameter: hf_model_path   # vllm: --model <hf_id>
+    host:
+      flag: "--host"
+      value: "127.0.0.1"
+    port:
+      flag: "--port"
+      value: "8000"
+    served_model_name:
+      flag: "--served-model-name"
+      value: "gpt-oss"
+    tensor_parallel_size:
+      flag: "--tensor-parallel-size"
+    trust_remote_code:
+      flag: "--trust-remote-code"
+      value: true
+    dtype:
+      flag: "--dtype"
+      value: "auto"
+    kv_cache_dtype:
+      flag: "--kv-cache-dtype"
+      # value supplied per-GPU by rules below (A100 -> auto, H100/H200 -> fp8_e4m3)
+    # --- SGLang-specific ---
+    log_level:
+      flag: "--log-level"
+      value: "warning"
+    context_length:
+      flag: "--context-length"
+      value: "131072"
+    mem_fraction_static:
+      flag: "--mem-fraction-static"
+      value: "0.85"
+    random_seed:
+      flag: "--random-seed"
+      value: "42"
+    chunked_prefill_size:
+      flag: "--chunked-prefill-size"
+      value: "16384"
+    cuda_graph_max_bs:
+      flag: "--cuda-graph-max-bs"
+      value: "8"
+    allow_auto_truncate:
+      flag: "--allow-auto-truncate"
+      value: true
+    # --- vllm-specific ---
+    seed:
+      flag: "--seed"
+      value: "42"
+    max_num_seqs:
+      flag: "--max-num-seqs"
+      value: "256"
+    gpu_memory_utilization:
+      flag: "--gpu-memory-utilization"
+      value: "0.85"
+    max_model_len:
+      flag: "--max-model-len"
+      value: "131072"
+    stream_interval:
+      flag: "--stream-interval"
+      value: "1"
+    tool_call_parser:
+      flag: "--tool-call-parser"
+      value: "openai"
+    async_scheduling:
+      flag: "--async-scheduling"
+      value: true
+    disable_log_stats:
+      flag: "--disable-log-stats"
+      value: true
+    enable_prefix_caching:
+      flag: "--enable-prefix-caching"
+      value: true
+
+  agentic_server_command:
+    sglang:
+      base_command: "TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 python -m sglang.launch_server"
+      flags:
+        - hf_model_path
+        - host
+        - port
+        - log_level
+        - served_model_name
+        - context_length
+        - mem_fraction_static
+        - tensor_parallel_size
+        - trust_remote_code
+        - dtype
+        - kv_cache_dtype
+        - chunked_prefill_size
+        - cuda_graph_max_bs
+        - allow_auto_truncate
+    vllm:
+      base_command: "python -m vllm.entrypoints.openai.api_server"
+      flags:
+        - model_id
+        - host
+        - port
+        - served_model_name
+        - tensor_parallel_size
+        - max_num_seqs
+        - gpu_memory_utilization
+        - max_model_len
+        - dtype
+        - kv_cache_dtype
+        - stream_interval
+        - tool_call_parser
+        - async_scheduling
+        - disable_log_stats
+        - enable_prefix_caching
+        - trust_remote_code
+
+  # Canonical agent_cap.agents client flags. Not every entry here is
+  # necessarily selected by a given benchmark's agentic_client_command.flags
+  # list below -- entries not selected still render correctly if a rule adds
+  # them via agentic_client_flags (see build_command's "Conditional
+  # overrides"), exactly like the MoE client_flags entries judge_url /
+  # judge_model / judge_key / baseline_answers, which only ever appear via
+  # the arena-hard rule further down and are never in client_command.flags.
+  agentic_client_flags:
+    agents_config:
+      flag: "--config"
+    dataset:
+      flag: "--dataset"
+      from_parameter: benchmark   # our CSV column is 'benchmark', not 'dataset'
+                                   # (kept distinct from the MoE dataset column)
+    num_tasks:
+      flag: "--num-tasks"
+    task_indices:
+      flag: "--task-indices"
+    concurrency:
+      flag: "--concurrency"
+    output_dir:
+      flag: "--output-dir"
+      value: "$OUTPUT_ROOT"
+    evaluator:
+      flag: "--evaluator"
+    strategy:
+      flag: "--strategy"
+    use_streaming:
+      flag: "--use-streaming"
+      value: true
+    tool_backend:
+      flag: "--tool-backend"
+    mcp_server_url:
+      flag: "--mcp-server-url"
+    sweagent_deployment:
+      flag: "--sweagent-deployment"
+    sweagent_dir:
+      flag: "--sweagent-dir"
+    sweagent_image_repo:
+      flag: "--sweagent-image-repo"
+    sweagent_call_limit:
+      flag: "--sweagent-call-limit"
+    sandbox_provider:
+      flag: "--sandbox-provider"
+    exec_provider:
+      flag: "--exec-provider"
+    max_turns:
+      flag: "--max-turns"
+      value: "20"   # matches agent_cap.agents' own fallback; imo-answerbench overrides to 128
+    # model / base_url / api_key / hf_model_path: defined for completeness
+    # (all four correspond to real agent_cap.agents flags) but never selected
+    # by any benchmark's agentic_client_command.flags list below.
+    # agents_config (--config) supplies the endpoint (name/base_url/api_key)
+    # for all three benchmarks instead, and cli.py's single-agent quick
+    # flags only fill in gaps the config file leaves unset (see
+    # agent_cap/agents/cli.py:_build_agent_specs), so also passing these
+    # would be redundant. hf_model_path has no CLI flag on agent_cap.agents
+    # at all today -- @hf_model_path@ is used directly elsewhere in the
+    # template instead (e.g. for TEAS_MODEL_NAME).
+    model:
+      flag: "--model"
+    base_url:
+      flag: "--base-url"
+    api_key:
+      flag: "--api-key"
+    hf_model_path:
+      flag: "--model-path"
+
+  # Identical flags list for both engines: agent_cap.agents is engine-agnostic
+  # at the client level (it only ever talks to base_url over HTTP). Kept
+  # per-engine for structural symmetry with agentic_server_command; the
+  # per-benchmark differences (agents_config, evaluator, strategy,
+  # task_indices, tool_backend, sweagent_*, sandbox/exec_provider, ...) are
+  # supplied by the rules below via agentic_client_flags, not by varying this
+  # list. max_turns is deliberately NOT here even though every benchmark ends
+  # up setting it -- each benchmark's own rule supplies it (see "Conditional
+  # overrides" in Template.build_command), so it is rendered exactly once per
+  # command instead of once from a static default here and once more from
+  # the rule that actually wants a non-default value.
+  agentic_client_command:
+    sglang:
+      base_command: "python -m agent_cap.agents"
+      flags:
+        - dataset
+        - num_tasks
+        - concurrency
+        - output_dir
+    vllm:
+      base_command: "python -m agent_cap.agents"
+      flags:
+        - dataset
+        - num_tasks
+        - concurrency
+        - output_dir
+
+  agentcap_image:
+    sglang:
+      value: "ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312"
+    vllm:
+      value: "ghcr.io/yufan196884/imo-answerbench-env:latest"
+
+  # AgentCAP checkout used by the agentic path. agentcap_ref can be pinned to
+  # a specific commit/tag for reproducibility; "main" (tracking the default
+  # branch) matches the imo-answerbench branch's existing behaviour, which
+  # clones with no ref pinning at all.
+  agentcap_repo:
+    value: "github.com/Auto-CAP/AgentCAP.git"
+  agentcap_ref:
+    value: "main"
+
+  # Per-engine environment-setup script (inlined into the job at generation
+  # time). sglang needs a torch/torchvision repair; vllm only needs a sanity
+  # import check. Reused verbatim from the imo-answerbench branch.
+  agentic_env_setup_script:
+    sglang:
+      value: "scripts/setup_sglang_env.sh"
+    vllm:
+      value: "scripts/setup_vllm_env.sh"
+
+  # sglang/vllm versions actually shipped in agentcap_image (a different
+  # image from the MoE inference_engine_version/image entries above), read by
+  # agent_cap.agents.teas_output via the TEAS_ENGINE_VERSION env var.
+  agentic_inference_engine_version:
+    sglang: "0.5.12.post1"
+    vllm: "0.21.0"
+
+  # Composable blocks referenced by pipeline/templates/agentic.yaml (see
+  # docs/agentic-pipeline-design.md). Each defaults to empty here, so a
+  # benchmark that doesn't need one renders an empty block; rules below fill
+  # in the ones each benchmark actually needs.
+  sidecar_containers:
+    value:
+  sidecar_wait:
+    value:
+  extra_setup:
+    value:
+  service_account:
+    value:
+  teas_env_exports:
+    value:
+  # Vast.ai's capability-equivalent of sidecar_containers (see workstream D /
+  # pipeline/vast/resolve_commands.py): there are no pod sidecars on Vast.ai,
+  # so the tool server is started as a background process in the same
+  # container instead. This variable carries only the "start it" step; the
+  # "wait for it to be ready" step is deliberately NOT duplicated here -- it
+  # is pure bash with no k8s-specific content, so both platforms reuse the
+  # exact same sidecar_wait value (resolve_commands.py concatenates
+  # tool_server_setup + sidecar_wait itself; see its docstring).
+  tool_server_setup:
+    value:
 
 
   # Other variables needed to make up substitutions for template.yaml
@@ -410,7 +692,7 @@ rules:
         - "H100"
     server_flags:
       max_context: "200k"
-      
+
   - match:
       model:
         - "Qwen3-235B-A22B-Instruct-2507-FP8"
@@ -444,4 +726,519 @@ rules:
       fixed_length_mode: true
       profiling_only: true
       chat_api: null
+
+
+####################
+# AGENTIC FAMILY   #
+####################
+# Matched on 'benchmark' (imo-answerbench / mcp-atlas / swe-bench-lite),
+# and on 'platform' where that matters. Every existing MoE rule above this
+# point is untouched.
+
+# Agentic: KV-cache dtype depends on GPU memory headroom. A100 runs in full
+# precision; H100/H200 quantise the KV cache to fp8. Generalised from the
+# imo-answerbench branch's dataset-keyed version (which only covered
+# imo-answerbench) to the 'benchmark' key, covering all three agentic
+# benchmarks -- they share the same agentic_server_flags/_command, so the
+# same GPU-memory tuning applies regardless of which benchmark is driving
+# the client.
+  - match:
+      benchmark:
+        - "imo-answerbench"
+        - "mcp-atlas"
+        - "swe-bench-lite"
+      gpu:
+        - "A100"
+    agentic_server_flags:
+      kv_cache_dtype: "auto"
+
+  - match:
+      benchmark:
+        - "imo-answerbench"
+        - "mcp-atlas"
+        - "swe-bench-lite"
+      gpu:
+        - "H100"
+        - "H200"
+    agentic_server_flags:
+      kv_cache_dtype: "fp8_e4m3"
+
+
+# --- imo-answerbench ---------------------------------------------------
+# agents_config is engine-specific (endpoint protocol/engine differ), so it
+# is set per (benchmark, inference_engine); everything else is shared across
+# both engines and set once below.
+  # agents_config path prefix is platform-specific: EIDF clones TEASBench
+  # fresh into /dev/shm at job runtime, while Vast.ai bakes pipeline/configs
+  # into the image at /opt/teasbench (see pipeline/vast/{sglang,vllm}/Dockerfile*)
+  # -- so each (benchmark, engine) pair needs one rule per platform. platform
+  # defaults to "eidf" for CSVs that predate the column (see utils.py), which
+  # covers every existing EIDF experiments CSV.
+  - match:
+      benchmark:
+        - "imo-answerbench"
+      inference_engine:
+        - "sglang"
+      platform:
+        - "eidf"
+    agentic_client_flags:
+      agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/imo-answerbench_gptoss_sglang.yaml"
+
+  - match:
+      benchmark:
+        - "imo-answerbench"
+      inference_engine:
+        - "vllm"
+      platform:
+        - "eidf"
+    agentic_client_flags:
+      agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/imo-answerbench_gptoss_vllm.yaml"
+
+  - match:
+      benchmark:
+        - "imo-answerbench"
+      inference_engine:
+        - "sglang"
+      platform:
+        - "vastai"
+    agentic_client_flags:
+      agents_config: "/opt/teasbench/pipeline/configs/agents/imo-answerbench_gptoss_sglang.yaml"
+
+  - match:
+      benchmark:
+        - "imo-answerbench"
+      inference_engine:
+        - "vllm"
+      platform:
+        - "vastai"
+    agentic_client_flags:
+      agents_config: "/opt/teasbench/pipeline/configs/agents/imo-answerbench_gptoss_vllm.yaml"
+
+  - match:
+      benchmark:
+        - "imo-answerbench"
+    agentic_client_flags:
+      evaluator: "imo"
+      strategy: "single"
+      max_turns: 128
+    # no sidecar, no extra setup -- the composable blocks default to empty
+
+
+# --- mcp-atlas -----------------------------------------------------------
+  - match:
+      benchmark:
+        - "mcp-atlas"
+      inference_engine:
+        - "sglang"
+      platform:
+        - "eidf"
+    agentic_client_flags:
+      agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/mcp-atlas_gptoss_sglang.yaml"
+
+  - match:
+      benchmark:
+        - "mcp-atlas"
+      inference_engine:
+        - "vllm"
+      platform:
+        - "eidf"
+    agentic_client_flags:
+      agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/mcp-atlas_gptoss_vllm.yaml"
+
+  - match:
+      benchmark:
+        - "mcp-atlas"
+      inference_engine:
+        - "sglang"
+      platform:
+        - "vastai"
+    agentic_client_flags:
+      agents_config: "/opt/teasbench/pipeline/configs/agents/mcp-atlas_gptoss_sglang.yaml"
+
+  - match:
+      benchmark:
+        - "mcp-atlas"
+      inference_engine:
+        - "vllm"
+      platform:
+        - "vastai"
+    agentic_client_flags:
+      agents_config: "/opt/teasbench/pipeline/configs/agents/mcp-atlas_gptoss_vllm.yaml"
+
+  - match:
+      benchmark:
+        - "mcp-atlas"
+    agentic_client_flags:
+      strategy: "single"
+      tool_backend: "mcp"
+      mcp_server_url: "http://127.0.0.1:1984"
+      use_streaming: true
+      evaluator: "gtfa"
+      max_turns: 20
+    # One fixed tool-server sidecar in the same pod (port 1984). Secrets are
+    # referenced by name (mcp-atlas-github-token / mcp-atlas-brave-api-key) --
+    # never inlined -- see pipeline/README.md for what must exist in the
+    # cluster.
+    sidecar_containers:
+      value: |
+        - name: mcp-atlas-sidecar
+          image: ghcr.io/scaleapi/mcp-atlas:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              python3 -c "
+              import httpx
+              if not hasattr(httpx, 'TimeoutError'):
+                  httpx.TimeoutError = httpx.TimeoutException
+              import site, os
+              sc = os.path.join(site.getsitepackages()[0], 'sitecustomize.py')
+              os.makedirs(os.path.dirname(sc), exist_ok=True)
+              with open(sc, 'w') as f:
+                  f.write('import httpx\nif not hasattr(httpx, \"TimeoutError\"): httpx.TimeoutError = httpx.TimeoutException\n')
+              print('httpx.TimeoutError patched')
+              "
+              # NOT `exec`: the server runs in the background so this script can
+              # wait for the main container's shutdown sentinel and then exit.
+              #
+              # A Job pod with restartPolicy: Never only reaches Succeeded when
+              # EVERY container has terminated. A tool server that runs forever
+              # therefore keeps the pod Running after the benchmark is done, the
+              # Job never completes, and the GPU stays allocated indefinitely --
+              # ttlSecondsAfterFinished cannot help, because it only starts once
+              # the Job has finished. (Kubernetes >= 1.29 solves this natively with
+              # sidecar initContainers, restartPolicy: Always, which are excluded
+              # from the completion calculation; this sentinel is the portable
+              # equivalent for clusters below that.)
+              /agent-environment/entrypoint.sh uv run python -m uvicorn agent_environment.main:app --host 0.0.0.0 --port 1984 &
+              MCP_PID=$!
+
+              while kill -0 $MCP_PID 2>/dev/null; do
+                  if [ -f /var/run/teasbench/main-container-done ]; then
+                      echo "Main container finished; shutting the tool server down."
+                      kill $MCP_PID 2>/dev/null || true
+                      wait $MCP_PID 2>/dev/null || true
+                      exit 0
+                  fi
+                  sleep 2
+              done
+              echo "Tool server exited on its own (pid $MCP_PID)." >&2
+              exit 1
+          workingDir: /agent-environment
+          ports:
+            - containerPort: 1984
+          env:
+            - name: ENABLED_SERVERS
+              value: "arxiv,brave-search,calculator,cli-mcp-server,clinicaltrialsgov-mcp-server,context7,ddg-search,desktop-commander,fetch,filesystem,git,github,mcp-code-executor,mcp-server-code-runner,memory,met-museum,open-library,osm-mcp-server,pubmed,weather,whois,wikipedia"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-atlas-github-token
+                  key: token
+            - name: BRAVE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-atlas-brave-api-key
+                  key: key
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+          volumeMounts:
+            - mountPath: /var/run/teasbench
+              name: sidecar-signal
+    sidecar_wait:
+      value: |
+        echo "Waiting for MCP Atlas sidecar..."
+        mcp_ready=0
+        for i in $(seq 1 120); do
+          if curl -sf -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:1984/list-tools > /dev/null 2>&1; then
+            echo "MCP Atlas sidecar ready after ${i}s"
+            mcp_ready=1
+            break
+          fi
+          sleep 1
+        done
+        if [ $mcp_ready -eq 0 ]; then
+          echo "MCP Atlas sidecar did not become ready within 120s." >&2
+          exit 1
+        fi
+    # GTFAEvaluatorAdapter.__init__ (agent_cap/agents/evaluators.py) discards
+    # every constructor kwarg, so the judge: block in mcp-atlas_gptoss_*.yaml
+    # is NOT what actually configures the judge for evaluator=gtfa --
+    # agent_cap.evaluators.gtfa_eval.GTFAEvaluator reads EVAL_LLM_MODEL /
+    # EVAL_LLM_BASE_URL / EVAL_LLM_API_KEY from the environment directly (see
+    # docs/agentic-pipeline-design.md). Point it at the same Gemini endpoint
+    # imo-answerbench's judge already uses, reusing the GEMINI_API_KEY
+    # container env var (from the gemini-api-key secret) rather than a
+    # second copy of it.
+    extra_setup:
+      value: |
+        export EVAL_LLM_MODEL="gemini-3.1-flash-lite"
+        export EVAL_LLM_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai"
+        export EVAL_LLM_API_KEY="$GEMINI_API_KEY"
+    teas_env_exports:
+      value: |
+        export TEAS_BACKEND="mcp-atlas-localmcp"
+    # Vast.ai only (see pipeline/vast/resolve_commands.py): no sidecar
+    # container exists there, so start the same MCP Atlas server
+    # (AgentCAP-teasbench/mcp-server/start.sh) as a background process
+    # instead. EIDF ignores this variable entirely (it renders sidecar_containers
+    # into the pod spec instead); resolve_commands.py is the only reader of
+    # tool_server_setup, and it never reads sidecar_containers.
+    tool_server_setup:
+      value: |
+        # start.sh needs an .env and exits 1 without one; write_mcp_env.sh turns
+        # the Vast.ai instance secrets into that file. ENABLED_SERVERS is pinned
+        # to the same 22-server list the EIDF sidecar uses (see
+        # utils.MCP_ENABLED_SERVERS, and the parity test in
+        # tests/test_mcp_env.py) -- the server set *is* the benchmark, so the two
+        # platforms drifting apart would silently make their numbers
+        # incomparable.
+        bash /opt/teasbench/pipeline/scripts/write_mcp_env.sh \
+          /opt/AgentCAP/third_party/mcp-atlas \
+          "arxiv,brave-search,calculator,cli-mcp-server,clinicaltrialsgov-mcp-server,context7,ddg-search,desktop-commander,fetch,filesystem,git,github,mcp-code-executor,mcp-server-code-runner,memory,met-museum,open-library,osm-mcp-server,pubmed,weather,whois,wikipedia"
+
+        MCP_DATA_DIR=/dev/shm/mcp_data
+        mkdir -p "$MCP_DATA_DIR"
+        MCP_DATA_DIR="$MCP_DATA_DIR" MCP_PORT=1984 MCP_SKIP_PREINSTALL=1 \
+          bash /opt/AgentCAP/mcp-server/start.sh > "$RUN_DIR/mcp_server.log" 2>&1 &
+        MCP_PID=$!
+
+        # Block until the server answers, or fail this row. Without this the
+        # client would start firing at a server still cloning repos and building
+        # venvs, and every tool call in the first minutes would error -- scoring
+        # as bad model behaviour rather than as the setup race it is.
+        echo "Waiting for MCP Atlas server on :1984..."
+        mcp_ready=0
+        for i in $(seq 1 600); do
+          if ! kill -0 $MCP_PID 2>/dev/null; then
+            echo "ERROR: MCP Atlas server died during startup. Log:" >&2
+            cat "$RUN_DIR/mcp_server.log" >&2
+            exit 1
+          fi
+          if curl -sf http://127.0.0.1:1984/health > /dev/null 2>&1; then
+            echo "MCP Atlas server ready after ${i}s"
+            mcp_ready=1
+            break
+          fi
+          sleep 1
+        done
+        if [ $mcp_ready -eq 0 ]; then
+          echo "ERROR: MCP Atlas server not ready within 600s. Log:" >&2
+          cat "$RUN_DIR/mcp_server.log" >&2
+          exit 1
+        fi
+
+
+# --- swe-bench-lite --------------------------------------------------------
+  - match:
+      benchmark:
+        - "swe-bench-lite"
+      inference_engine:
+        - "sglang"
+      platform:
+        - "eidf"
+    agentic_client_flags:
+      # No agents config file on this path. The driver reaches the engine over a
+      # port-forward on an OS-assigned local port, so the endpoint cannot be
+      # baked into a file; it is passed as --base-url instead (see the eidf
+      # swe-bench rule below). Leaving a --config here would be actively
+      # dangerous: agent_cap.agents only applies the --base-url/--model quick
+      # flags when --config has not already defined the 'agent' role, so the
+      # agent would silently talk to the file's hardcoded 127.0.0.1:8000 rather
+      # than the tunnel. "" omits the flag.
+      agents_config: ""
+
+  - match:
+      benchmark:
+        - "swe-bench-lite"
+      inference_engine:
+        - "vllm"
+      platform:
+        - "eidf"
+    agentic_client_flags:
+      # No agents config file on this path. The driver reaches the engine over a
+      # port-forward on an OS-assigned local port, so the endpoint cannot be
+      # baked into a file; it is passed as --base-url instead (see the eidf
+      # swe-bench rule below). Leaving a --config here would be actively
+      # dangerous: agent_cap.agents only applies the --base-url/--model quick
+      # flags when --config has not already defined the 'agent' role, so the
+      # agent would silently talk to the file's hardcoded 127.0.0.1:8000 rather
+      # than the tunnel. "" omits the flag.
+      agents_config: ""
+
+  - match:
+      benchmark:
+        - "swe-bench-lite"
+      inference_engine:
+        - "sglang"
+      platform:
+        - "vastai"
+    agentic_client_flags:
+      agents_config: "/opt/teasbench/pipeline/configs/agents/swe-bench-lite_gptoss_sglang.yaml"
+
+  - match:
+      benchmark:
+        - "swe-bench-lite"
+      inference_engine:
+        - "vllm"
+      platform:
+        - "vastai"
+    agentic_client_flags:
+      agents_config: "/opt/teasbench/pipeline/configs/agents/swe-bench-lite_gptoss_vllm.yaml"
+
+  # Platform-independent: what the benchmark is, regardless of how the
+  # sandbox substrate is provided. sweagent_deployment / evaluator /
+  # sandbox_provider / exec_provider / service_account / extra_setup /
+  # teas_env_exports all vary by *platform* (how), not by benchmark (what),
+  # so they live in the two platform-scoped rules below instead -- see
+  # §3 ("Two platforms") of docs/agentic-pipeline-design.md.
+  - match:
+      benchmark:
+        - "swe-bench-lite"
+    agentic_client_flags:
+      strategy: "sweagent"
+      task_indices: "/dev/shm/AgentCAP/benchmarks/swe_bench_lite_curated_100.json"
+      sweagent_dir: "/dev/shm/swe_agent"
+      sweagent_image_repo: ""
+      sweagent_call_limit: 200
+      # Inert for the sweagent strategy itself (strategies_sweagent.py never
+      # reads self.max_turns -- only the built-in single/sequential/
+      # supervisor strategies in strategies.py do), but set explicitly for
+      # documentation/consistency with the other two benchmarks rather than
+      # silently relying on agent_cap.agents' own fallback.
+      max_turns: 20
+
+# --- swe-bench-lite: EIDF (k8s sandbox provider) ---------------------------
+# platform defaults to "eidf" for CSVs that predate the 'platform' column
+# (utils.build_params / generate.py p.setdefault), which covers every
+# existing swe-bench-lite-eidf.csv / smoke_tests_agentic.csv row.
+  - match:
+      benchmark:
+        - "swe-bench-lite"
+      platform:
+        - "eidf"
+    agentic_client_flags:
+      evaluator: "swebench-k8s"
+      sweagent_deployment: "k8s"
+      # EIDF does not grant pods RBAC, so the in-cluster provider is unusable
+      # here: the driver runs on a login node with the user's own credentials
+      # and reaches each sandbox over `kubectl port-forward`. See
+      # utils.needs_login_node_driver and docs/DEVELOPER_GUIDE.md 5.
+      sandbox_provider: "teasbench.sandbox.k8s:PortForwardK8sProvider"
+      exec_provider: "teasbench.sandbox.k8s:PortForwardK8sProvider"
+      # The driver runs on a login node, not in a pod, so every path the
+      # platform-independent rule above set to an in-pod location (/dev/shm/...)
+      # has to become something the driver defines. These are shell variables
+      # exported by templates/agentic-driver.sh; changing a name there without
+      # changing it here silently breaks the run.
+      task_indices: "$AGENTCAP_DIR/benchmarks/swe_bench_lite_curated_100.json"
+      sweagent_dir: "$SWEAGENT_DIR"
+      output_dir: "$RUN_DIR"
+      # The engine is reached through a port-forward on an OS-assigned local
+      # port, so the endpoint cannot be baked into a config file the way the
+      # in-pod benchmarks do it. Passed on the CLI instead, which also means
+      # this path needs no agents config file at all -- matching what AgentCAP's
+      # own run_swebench_k8s_100.sh did. "" omits the flag entirely.
+      agents_config: ""
+      base_url: "$LLM_URL"
+      api_key: "dummy"
+      # Must match agentic_server_flags.served_model_name above; litellm needs
+      # the openai/ prefix to route to an OpenAI-compatible endpoint.
+      model: "openai/gpt-oss"
+    # Needed so InClusterK8sProvider (imported from TEASBench, on
+    # PYTHONPATH=/dev/shm/TEASBench) can create/watch/delete the per-task
+    # swe-rex sandbox Jobs and exec into the eval containers. Requires
+    # eidf/rbac/teasbench-runner-rbac.yaml to have been applied once in the
+    # namespace -- see pipeline/README.md.
+    service_account:
+      value: "serviceAccountName: teasbench-runner"
+    extra_setup:
+      value: |
+        echo "Installing kubectl..."
+        KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+        curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+        install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+        rm -f kubectl
+
+        # In-cluster kubeconfig, using this pod's own ServiceAccount
+        # (teasbench-runner, mounted automatically by k8s).
+        SA_DIR=/var/run/secrets/kubernetes.io/serviceaccount
+        kubectl config set-cluster in-cluster --server=https://kubernetes.default.svc --certificate-authority="$SA_DIR/ca.crt"
+        kubectl config set-credentials in-cluster --token="$(cat $SA_DIR/token)"
+        kubectl config set-context in-cluster --cluster=in-cluster --user=in-cluster --namespace="${TEASBENCH_K8S_NAMESPACE:-eidf230ns}"
+        kubectl config use-context in-cluster
+        kubectl get pods > /dev/null
+
+        pip install --quiet 'swe-rex>=1.4.0' swebench
+
+        echo "Cloning SWE-agent..."
+        rm -rf /dev/shm/swe_agent
+        git clone https://github.com/SWE-agent/SWE-agent.git /dev/shm/swe_agent
+        pip install -e /dev/shm/swe_agent
+
+        python /dev/shm/AgentCAP/scripts/patch_sweagent_streaming.py /dev/shm/swe_agent
+        grep -q "AGENTCAP_STREAMING_PATCH_APPLIED" /dev/shm/swe_agent/sweagent/agent/models.py || {
+          echo "ERROR: SWE-agent streaming patch marker not found after patching." >&2
+          exit 1
+        }
+    teas_env_exports:
+      value: |
+        export TEAS_BACKEND="swebench-k8s"
+
+# --- swe-bench-lite: Vast.ai (Modal sandboxes, native to swe-rex) ----------
+# No sandbox_provider/exec_provider at all: Modal is not a TEASBench-owned
+# capability implementation the way the k8s provider is -- swe-rex talks to
+# Modal directly (see docs/agentic-pipeline-design.md §5, "why no broker").
+# SWEBENCH_HARNESS_MODAL=1 (which makes SWEBenchEvaluator.finalize pass
+# `--modal true` to the grading harness) is exported by
+# pipeline/vast/run_agentic_benchmarks.sh, not from here, since it is an env
+# var read directly by AgentCAP rather than an agent_cap.agents CLI flag.
+  - match:
+      benchmark:
+        - "swe-bench-lite"
+      platform:
+        - "vastai"
+    agentic_client_flags:
+      evaluator: "swebench"
+      sweagent_deployment: "modal"
+      # AgentCAP is baked into the Vast.ai image at /opt/AgentCAP (unlike
+      # EIDF, which clones fresh into /dev/shm/AgentCAP at job start -- see
+      # pipeline/vast/{sglang,vllm}/Dockerfile.agentic), so the path into its
+      # checkout differs from the platform-independent rule's default above.
+      task_indices: "/opt/AgentCAP/benchmarks/swe_bench_lite_curated_100.json"
+      # SWE-agent is cloned, installed and streaming-patched at image build
+      # time (Dockerfile.agentic), not cloned per run as on EIDF. Vast.ai bills
+      # per GPU-hour, so a git clone plus `pip install -e` of SWE-agent,
+      # swebench and modal at the start of every run is rented time burned on
+      # setup. This must stay in step with the image.
+      sweagent_dir: "/opt/swe_agent"
+    extra_setup:
+      value: |
+        # Everything below is baked into the image; verify rather than redo it,
+        # so a drift between this rule and Dockerfile.agentic fails loudly here
+        # instead of silently running an unpatched SWE-agent (which yields a run
+        # with empty streaming metrics -- the failure this check exists to catch).
+        for mod in swerex swebench modal; do
+          python -c "import $mod" || {
+            echo "ERROR: $mod missing from the agentic image; rebuild it from pipeline/vast/*/Dockerfile.agentic." >&2
+            exit 1
+          }
+        done
+
+        [ -d /opt/swe_agent ] || {
+          echo "ERROR: /opt/swe_agent not found; rebuild the agentic image." >&2
+          exit 1
+        }
+        grep -q "AGENTCAP_STREAMING_PATCH_APPLIED" /opt/swe_agent/sweagent/agent/models.py || {
+          echo "ERROR: SWE-agent at /opt/swe_agent is not streaming-patched; rebuild the agentic image." >&2
+          exit 1
+        }
+    teas_env_exports:
+      value: |
+        export TEAS_BACKEND="swebench-modal"
 
