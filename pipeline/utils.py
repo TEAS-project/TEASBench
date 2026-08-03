@@ -43,6 +43,12 @@ EIDF_GPU_MAP={
     "H200":"NVIDIA-H200"
 }
 
+# Directory name under $TEAS_OUTPUT_DIR on the PVC where jobs archive their full run
+# output. Deliberately distinct from the results_repo (git) name: the PVC copy is a
+# plain archive, never a git working tree, so it must not collide with a directory a
+# job's throwaway /dev/shm clone of the results repo might also be named after.
+PVC_ARCHIVE_DIR = "TEAS_Development_Results_Private-archive-nogit"
+
 def get_run_name(p: dict):
     name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
 

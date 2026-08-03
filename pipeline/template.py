@@ -4,7 +4,7 @@ import yaml
 import os
 import re
 import subprocess
-from utils import get_run_name, k8s_friendlify, results_repo_dir
+from utils import get_run_name, k8s_friendlify, results_repo_dir, PVC_ARCHIVE_DIR
 
 DEFINED_SENTINEL = "<defined>"
 
@@ -209,6 +209,7 @@ class Template:
             "@num_gpu@": str(parameters.get("num_gpu")),
             "@gpu_product@": str(parameters.get("gpu_product")),
             "@results_repo@": results_repo,
+            "@pvc_archive_dir@": PVC_ARCHIVE_DIR,
             "@output_repo_dir@": results_repo_dir(parameters),
             "@teasbench_commit@": teasbench_commit
         }
