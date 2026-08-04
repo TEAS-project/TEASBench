@@ -39,11 +39,22 @@ RUN git clone --recurse-submodules https://github.com/Auto-CAP/AgentCAP.git /opt
 # Installed at build time so the ~5-10 min preinstall is not paid on rented
 # GPU time, and so a missing toolchain fails the build rather than the run.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    ln -sf /root/.local/bin/uv /usr/local/bin/uv && \
-    ln -sf /root/.local/bin/uvx /usr/local/bin/uvx && \
+    mv /root/.local/bin/uv /root/.local/bin/uv.real && \
+    mv /root/.local/bin/uvx /root/.local/bin/uvx.real && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
+
+# mcp-atlas doesn't give mcp an upper bound, and versions >= 2.0.0 appear to break
+# some of the backend servers. Enforcing version <2.0.0 at the point of running
+# AgentCAP/mcp-server/start.sh doesn't filter through to
+# the subprocesses, so we enforce version <2.0.0 in mcp-atlas-constraints.txt
+# and use uv and uvx wrappers placed high in PATH to ensure that those constraints
+# are applied at the point uv/uvx are actually run.
+COPY vast/mcp-atlas-constraints.txt /opt/teasbench/pipeline/vast/mcp-atlas-constraints.txt
+COPY vast/uv-wrapper.sh /root/.local/bin/uv
+COPY vast/uvx-wrapper.sh /root/.local/bin/uvx
+RUN chmod +x /root/.local/bin/uv /root/.local/bin/uvx
 
 # Agentic runtime deps. Only swe-bench-lite rows exercise SWE-agent/swebench/
 # modal, but installing at build time keeps startup cost off the rented GPU clock.

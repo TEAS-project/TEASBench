@@ -1,0 +1,7 @@
+# Testing has shown that allowing an unconstrained upper mcp version breaks
+# some of the server packages (arXiv, Wikipedia, National Parks).
+# Enforcing this in the runtime environment (i.e. in run_agentic_benchmarks.sh)
+# doesn't filter through the layers of callers to uv and uvx, so here we set the
+# condition (and potentially others) which is used by wrapper versions at the
+# point of running, to make sure it's enforced.
+mcp<2.0.0
