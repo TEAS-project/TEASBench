@@ -395,7 +395,7 @@ variables_defaults:
   # needs_login_node_driver) never runs agent_cap.agents in-pod, so it doesn't
   # need agentcap_image's baked-in AgentCAP client stack -- just the inference
   # engine. image/install-command/version/flags below are copied from the
-  # historical, validated swe-bench-lite EIDF runs recorded in
+  # validated swe-bench-lite EIDF runs recorded in
   # TEAS_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/
   agentic_engine_image:
     value: "ghcr.io/pytorch/pytorch:2.10.0-cuda12.9-cudnn9-devel"
@@ -1302,12 +1302,22 @@ rules:
 # TEAS_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/.
 # tp / tensor_parallel_size only appear on A100 and H100 (num_gpu 2); H200
 # runs on a single GPU, matching history. kv_cache_dtype is omitted entirely
-# on A100 for both engines, matching history (not even "auto").
+# on A100 for both engines, matching history (not even "auto"). num_gpu is
+# matched explicitly (not inferred from gpu) so a row that pairs a validated
+# GPU type with an unvalidated GPU count (e.g. A100 x1, never run historically)
+# falls through with none of these flags set, rather than silently applying a
+# tensor-parallel-size that doesn't fit the pod's actual GPU count
+# Every validated run these values come from served gpt-oss-120b, so a different
+# model (e.g. gpt-oss-20b, used for quick smoke tests) falls through to the engine's
+# own defaults rather than silently inheriting memory/parallelism settings tuned
+# for a model of a different size.
   - match:
       benchmark: ["swe-bench-lite"]
       platform: ["eidf"]
       inference_engine: ["sglang"]
+      model: ["gpt-oss-120b"]
       gpu: ["A100"]
+      num_gpu: [2]
     agentic_engine_server_flags:
       mem_fraction_static: "0.92"
       tp: "2"
@@ -1316,7 +1326,9 @@ rules:
       benchmark: ["swe-bench-lite"]
       platform: ["eidf"]
       inference_engine: ["sglang"]
+      model: ["gpt-oss-120b"]
       gpu: ["H100"]
+      num_gpu: [2]
     agentic_engine_server_flags:
       mem_fraction_static: "0.85"
       tp: "2"
@@ -1326,7 +1338,9 @@ rules:
       benchmark: ["swe-bench-lite"]
       platform: ["eidf"]
       inference_engine: ["sglang"]
+      model: ["gpt-oss-120b"]
       gpu: ["H200"]
+      num_gpu: [1]
     agentic_engine_server_flags:
       mem_fraction_static: "0.88"
       kv_cache_dtype: "fp8_e4m3"
@@ -1335,7 +1349,9 @@ rules:
       benchmark: ["swe-bench-lite"]
       platform: ["eidf"]
       inference_engine: ["vllm"]
+      model: ["gpt-oss-120b"]
       gpu: ["A100"]
+      num_gpu: [2]
     agentic_engine_server_flags:
       gpu_memory_utilization: "0.92"
       vllm_tensor_parallel_size: "2"
@@ -1344,7 +1360,9 @@ rules:
       benchmark: ["swe-bench-lite"]
       platform: ["eidf"]
       inference_engine: ["vllm"]
+      model: ["gpt-oss-120b"]
       gpu: ["H100"]
+      num_gpu: [2]
     agentic_engine_server_flags:
       gpu_memory_utilization: "0.85"
       vllm_tensor_parallel_size: "2"
@@ -1353,7 +1371,9 @@ rules:
       benchmark: ["swe-bench-lite"]
       platform: ["eidf"]
       inference_engine: ["vllm"]
+      model: ["gpt-oss-120b"]
       gpu: ["H200"]
+      num_gpu: [1]
     agentic_engine_server_flags:
       gpu_memory_utilization: "0.88"
       kv_cache_dtype: "fp8_e4m3"
