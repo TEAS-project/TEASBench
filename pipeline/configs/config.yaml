@@ -388,6 +388,112 @@ variables_defaults:
     sglang: "0.5.12.post1"
     vllm: "0.21.0"
 
+  ###############################################
+  # SWE-BENCH-LITE EIDF ENGINE-ONLY JOB (bare image)
+  ###############################################
+  # agentic-engine.yaml (the engine-only Job for swe-bench-lite on EIDF, see
+  # needs_login_node_driver) never runs agent_cap.agents in-pod, so it doesn't
+  # need agentcap_image's baked-in AgentCAP client stack -- just the inference
+  # engine. image/install-command/version/flags below are copied from the
+  # historical, validated swe-bench-lite EIDF runs recorded in
+  # TEAS_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/
+  agentic_engine_image:
+    value: "ghcr.io/pytorch/pytorch:2.10.0-cuda12.9-cudnn9-devel"
+
+  agentic_engine_install_command:
+    sglang:
+      value: |
+        apt-get update -qq && apt-get install -y -qq libnuma-dev > /dev/null 2>&1
+        pip install --break-system-packages "sglang[all]==0.5.9" 2>&1 | tail -3
+        python3 -c "import sglang; print('SGLang', sglang.__version__)"
+    vllm:
+      value: |
+        pip install --break-system-packages vllm==0.19.0 2>&1 | tail -3
+        python3 -c "import vllm; print('vLLM', vllm.__version__)"
+
+  # Flat like agentic_server_flags (see build_command): entries are shared
+  # across engines, selected per-engine by agentic_engine_server_command's own
+  # flags list below.
+  # Every GPU-varying flag (mem_fraction_static, tp, gpu_memory_utilization,
+  # tensor_parallel_size, kv_cache_dtype, max_num_seqs,
+  # enable_auto_tool_choice) intentionally has NO default: it is set only by
+  # the per-(inference_engine, gpu) rules further down, so a combination those
+  # rules don't cover omits the flag entirely rather than guessing a value
+  agentic_engine_server_flags:
+    hf_model_path:
+      flag: "--model-path"            # sglang
+    model_id:
+      flag: "--model"
+      from_parameter: hf_model_path   # vllm
+    host:
+      flag: "--host"
+      value: "127.0.0.1"
+    port:
+      flag: "--port"
+      value: "8000"
+    served_model_name:
+      flag: "--served-model-name"
+      value: "gpt-oss"
+    context_length:
+      flag: "--context-length"
+      value: "131072"                 # sglang
+    max_model_len:
+      flag: "--max-model-len"
+      value: "131072"                 # vllm
+    enable_cache_report:
+      flag: "--enable-cache-report"
+      value: true                     # sglang
+    tool_call_parser:
+      flag: "--tool-call-parser"
+      value: "openai"                 # vllm
+    mem_fraction_static:
+      flag: "--mem-fraction-static"   # sglang, GPU-specific -- see rules
+    tp:
+      flag: "--tp"                    # sglang, GPU-specific -- see rules
+    gpu_memory_utilization:
+      flag: "--gpu-memory-utilization" # vllm, GPU-specific -- see rules
+    # NOT named tensor_parallel_size: that name is a generic parameter
+    # generate.py sets to num_gpu for every row (build_params), so a flag_def
+    # entry with that name would fall back to num_gpu even with no matching
+    # rule -- wrongly rendering --tensor-parallel-size 1 on the single-GPU
+    # H200 row instead of omitting the flag, as history does.
+    vllm_tensor_parallel_size:
+      flag: "--tensor-parallel-size"  # vllm, GPU-specific -- see rules
+    kv_cache_dtype:
+      flag: "--kv-cache-dtype"        # both, GPU-specific -- see rules
+    max_num_seqs:
+      flag: "--max-num-seqs"          # vllm, H200-only -- see rules
+    enable_auto_tool_choice:
+      flag: "--enable-auto-tool-choice" # vllm, H200-only -- see rules
+
+  agentic_engine_server_command:
+    sglang:
+      base_command: "python3 -m sglang.launch_server"
+      flags:
+        - hf_model_path
+        - served_model_name
+        - host
+        - port
+        - mem_fraction_static
+        - context_length
+        - tp
+        - kv_cache_dtype
+        - enable_cache_report
+    vllm:
+      base_command: "vllm serve"
+      flags:
+        - model_id
+        - served_model_name
+        - host
+        - port
+        - gpu_memory_utilization
+        - max_model_len
+        - vllm_tensor_parallel_size
+        - kv_cache_dtype
+        - max_num_seqs
+        - tool_call_parser
+        - enable_auto_tool_choice
+
   # Composable blocks referenced by pipeline/templates/agentic.yaml (see
   # docs/agentic-pipeline-design.md). Each defaults to empty here, so a
   # benchmark that doesn't need one renders an empty block; rules below fill
@@ -1189,6 +1295,70 @@ rules:
     teas_env_exports:
       value: |
         export TEAS_BACKEND="swebench-k8s"
+
+# --- swe-bench-lite: EIDF engine-only Job launch flags ---------------------
+# GPU-specific values for agentic_engine_server_flags, copied verbatim from
+# the validated swe-bench-lite EIDF runs in
+# TEAS_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/.
+# tp / tensor_parallel_size only appear on A100 and H100 (num_gpu 2); H200
+# runs on a single GPU, matching history. kv_cache_dtype is omitted entirely
+# on A100 for both engines, matching history (not even "auto").
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["sglang"]
+      gpu: ["A100"]
+    agentic_engine_server_flags:
+      mem_fraction_static: "0.92"
+      tp: "2"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["sglang"]
+      gpu: ["H100"]
+    agentic_engine_server_flags:
+      mem_fraction_static: "0.85"
+      tp: "2"
+      kv_cache_dtype: "fp8_e4m3"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["sglang"]
+      gpu: ["H200"]
+    agentic_engine_server_flags:
+      mem_fraction_static: "0.88"
+      kv_cache_dtype: "fp8_e4m3"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["vllm"]
+      gpu: ["A100"]
+    agentic_engine_server_flags:
+      gpu_memory_utilization: "0.92"
+      vllm_tensor_parallel_size: "2"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["vllm"]
+      gpu: ["H100"]
+    agentic_engine_server_flags:
+      gpu_memory_utilization: "0.85"
+      vllm_tensor_parallel_size: "2"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["vllm"]
+      gpu: ["H200"]
+    agentic_engine_server_flags:
+      gpu_memory_utilization: "0.88"
+      kv_cache_dtype: "fp8_e4m3"
+      max_num_seqs: "32"
+      enable_auto_tool_choice: true
 
 # --- swe-bench-lite: Vast.ai (Modal sandboxes, native to swe-rex) ----------
 # No sandbox_provider/exec_provider at all: Modal is not a TEASBench-owned

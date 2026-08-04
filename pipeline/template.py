@@ -4,7 +4,7 @@ import yaml
 import os
 import re
 import subprocess
-from utils import needs_login_node_driver, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
+from utils import needs_login_node_driver, swe_bench_lite_k8s, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
 
 DEFINED_SENTINEL = "<defined>"
 
@@ -142,7 +142,12 @@ class Template:
         family (engine-keyed, like 'server'); 'agentic_client' runs
         agent_cap.agents against it (engine-agnostic, like 'client', but keeps
         a per-engine variables_defaults entry for structural symmetry since
-        the flags list is identical across engines).
+        the flags list is identical across engines). 'agentic_engine_server' is
+        the swe-bench-lite EIDF variant of 'agentic_server': a separate flags/
+        command set (not just separate values) because that Job runs on a bare
+        @agentic_engine_image@ with the engine pip-installed at generation-validated
+        versions, not the AgentCAP image agentic_server_command assumes -- see
+        _agentic() and docs/agentic-pipeline-design.md.
         """
         engine = parameters.get('inference_engine')
 
@@ -155,6 +160,10 @@ class Template:
             flags_def = config["variables_defaults"]["agentic_server_flags"]
             cmd_cfg = config["variables_defaults"]["agentic_server_command"][engine]
             rule_key = "agentic_server_flags"
+        elif cmd_type == "agentic_engine_server":
+            flags_def = config["variables_defaults"]["agentic_engine_server_flags"]
+            cmd_cfg = config["variables_defaults"]["agentic_engine_server_command"][engine]
+            rule_key = "agentic_engine_server_flags"
         elif cmd_type == "agentic_client":
             flags_def = config["variables_defaults"]["agentic_client_flags"]
             cmd_cfg = config["variables_defaults"]["agentic_client_command"][engine]
@@ -232,17 +241,40 @@ class Template:
         benchmark tiers; per-benchmark differences are supplied by config.yaml
         rules resolved below, never by forking the template.
         """
-        server_cmd = self.build_command("agentic_server", config, parameters, matching_rules)
+        # swe-bench-lite on any k8s cluster (EIDF today; PortForwardK8sProvider
+        # or a future InClusterK8sProvider on a cluster that grants pod RBAC --
+        # see swe_bench_lite_k8s) uses its own engine image/flags/command set,
+        # deliberately NOT agentcap_image / agentic_server_command: those are
+        # built for the all-in-one job (imo-answerbench/mcp-atlas), which needs
+        # the full AgentCAP client stack baked in. swe-bench-lite's engine
+        # build is instead pinned to what was actually validated: the image,
+        # engine version and launch flags below are copied from the validated
+        # swe-bench-lite EIDF runs recorded in
+        # TEAS_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/
+        # host/port/served_model_name are the exception -- those follow the current
+        # PortForwardK8sProvider deployment (loopback + kubectl port-forward,
+        # litellm's openai routing convention).
+        # Vast.ai never reaches this branch : pipeline/vast/resolve_commands.py
+        # calls build_command directly, not via _agentic().
+        swe_bench_lite_engine = swe_bench_lite_k8s(parameters)
+        if swe_bench_lite_engine:
+            server_cmd = self.build_command("agentic_engine_server", config, parameters, matching_rules)
+        else:
+            server_cmd = self.build_command("agentic_server", config, parameters, matching_rules)
         client_cmd = self.build_command("agentic_client", config, parameters, matching_rules)
 
-        image_name = self.resolve_generic_variable("agentcap_image", config, matching_rules, parameters)
         agentcap_repo = self.resolve_generic_variable("agentcap_repo", config, matching_rules, parameters)
         agentcap_ref = self.resolve_generic_variable("agentcap_ref", config, matching_rules, parameters)
         agentic_engine_version = self.resolve_generic_variable("agentic_inference_engine_version", config, matching_rules, parameters)
 
-        env_setup_path = self.resolve_generic_variable("agentic_env_setup_script", config, matching_rules, parameters)
-        with open(env_setup_path, "r") as f:
-            env_setup = f.read().strip()
+        if swe_bench_lite_engine:
+            image_name = self.resolve_generic_variable("agentic_engine_image", config, matching_rules, parameters)
+            env_setup = self.resolve_generic_variable("agentic_engine_install_command", config, matching_rules, parameters)
+        else:
+            image_name = self.resolve_generic_variable("agentcap_image", config, matching_rules, parameters)
+            env_setup_path = self.resolve_generic_variable("agentic_env_setup_script", config, matching_rules, parameters)
+            with open(env_setup_path, "r") as f:
+                env_setup = f.read().strip()
 
         # Composable blocks (see docs/agentic-pipeline-design.md): each
         # defaults to "" in variables_defaults, so a benchmark that doesn't
