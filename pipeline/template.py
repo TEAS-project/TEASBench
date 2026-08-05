@@ -4,7 +4,7 @@ import yaml
 import os
 import re
 import subprocess
-from utils import needs_login_node_driver, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
+from utils import needs_login_node_driver, swe_bench_lite_k8s, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
 
 DEFINED_SENTINEL = "<defined>"
 
@@ -137,12 +137,22 @@ class Template:
     def build_command(self, cmd_type, config, parameters, matching_rules):
         """Generalized command builder for server, client and agentic commands.
 
-        'server' and 'client' are the MoE server+client split. 'agentic_server'
-        launches the standalone inference-engine server used by the agentic
-        family (engine-keyed, like 'server'); 'agentic_client' runs
-        agent_cap.agents against it (engine-agnostic, like 'client', but keeps
-        a per-engine variables_defaults entry for structural symmetry since
-        the flags list is identical across engines).
+        'server' and 'client' are the MoE server+client split. 'agentic_client'
+        runs agent_cap.agents against a separately-started inference-engine
+        server (engine-agnostic, like 'client', but keeps a per-engine
+        variables_defaults entry for structural symmetry since the flags list
+        is identical across engines). The four agentic server cmd_types --
+        'imoanswerbench_server', 'mcpatlas_server', 'swebenchlite_vastai_server'
+        (all-in-one: client+server, same pod, AgentCAP image) and
+        'swebench_eidf_engine_server' (EIDF only: bare-image engine-only Job, no
+        AgentCAP image, no in-pod client at all) -- all share ONE flags
+        definition, config.yaml's agentic_server_flags, because a variable's
+        concrete CLI flag is a property of sglang/vllm rather than of the
+        benchmark. What the cmd_type actually selects is the per-scenario part:
+        its own base_command and `flags` list. Values come from rules, keyed on
+        that same shared 'agentic_server_flags' name and separated by their
+        match conditions. See config.yaml's AGENTIC FAMILY section and
+        docs/agentic-pipeline-design.md.
         """
         engine = parameters.get('inference_engine')
 
@@ -151,9 +161,10 @@ class Template:
             flags_def = config["variables_defaults"]["server_flags"][engine]
             cmd_cfg = config["variables_defaults"]["server_command"][engine]
             rule_key = "server_flags"
-        elif cmd_type == "agentic_server":
+        elif cmd_type in ("imoanswerbench_server", "mcpatlas_server",
+                          "swebenchlite_vastai_server", "swebench_eidf_engine_server"):
             flags_def = config["variables_defaults"]["agentic_server_flags"]
-            cmd_cfg = config["variables_defaults"]["agentic_server_command"][engine]
+            cmd_cfg = config["variables_defaults"][f"{cmd_type}_command"][engine]
             rule_key = "agentic_server_flags"
         elif cmd_type == "agentic_client":
             flags_def = config["variables_defaults"]["agentic_client_flags"]
@@ -232,17 +243,54 @@ class Template:
         benchmark tiers; per-benchmark differences are supplied by config.yaml
         rules resolved below, never by forking the template.
         """
-        server_cmd = self.build_command("agentic_server", config, parameters, matching_rules)
+        # Which explicit variable group (see config.yaml's AGENTIC FAMILY
+        # section) supplies this row's server image/flags/command: swe-bench-lite
+        # on any k8s cluster that grants pod RBAC (EIDF today via
+        # PortForwardK8sProvider, see swe_bench_lite_k8s) uses swebench_eidf_engine_*
+        # -- a bare base image with the engine pip-installed at
+        # generation-validated versions, no AgentCAP client stack at all, since
+        # that Job never runs agent_cap.agents in-pod. Every other row uses one
+        # of the three all-in-one (client+server, same pod, AgentCAP image)
+        # groups, kept one per benchmark rather than shared, so a value
+        # validated for one benchmark is never silently assumed correct for
+        # another. Vast.ai never actually reaches this function --
+        # pipeline/vast/resolve_commands.py calls build_command directly with
+        # its own mirrored dispatch -- so the swebenchlite_vastai_* branch here
+        # only matters if _agentic() is ever invoked directly against a
+        # platform=vastai row (e.g. generate.py run instead of generate.py --vast).
+        swe_bench_lite_engine = swe_bench_lite_k8s(parameters)
+        benchmark = parameters.get("benchmark")
+        if swe_bench_lite_engine:
+            group = "swebench_eidf_engine"
+        elif benchmark == "imo-answerbench":
+            group = "imoanswerbench"
+        elif benchmark == "mcp-atlas":
+            group = "mcpatlas"
+        elif benchmark == "swe-bench-lite":
+            group = "swebenchlite_vastai"
+        else:
+            raise ValueError(f"_agentic(): no server/image variable group defined for benchmark {benchmark!r}")
+
+        server_cmd = self.build_command(f"{group}_server", config, parameters, matching_rules)
         client_cmd = self.build_command("agentic_client", config, parameters, matching_rules)
 
-        image_name = self.resolve_generic_variable("agentcap_image", config, matching_rules, parameters)
-        agentcap_repo = self.resolve_generic_variable("agentcap_repo", config, matching_rules, parameters)
-        agentcap_ref = self.resolve_generic_variable("agentcap_ref", config, matching_rules, parameters)
-        agentic_engine_version = self.resolve_generic_variable("agentic_inference_engine_version", config, matching_rules, parameters)
-
-        env_setup_path = self.resolve_generic_variable("agentic_env_setup_script", config, matching_rules, parameters)
-        with open(env_setup_path, "r") as f:
-            env_setup = f.read().strip()
+        if swe_bench_lite_engine:
+            # agentic-engine.yaml / agentic-driver.sh (the templates this branch
+            # ultimately renders) never reference @agentcap_repo@/@agentcap_ref@/
+            # @agentic_engine_version@ at all -- the login-node driver clones
+            # AgentCAP itself via eidf/setup/setup_swebench_env.sh instead, so
+            # there is nothing meaningful to resolve here.
+            image_name = self.resolve_generic_variable(f"{group}_image", config, matching_rules, parameters)
+            env_setup = self.resolve_generic_variable(f"{group}_install_command", config, matching_rules, parameters)
+            agentcap_repo = agentcap_ref = agentic_engine_version = ""
+        else:
+            image_name = self.resolve_generic_variable(f"{group}_image", config, matching_rules, parameters)
+            env_setup_path = self.resolve_generic_variable(f"{group}_env_setup_script", config, matching_rules, parameters)
+            with open(env_setup_path, "r") as f:
+                env_setup = f.read().strip()
+            agentcap_repo = self.resolve_generic_variable(f"{group}_repo", config, matching_rules, parameters)
+            agentcap_ref = self.resolve_generic_variable(f"{group}_ref", config, matching_rules, parameters)
+            agentic_engine_version = self.resolve_generic_variable(f"{group}_inference_engine_version", config, matching_rules, parameters)
 
         # Composable blocks (see docs/agentic-pipeline-design.md): each
         # defaults to "" in variables_defaults, so a benchmark that doesn't

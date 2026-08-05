@@ -132,27 +132,45 @@ variables_defaults:
       - output_length
 
 
+  # Other variables needed to make up substitutions for template.yaml
+  
+  inference_engine_version:
+      sglang: "0.5.9"
+      vllm: "0.16.0"
+
+  image:
+    sglang:
+      base: "lmsysorg/sglang"
+    vllm:
+      base: "vllm/vllm-openai"
+
+  extra_container_env:
+    value:
+    
+  download_arena_hard_baseline_answers:
+    value:
+
+  expert_distribution_copy_command:
+    value:
+
+
+
+
+
+
+
   ###################
   # AGENTIC FAMILY  #
   ###################
-  # Shared across all three agentic benchmarks (imo-answerbench, mcp-atlas,
-  # swe-bench-lite): a separate inference-engine server process
-  # (agentic_server_flags / agentic_server_command, ported verbatim from the
-  # imo-answerbench branch, where they are already well-tuned for both
-  # engines) plus agent_cap.agents as the client
-  # (agentic_client_flags / agentic_client_command). Per-benchmark
-  # differences -- which evaluator, which strategy, whether a tool-server
-  # sidecar is needed, ... -- are supplied entirely by the rules further
-  # below, never by forking pipeline/templates/agentic.yaml. See
-  # docs/agentic-pipeline-design.md for the full picture.
+
 
   agentic_server_flags:
-    # --- Shared ---
+    # --- Model / endpoint ---
     hf_model_path:
-      flag: "--model-path"       # sglang: --model-path <hf_id>
+      flag: "--model-path"             # sglang
     model_id:
-      flag: "--model"
-      from_parameter: hf_model_path   # vllm: --model <hf_id>
+      flag: "--model"                  # vllm
+      from_parameter: hf_model_path
     host:
       flag: "--host"
       value: "127.0.0.1"
@@ -164,25 +182,42 @@ variables_defaults:
       value: "gpt-oss"
     tensor_parallel_size:
       flag: "--tensor-parallel-size"
+    # --- Memory / capacity: no defaults, values are per-GPU (see rules) ---
+    mem_fraction_static:
+      flag: "--mem-fraction-static"    # sglang
+    gpu_memory_utilization:
+      flag: "--gpu-memory-utilization" # vllm
+    max_num_seqs:
+      flag: "--max-num-seqs"           # vllm
+    kv_cache_dtype:
+      flag: "--kv-cache-dtype"
+    context_length:
+      flag: "--context-length"         # sglang
+      value: "131072"
+    max_model_len:
+      flag: "--max-model-len"          # vllm
+      value: "131072"
+    # --- gpt-oss harmony parsing: no defaults, see rules ---
+    reasoning_parser:
+      flag: "--reasoning-parser"
+    tool_call_parser:
+      flag: "--tool-call-parser"
+    enable_auto_tool_choice:
+      flag: "--enable-auto-tool-choice"  # vllm
+    # --- Shared misc ---
     trust_remote_code:
       flag: "--trust-remote-code"
       value: true
     dtype:
       flag: "--dtype"
       value: "auto"
-    kv_cache_dtype:
-      flag: "--kv-cache-dtype"
-      # value supplied per-GPU by rules below (A100 -> auto, H100/H200 -> fp8_e4m3)
+    enable_cache_report:
+      flag: "--enable-cache-report"    # sglang
+      value: true
     # --- SGLang-specific ---
     log_level:
       flag: "--log-level"
       value: "warning"
-    context_length:
-      flag: "--context-length"
-      value: "131072"
-    mem_fraction_static:
-      flag: "--mem-fraction-static"
-      value: "0.85"
     random_seed:
       flag: "--random-seed"
       value: "42"
@@ -199,21 +234,9 @@ variables_defaults:
     seed:
       flag: "--seed"
       value: "42"
-    max_num_seqs:
-      flag: "--max-num-seqs"
-      value: "256"
-    gpu_memory_utilization:
-      flag: "--gpu-memory-utilization"
-      value: "0.85"
-    max_model_len:
-      flag: "--max-model-len"
-      value: "131072"
     stream_interval:
       flag: "--stream-interval"
       value: "1"
-    tool_call_parser:
-      flag: "--tool-call-parser"
-      value: "openai"
     async_scheduling:
       flag: "--async-scheduling"
       value: true
@@ -224,7 +247,7 @@ variables_defaults:
       flag: "--enable-prefix-caching"
       value: true
 
-  agentic_server_command:
+  imoanswerbench_server_command:
     sglang:
       base_command: "TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 python -m sglang.launch_server"
       flags:
@@ -262,20 +285,90 @@ variables_defaults:
         - enable_prefix_caching
         - trust_remote_code
 
-  # Canonical agent_cap.agents client flags. Not every entry here is
-  # necessarily selected by a given benchmark's agentic_client_command.flags
-  # list below -- entries not selected still render correctly if a rule adds
-  # them via agentic_client_flags (see build_command's "Conditional
-  # overrides"), exactly like the MoE client_flags entries judge_url /
-  # judge_model / judge_key / baseline_answers, which only ever appear via
-  # the arena-hard rule further down and are never in client_command.flags.
+  mcpatlas_server_command:
+    sglang:
+      base_command: "TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 python -m sglang.launch_server"
+      flags:
+        - hf_model_path
+        - host
+        - port
+        - log_level
+        - served_model_name
+        - context_length
+        - mem_fraction_static
+        - tensor_parallel_size
+        - trust_remote_code
+        - dtype
+        - kv_cache_dtype
+        - chunked_prefill_size
+        - cuda_graph_max_bs
+        - allow_auto_truncate
+    vllm:
+      base_command: "python -m vllm.entrypoints.openai.api_server"
+      flags:
+        - model_id
+        - host
+        - port
+        - served_model_name
+        - tensor_parallel_size
+        - max_num_seqs
+        - gpu_memory_utilization
+        - max_model_len
+        - dtype
+        - kv_cache_dtype
+        - stream_interval
+        - tool_call_parser
+        - async_scheduling
+        - disable_log_stats
+        - enable_prefix_caching
+        - trust_remote_code
+
+  swebenchlite_vastai_server_command:
+    sglang:
+      base_command: "TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 python -m sglang.launch_server"
+      flags:
+        - hf_model_path
+        - host
+        - port
+        - log_level
+        - served_model_name
+        - context_length
+        - mem_fraction_static
+        - tensor_parallel_size
+        - trust_remote_code
+        - dtype
+        - kv_cache_dtype
+        - chunked_prefill_size
+        - cuda_graph_max_bs
+        - allow_auto_truncate
+    vllm:
+      base_command: "python -m vllm.entrypoints.openai.api_server"
+      flags:
+        - model_id
+        - host
+        - port
+        - served_model_name
+        - tensor_parallel_size
+        - max_num_seqs
+        - gpu_memory_utilization
+        - max_model_len
+        - dtype
+        - kv_cache_dtype
+        - stream_interval
+        - tool_call_parser
+        - async_scheduling
+        - disable_log_stats
+        - enable_prefix_caching
+        - trust_remote_code
+
+
+  # Mappings to possible agent_cap.agents client flags.
   agentic_client_flags:
     agents_config:
       flag: "--config"
     dataset:
       flag: "--dataset"
-      from_parameter: benchmark   # our CSV column is 'benchmark', not 'dataset'
-                                   # (kept distinct from the MoE dataset column)
+      from_parameter: benchmark   
     num_tasks:
       flag: "--num-tasks"
     task_indices:
@@ -311,7 +404,8 @@ variables_defaults:
     max_turns:
       flag: "--max-turns"
       value: "20"   # matches agent_cap.agents' own fallback; imo-answerbench overrides to 128
-    # model / base_url / api_key / hf_model_path: defined for completeness
+
+    # REDUNDANT?
     # (all four correspond to real agent_cap.agents flags) but never selected
     # by any benchmark's agentic_client_command.flags list below.
     # agents_config (--config) supplies the endpoint (name/base_url/api_key)
@@ -330,17 +424,7 @@ variables_defaults:
     hf_model_path:
       flag: "--model-path"
 
-  # Identical flags list for both engines: agent_cap.agents is engine-agnostic
-  # at the client level (it only ever talks to base_url over HTTP). Kept
-  # per-engine for structural symmetry with agentic_server_command; the
-  # per-benchmark differences (agents_config, evaluator, strategy,
-  # task_indices, tool_backend, sweagent_*, sandbox/exec_provider, ...) are
-  # supplied by the rules below via agentic_client_flags, not by varying this
-  # list. max_turns is deliberately NOT here even though every benchmark ends
-  # up setting it -- each benchmark's own rule supplies it (see "Conditional
-  # overrides" in Template.build_command), so it is rendered exactly once per
-  # command instead of once from a static default here and once more from
-  # the rule that actually wants a non-default value.
+
   agentic_client_command:
     sglang:
       base_command: "python -m agent_cap.agents"
@@ -357,41 +441,124 @@ variables_defaults:
         - concurrency
         - output_dir
 
-  agentcap_image:
+  imoanswerbench_image:
     sglang:
       value: "ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312"
     vllm:
       value: "ghcr.io/yufan196884/imo-answerbench-env:latest"
 
-  # AgentCAP checkout used by the agentic path. agentcap_ref can be pinned to
-  # a specific commit/tag for reproducibility; "main" (tracking the default
-  # branch) matches the imo-answerbench branch's existing behaviour, which
-  # clones with no ref pinning at all.
-  agentcap_repo:
+  # AgentCAP checkout used by imo-answerbench. *_ref can be pinned to a
+  # specific commit/tag for reproducibility; "main" (tracking the default
+  # branch) matches this benchmark's original behaviour, which clones with
+  # no ref pinning at all.
+  imoanswerbench_repo:
     value: "github.com/Auto-CAP/AgentCAP.git"
-  agentcap_ref:
+  imoanswerbench_ref:
     value: "main"
 
   # Per-engine environment-setup script (inlined into the job at generation
   # time). sglang needs a torch/torchvision repair; vllm only needs a sanity
-  # import check. Reused verbatim from the imo-answerbench branch.
-  agentic_env_setup_script:
+  # import check.
+  imoanswerbench_env_setup_script:
     sglang:
       value: "scripts/setup_sglang_env.sh"
     vllm:
       value: "scripts/setup_vllm_env.sh"
 
-  # sglang/vllm versions actually shipped in agentcap_image (a different
-  # image from the MoE inference_engine_version/image entries above), read by
-  # agent_cap.agents.teas_output via the TEAS_ENGINE_VERSION env var.
-  agentic_inference_engine_version:
+  # sglang/vllm versions actually shipped in imoanswerbench_image (a
+  # different image from the MoE inference_engine_version/image entries
+  # above), read by agent_cap.agents.teas_output via TEAS_ENGINE_VERSION.
+  imoanswerbench_inference_engine_version:
     sglang: "0.5.12.post1"
     vllm: "0.21.0"
 
-  # Composable blocks referenced by pipeline/templates/agentic.yaml (see
-  # docs/agentic-pipeline-design.md). Each defaults to empty here, so a
-  # benchmark that doesn't need one renders an empty block; rules below fill
-  # in the ones each benchmark actually needs.
+  mcpatlas_image:
+    sglang:
+      value: "ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312"
+    vllm:
+      value: "ghcr.io/yufan196884/imo-answerbench-env:latest"
+
+  # AgentCAP checkout used by mcp-atlas. Verbatim copy of imoanswerbench_*
+  # today (both trace back to the same original shared block) -- not
+  # necessarily correct for mcp-atlas specifically, unvalidated.
+  mcpatlas_repo:
+    value: "github.com/Auto-CAP/AgentCAP.git"
+  mcpatlas_ref:
+    value: "main"
+
+  mcpatlas_env_setup_script:
+    sglang:
+      value: "scripts/setup_sglang_env.sh"
+    vllm:
+      value: "scripts/setup_vllm_env.sh"
+
+  mcpatlas_inference_engine_version:
+    sglang: "0.5.12.post1"
+    vllm: "0.21.0"
+
+  swebenchlite_vastai_image:
+    sglang:
+      value: "ghcr.io/teas-project/sglang-agentic:latest"
+    vllm:
+      value: "ghcr.io/teas-project/vllm-agentic:latest"
+
+  swebenchlite_vastai_repo:
+    value: "github.com/Auto-CAP/AgentCAP.git"
+  swebenchlite_vastai_ref:
+    value: "main"
+
+  swebenchlite_vastai_env_setup_script:
+    sglang:
+      value: "scripts/setup_sglang_env.sh"
+    vllm:
+      value: "scripts/setup_vllm_env.sh"
+
+  swebenchlite_vastai_inference_engine_version:
+    sglang: "0.5.12.post1"
+    vllm: "0.21.0"
+
+  ###############################################
+  # SWE-BENCH-LITE EIDF ENGINE-ONLY JOB (bare image)
+  ###############################################
+  # image/install-command/version/flags below are copied from the
+  # validated swe-bench-lite EIDF runs recorded in
+  # TEAS_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/
+  swebench_eidf_engine_image:
+    value: "ghcr.io/pytorch/pytorch:2.10.0-cuda12.9-cudnn9-devel"
+
+  swebench_eidf_engine_install_command:
+    sglang:
+      value: |
+        apt-get update -qq && apt-get install -y -qq libnuma-dev > /dev/null 2>&1
+        pip install --break-system-packages "sglang[all]==0.5.9" 2>&1 | tail -3
+        python3 -c "import sglang; print('SGLang', sglang.__version__)"
+    vllm:
+      value: |
+        pip install --break-system-packages vllm==0.19.0 2>&1 | tail -3
+        python3 -c "import vllm; print('vLLM', vllm.__version__)"
+
+  swebench_eidf_engine_server_command:
+    sglang:
+      base_command: "python3 -m sglang.launch_server"
+      flags:
+        - hf_model_path
+        - served_model_name
+        - host
+        - port
+        - context_length
+        - enable_cache_report
+    vllm:
+      base_command: "vllm serve"
+      flags:
+        - model_id
+        - served_model_name
+        - host
+        - port
+        - max_model_len
+
+  # Composable blocks referenced by pipeline/templates/agentic.yaml 
+  # Each defaults to empty here, so a benchmark that doesn't need one renders an empty block;
+  # rules below fill in the ones each benchmark actually needs.
   sidecar_containers:
     value:
   sidecar_wait:
@@ -402,8 +569,8 @@ variables_defaults:
     value:
   teas_env_exports:
     value:
-  # Vast.ai's capability-equivalent of sidecar_containers (see workstream D /
-  # pipeline/vast/resolve_commands.py): there are no pod sidecars on Vast.ai,
+
+  # For pipeline/vast/resolve_commands.py): there are no pod sidecars on Vast.ai,
   # so the tool server is started as a background process in the same
   # container instead. This variable carries only the "start it" step; the
   # "wait for it to be ready" step is deliberately NOT duplicated here -- it
@@ -413,27 +580,6 @@ variables_defaults:
   tool_server_setup:
     value:
 
-
-  # Other variables needed to make up substitutions for template.yaml
-  
-  inference_engine_version:
-      sglang: "0.5.9"
-      vllm: "0.16.0"
-
-  image:
-    sglang:
-      base: "lmsysorg/sglang"
-    vllm:
-      base: "vllm/vllm-openai"
-
-  extra_container_env:
-    value:
-    
-  download_arena_hard_baseline_answers:
-    value:
-
-  expert_distribution_copy_command:
-    value:
 
 
 
@@ -736,32 +882,104 @@ rules:
 # point is untouched.
 
 # Agentic: KV-cache dtype depends on GPU memory headroom. A100 runs in full
-# precision; H100/H200 quantise the KV cache to fp8. Generalised from the
-# imo-answerbench branch's dataset-keyed version (which only covered
-# imo-answerbench) to the 'benchmark' key, covering all three agentic
-# benchmarks -- they share the same agentic_server_flags/_command, so the
-# same GPU-memory tuning applies regardless of which benchmark is driving
-# the client.
+# precision; H100/H200 quantise the KV cache to fp8. One rule pair per
+# benchmark rather than one rule listing all three, so each benchmark's value
+# can be corrected independently once its own runs are validated.
+# swe-bench-lite here means Vast.ai specifically (the all-in-one shape); EIDF
+# swe-bench-lite's kv_cache_dtype is set by its own engine-only rules further
+# down instead, which intentionally use different, individually-validated
+# per-GPU values (see there for why).
   - match:
-      benchmark:
-        - "imo-answerbench"
-        - "mcp-atlas"
-        - "swe-bench-lite"
-      gpu:
-        - "A100"
+      benchmark: ["imo-answerbench"]
+      gpu: ["A100"]
     agentic_server_flags:
       kv_cache_dtype: "auto"
 
   - match:
-      benchmark:
-        - "imo-answerbench"
-        - "mcp-atlas"
-        - "swe-bench-lite"
-      gpu:
-        - "H100"
-        - "H200"
+      benchmark: ["imo-answerbench"]
+      gpu: ["H100", "H200"]
     agentic_server_flags:
       kv_cache_dtype: "fp8_e4m3"
+
+  - match:
+      benchmark: ["mcp-atlas"]
+      gpu: ["A100"]
+    agentic_server_flags:
+      kv_cache_dtype: "auto"
+
+  - match:
+      benchmark: ["mcp-atlas"]
+      gpu: ["H100", "H200"]
+    agentic_server_flags:
+      kv_cache_dtype: "fp8_e4m3"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["vastai"]
+      gpu: ["A100"]
+    agentic_server_flags:
+      kv_cache_dtype: "auto"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["vastai"]
+      gpu: ["H100", "H200"]
+    agentic_server_flags:
+      kv_cache_dtype: "fp8_e4m3"
+
+
+# Agentic all-in-one: memory/capacity/parser values. These were previously
+# inline defaults duplicated into each benchmark's own copy of the flag
+# definitions; they live here as per-benchmark rules now so the definitions
+# stay pure vocabulary and each benchmark's value can move independently.
+# Every rule is scoped by inference_engine because a rule-set override renders
+# regardless of the command's `flags` list (see build_command), so an unscoped
+# mem_fraction_static would leak --mem-fraction-static into a vllm command.
+# EIDF swe-bench-lite is absent by design: its engine-only path gets these
+# from the individually-validated per-(model, gpu, num_gpu) rules further down.
+  - match:
+      benchmark: ["imo-answerbench"]
+      inference_engine: ["sglang"]
+    agentic_server_flags:
+      mem_fraction_static: "0.85"
+
+  - match:
+      benchmark: ["imo-answerbench"]
+      inference_engine: ["vllm"]
+    agentic_server_flags:
+      gpu_memory_utilization: "0.85"
+      max_num_seqs: "256"
+      tool_call_parser: "openai"
+
+  - match:
+      benchmark: ["mcp-atlas"]
+      inference_engine: ["sglang"]
+    agentic_server_flags:
+      mem_fraction_static: "0.85"
+
+  - match:
+      benchmark: ["mcp-atlas"]
+      inference_engine: ["vllm"]
+    agentic_server_flags:
+      gpu_memory_utilization: "0.85"
+      max_num_seqs: "256"
+      tool_call_parser: "openai"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["vastai"]
+      inference_engine: ["sglang"]
+    agentic_server_flags:
+      mem_fraction_static: "0.85"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["vastai"]
+      inference_engine: ["vllm"]
+    agentic_server_flags:
+      gpu_memory_utilization: "0.85"
+      max_num_seqs: "256"
+      tool_call_parser: "openai"
 
 
 # --- imo-answerbench ---------------------------------------------------
@@ -1106,12 +1324,16 @@ rules:
       sweagent_dir: "/dev/shm/swe_agent"
       sweagent_image_repo: ""
       sweagent_call_limit: 200
-      # Inert for the sweagent strategy itself (strategies_sweagent.py never
-      # reads self.max_turns -- only the built-in single/sequential/
-      # supervisor strategies in strategies.py do), but set explicitly for
-      # documentation/consistency with the other two benchmarks rather than
-      # silently relying on agent_cap.agents' own fallback.
-      max_turns: 20
+      # No max_turns here, deliberately: confirmed by grepping
+      # strategies_sweagent.py that the sweagent strategy never reads
+      # self.max_turns (only the built-in single/sequential/supervisor
+      # strategies in strategies.py do), and the historical validated runs
+      # (AgentCAP/scripts/run_swebench_k8s_100.sh) never passed --max-turns
+      # either. The real limit for this strategy is sweagent_call_limit
+      # above, passed straight through to SWE-agent's own
+      # --agent.model.per_instance_call_limit. Omitting the flag here
+      # matches that validated recipe instead of asserting a value that's
+      # silently never consulted.
 
 # --- swe-bench-lite: EIDF (k8s sandbox provider) ---------------------------
 # platform defaults to "eidf" for CSVs that predate the 'platform' column
@@ -1147,8 +1369,9 @@ rules:
       agents_config: ""
       base_url: "$LLM_URL"
       api_key: "dummy"
-      # Must match agentic_server_flags.served_model_name above; litellm needs
-      # the openai/ prefix to route to an OpenAI-compatible endpoint.
+      # Must match agentic_server_flags.served_model_name (this is the
+      # EIDF engine-only path); litellm needs the openai/ prefix to route to
+      # an OpenAI-compatible endpoint.
       model: "openai/gpt-oss"
     # Needed so InClusterK8sProvider (imported from TEASBench, on
     # PYTHONPATH=/dev/shm/TEASBench) can create/watch/delete the per-task
@@ -1189,6 +1412,116 @@ rules:
     teas_env_exports:
       value: |
         export TEAS_BACKEND="swebench-k8s"
+
+# --- swe-bench-lite: EIDF engine-only Job, harmony parsers -----------------
+# gpt-oss's harmony tool-call/reasoning format is what needs these parsers,
+# not the engine or swe-bench-lite as such -- so both rules are scoped to the
+# model family, and a hypothetical non-gpt-oss model run through this same
+# engine-only path inherits neither. Each engine spells the same harmony
+# parser differently: sglang registers a detector literally named "gpt-oss"
+# (function_call_parser.py / reasoning_parser.py), while vLLM calls its
+# equivalent tool-call parser "openai" and auto-enables its reasoning parser
+# for gpt-oss without being asked. Both cover gpt-oss-120b (the validated
+# model) and gpt-oss-20b (quick smoke tests) -- the format is shared across
+# the family, not tied to a size.
+  - match:
+      benchmark: ["swe-bench-lite"]
+      inference_engine: ["sglang"]
+      model: ["gpt-oss-120b", "gpt-oss-20b"]
+    agentic_server_flags:
+      reasoning_parser: "gpt-oss"
+      tool_call_parser: "gpt-oss"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      inference_engine: ["vllm"]
+      model: ["gpt-oss-120b", "gpt-oss-20b"]
+    agentic_server_flags:
+      tool_call_parser: "openai"
+
+# --- swe-bench-lite: EIDF engine-only Job launch flags ---------------------
+# GPU-specific values for agentic_server_flags on the EIDF engine-only path, copied verbatim from
+# the validated swe-bench-lite EIDF runs in
+# TEAS_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/.
+# tensor_parallel_size only appears on A100 and H100 (num_gpu 2); H200
+# runs on a single GPU, matching history. kv_cache_dtype is omitted entirely
+# on A100 for both engines, matching history (not even "auto"). num_gpu is
+# matched explicitly (not inferred from gpu) so a row that pairs a validated
+# GPU type with an unvalidated GPU count (e.g. A100 x1, never run historically)
+# falls through with none of these flags set, rather than silently applying a
+# tensor-parallel-size that doesn't fit the pod's actual GPU count
+# Every validated run these values come from served gpt-oss-120b, so a different
+# model (e.g. gpt-oss-20b, used for quick smoke tests) falls through to the engine's
+# own defaults rather than silently inheriting memory/parallelism settings tuned
+# for a model of a different size.
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["sglang"]
+      model: ["gpt-oss-120b"]
+      gpu: ["A100"]
+      num_gpu: [2]
+    agentic_server_flags:
+      mem_fraction_static: "0.92"
+      tensor_parallel_size: "2"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["sglang"]
+      model: ["gpt-oss-120b"]
+      gpu: ["H100"]
+      num_gpu: [2]
+    agentic_server_flags:
+      mem_fraction_static: "0.85"
+      tensor_parallel_size: "2"
+      kv_cache_dtype: "fp8_e4m3"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["sglang"]
+      model: ["gpt-oss-120b"]
+      gpu: ["H200"]
+      num_gpu: [1]
+    agentic_server_flags:
+      mem_fraction_static: "0.88"
+      kv_cache_dtype: "fp8_e4m3"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["vllm"]
+      model: ["gpt-oss-120b"]
+      gpu: ["A100"]
+      num_gpu: [2]
+    agentic_server_flags:
+      gpu_memory_utilization: "0.92"
+      tensor_parallel_size: "2"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["vllm"]
+      model: ["gpt-oss-120b"]
+      gpu: ["H100"]
+      num_gpu: [2]
+    agentic_server_flags:
+      gpu_memory_utilization: "0.85"
+      tensor_parallel_size: "2"
+
+  - match:
+      benchmark: ["swe-bench-lite"]
+      platform: ["eidf"]
+      inference_engine: ["vllm"]
+      model: ["gpt-oss-120b"]
+      gpu: ["H200"]
+      num_gpu: [1]
+    agentic_server_flags:
+      gpu_memory_utilization: "0.88"
+      kv_cache_dtype: "fp8_e4m3"
+      max_num_seqs: "32"
+      enable_auto_tool_choice: true
 
 # --- swe-bench-lite: Vast.ai (Modal sandboxes, native to swe-rex) ----------
 # No sandbox_provider/exec_provider at all: Modal is not a TEASBench-owned

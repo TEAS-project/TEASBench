@@ -49,8 +49,9 @@ spec:
 
             mkdir -p /mnt/input/hf_cache /mnt/input/pip_cache
 
-            # Same environment repair the all-in-one agentic job does (sglang's
-            # image ships a torch/torchvision mismatch).
+            # This image ships no inference engine pre-baked (unlike the
+            # all-in-one groups' images, e.g. imoanswerbench_image) -- install
+            # it now, pinned to the version validated for this benchmark.
             @agentic_env_setup@
 
             # Binding to the container's loopback is fine: `kubectl port-forward`

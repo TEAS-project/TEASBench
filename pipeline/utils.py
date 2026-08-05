@@ -164,6 +164,31 @@ def needs_login_node_driver(p: dict):
             and p.get("benchmark") == "swe-bench-lite")
 
 
+def swe_bench_lite_k8s(p: dict):
+    """True for swe-bench-lite on EIDF specifically, for now -- scoped to
+    "== eidf" rather than "!= vastai" until a second k8s platform actually
+    exists, so this can't accidentally claim to cover one that hasn't been
+    validated. Revisit this check when that happens.
+
+    Deliberately NOT the same condition as needs_login_node_driver, even
+    though the two happen to agree everywhere today: this one is about which
+    engine build/launch-flags to use (see swebench_eidf_engine_image /
+    swebench_eidf_engine_server_command in configs/config.yaml, and _agentic()) --
+    a property of the benchmark, not of where the driver process runs.
+    needs_login_node_driver is a topology question (RBAC availability) that
+    will diverge from this one the day EIDF gets RBAC or a second k8s
+    platform is added; conflating them would silently drop the validated
+    swe-bench-lite engine recipe for such a row.
+
+    False for Vast.ai: that platform never reaches this code path at all
+    (pipeline/vast/resolve_commands.py calls Template.build_command directly
+    with cmd_type "agentic_server", not through _agentic()), but the name
+    still says so explicitly in case that ever changes.
+    """
+    return (p.get("benchmark") == "swe-bench-lite"
+            and p.get("platform", "eidf") == "eidf")
+
+
 def local_model_path(model: str):
     return f"{MODELS_ROOT}/{HF_MODEL_MAP[model]}"
 

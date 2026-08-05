@@ -1,0 +1,7 @@
+family,benchmark,inference_engine,model,gpu,num_gpu,num_tasks,concurrency,batch_size
+agentic,imo-answerbench,sglang,gpt-oss-20b,A100,1,2,1,default
+agentic,imo-answerbench,vllm,gpt-oss-20b,A100,1,2,1,default
+agentic,mcp-atlas,sglang,gpt-oss-20b,A100,1,2,1,default
+agentic,mcp-atlas,vllm,gpt-oss-20b,A100,1,2,1,default
+agentic,swe-bench-lite,sglang,gpt-oss-20b,A100,1,2,1,default
+agentic,swe-bench-lite,vllm,gpt-oss-20b,A100,1,2,1,default

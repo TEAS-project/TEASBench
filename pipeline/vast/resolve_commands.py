@@ -90,7 +90,7 @@ def resolve_moe(template, config, args):
     print("END_MOE_CONTRACT")
 
 def resolve_agentic(template, config, args):
-    """Resolve the agentic_server/agentic_client commands (and the
+    """Resolve the <benchmark>_server/agentic_client commands (and the
     supporting env/setup blocks) for one agentic-family CSV row, using
     exactly the same config.yaml rule engine as pipeline/template.py's
     _agentic() (Template.build_command / Template.resolve_generic_variable)
@@ -101,8 +101,8 @@ def resolve_agentic(template, config, args):
     more lines:
       1. "agentic"
       2. the Huggingface model path (e.g. unsloth/gpt-oss-120b)
-      3. the agentic inference-engine version (config.yaml's
-         agentic_inference_engine_version, e.g. "0.5.12.post1") -- for
+      3. the inference-engine version (config.yaml's
+         <benchmark>_inference_engine_version, e.g. "0.5.12.post1") -- for
          TEAS_ENGINE_VERSION
       4. the human-readable GPU name (utils.TEAS_GPU_NAME_MAP, e.g.
          "NVIDIA A100") -- for TEAS_GPU_TYPE
@@ -165,7 +165,19 @@ def resolve_agentic(template, config, args):
     }
 
     matching_rules = template.get_matching_rules(config.get("rules", []), parameters)
-    server_cmd = template.build_command("agentic_server", config, parameters, matching_rules)
+
+    # Mirrors pipeline/template.py's _agentic(): one explicit server variable
+    # group per benchmark (imoanswerbench_*/mcpatlas_*/swebenchlite_vastai_*
+    # -- see config.yaml's AGENTIC FAMILY section), not one shared
+    # 'agentic_server' -- this script only ever runs on Vast.ai
+    # (--platform defaults to "vastai" and nothing else sets it), so unlike
+    # _agentic() there's no swebench_eidf_engine_* branch to consider here.
+    group = {
+        "imo-answerbench": "imoanswerbench",
+        "mcp-atlas": "mcpatlas",
+        "swe-bench-lite": "swebenchlite_vastai",
+    }[args.benchmark]
+    server_cmd = template.build_command(f"{group}_server", config, parameters, matching_rules)
     client_cmd = template.build_command("agentic_client", config, parameters, matching_rules)
     env_exports = resolve_env_exports(template, config, matching_rules, parameters)
     extra_setup = template.resolve_generic_variable("extra_setup", config, matching_rules, parameters)
@@ -178,7 +190,7 @@ def resolve_agentic(template, config, args):
     tool_server_setup = "\n".join(s.strip() for s in (tool_server_start, sidecar_wait) if s.strip())
 
     agentic_engine_version = template.resolve_generic_variable(
-        "agentic_inference_engine_version", config, matching_rules, parameters)
+        f"{group}_inference_engine_version", config, matching_rules, parameters)
     teas_gpu_name = TEAS_GPU_NAME_MAP.get(args.gpu, args.gpu)
 
     print("agentic")

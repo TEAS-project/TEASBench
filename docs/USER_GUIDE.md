@@ -376,13 +376,13 @@ MoE runs record `teasbench_commit`, keeping aggregation across families uniform.
 
 #### Smoke test first
 
-The 2-task row in `experiments/smoke_tests_agentic.csv` is the same thing at
+The 2-task row in `experiments/agentic-smoke-tests-eidf.csv` is the same thing at
 small scale — same driver, same engine Job, same sandboxes, same grading:
 
 ```bash
 cd pipeline
 ~/pyvenvs/teasbench/bin/python generate.py \
-    --csv_file=../experiments/smoke_tests_agentic.csv --target_dir=./out
+    --csv_file=../experiments/agentic-smoke-tests-eidf.csv --target_dir=./out
 bash out/vllm-gptoss120b-swe-bench-lite-nt2-a100x1.sh
 ```
 
@@ -600,8 +600,8 @@ root.
 
 ```bash
 cd pipeline
-~/pyvenvs/teasbench/bin/python generate.py --csv_file=../experiments/smoke_tests.csv --target_dir=./out
-~/pyvenvs/teasbench/bin/python generate.py --csv_file=../experiments/smoke_tests_agentic.csv --target_dir=./out
+~/pyvenvs/teasbench/bin/python generate.py --csv_file=../experiments/moe-smoke-tests-eidf.csv --target_dir=./out
+~/pyvenvs/teasbench/bin/python generate.py --csv_file=../experiments/agentic-smoke-tests-eidf.csv --target_dir=./out
 ```
 
 **Add a model** — add to `HF_MODEL_MAP`, `MODEL_SHORT_NAME_MAP` and (for
