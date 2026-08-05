@@ -270,6 +270,19 @@ echo
 echo "[5] Results"
 RESULTS_SUBDIR="@output_repo_dir@/$TIMESTAMP"
 if [ $PUSH -eq 1 ]; then
+    # GIT_TOKEN is never stored on disk here; it is read fresh from the k8s
+    # secret each run (name comes from env.sh, written by
+    # eidf/setup/setup_swebench_env.sh) and only ever held in this process's
+    # environment. An already-exported GIT_TOKEN (e.g. set by hand) wins.
+    if [ -z "${GIT_TOKEN:-}" ] && [ -n "${GIT_TOKEN_K8S_SECRET:-}" ]; then
+        GIT_TOKEN=$(kubectl -n "$NAMESPACE" get secret "$GIT_TOKEN_K8S_SECRET" \
+            -o jsonpath='{.data.token}' 2>/dev/null | base64 --decode 2>/dev/null)
+        if [ -n "$GIT_TOKEN" ]; then
+            echo "  fetched GIT_TOKEN from secret/$GIT_TOKEN_K8S_SECRET in $NAMESPACE"
+        else
+            echo "  WARNING: could not read key 'token' from secret/$GIT_TOKEN_K8S_SECRET in $NAMESPACE"
+        fi
+    fi
     REPO_CLONE="$RUN_DIR/@results_repo@"
     if [ -n "${GIT_TOKEN:-}" ]; then
         REPO_URL="https://oauth2:${GIT_TOKEN%$'\n'}@github.com/TEAS-project/@results_repo@.git"
