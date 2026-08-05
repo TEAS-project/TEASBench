@@ -65,7 +65,13 @@ done
 
 TIMESTAMP="$(date +%Y%m%d-%H%M)"
 RUN_DIR="$OUTPUT_ROOT/$RUN_NAME/$TIMESTAMP"
-mkdir -p "$RUN_DIR"
+# Hard-fail here, before anything else (flock, prerequisites, the engine Job):
+# this script only has `set -uo pipefail`, not `-e`, so a failed mkdir would
+# otherwise be silently swallowed and every later write into $RUN_DIR (engine
+# log, port-forward log, results) would fail while the engine Job -- already
+# submitted and holding GPUs -- kept running to no purpose.
+mkdir -p "$RUN_DIR" || { echo "ERROR: could not create $RUN_DIR" >&2; exit 1; }
+[ -w "$RUN_DIR" ] || { echo "ERROR: $RUN_DIR exists but is not writable" >&2; exit 1; }
 
 # One run per output dir. flock is present on the EIDF login nodes; where it is
 # not (macOS, minimal images) carry on rather than aborting -- an absent flock
