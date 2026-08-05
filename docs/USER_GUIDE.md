@@ -457,50 +457,31 @@ automatically destroy itself.
 
 ## 6. Running agentic benchmarks on Vast.ai
 
-### 6.1 Build and push the agentic images (once)
+The process for running agentic benchmarks on Vast.ai is broadly similar to the MoE benchmarks, with some
+additional environment variables required for certain benchmarks. The process is outlined here.
 
-The agentic family uses **separate images** from MoE. Build context is
-`pipeline/`, from the repo root:
-
-```bash
-docker build --platform=linux/amd64 \
-  --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) \
-  -t ghcr.io/teas-project/sglang-agentic:latest \
-  -f pipeline/vast/sglang/Dockerfile.agentic pipeline/
-
-docker push ghcr.io/teas-project/sglang-agentic:latest
-```
-
-Same for `vllm/Dockerfile.agentic` → `vllm-agentic`.
-
-> These images have **not yet been built in anger**. They add uv, Node 20, an
-> npm MCP package preinstall and a streaming-patched SWE-agent on top of a
-> version-brittle engine base image. Build one before renting a GPU.
-
-### 6.2 Vast.ai setup
+### 6.1 Vast.ai setup
 
 As with the MoE benchmarks, some environment variables within the container must be provided
 through the Vast.ai interface so they can be picked up and used within the instance. Exactly
 which are required depend on the benchmark(s) being run. Use the following table:
 
-| Environment variable                                  | Purpose                           | Needed for benchmark?          |
-|-------------------------------------------------------|-----------------------------------|--------------------------------|
-| `GIT_TOKEN`                                           | Push results to repo              | everything                     |
+| Environment variable                                  | Purpose                          | Needed for benchmark?          |
+|-------------------------------------------------------|----------------------------------|--------------------------------|
+| `GIT_TOKEN`                                           | Push results to repo             | everything                     |
 | `HF_TOKEN`                                            | Download models from Hugging Face | everything                     |
-| `GEMINI_API_KEY`                                      | Judge                             | `imo-answerbench`, `mcp-atlas` |
-| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`                | Run Modal sandboxes               | `swe-bench-lite`               |
-| `GITHUB_TOKEN`, `BRAVE_API_KEY`, `ALCHEMY_API_KEY`, … | Tool server API keys (see below)  | `mcp-atlas`                    |
-
-The generated script's header lists exactly what its rows need.
+| `GEMINI_API_KEY`                                      | Judge                            | `imo-answerbench`, `mcp-atlas` |
+| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`                | Run Modal sandboxes              | `swe-bench-lite`               |
+| `GITHUB_TOKEN`, `BRAVE_API_KEY`, `ALCHEMY_API_KEY`, … | Tool server API keys (see below) | `mcp-atlas`                    |
 
 For `mcp-atlas`, any tool server API key in the [mcp-atlas `env.template`](https://github.com/scaleapi/mcp-atlas/blob/main/env.template)
 is picked up from a same-named environment variable — set whichever you have, using the template as a guide.
 
-### 6.3 Generate and launch
+### 6.2 Generate and launch
 
 Running an agentic benchmark suite is otherwise identical to the MoE benchmark process.
-Provide a CSV file and use the `generate.py` script with the `--vast` flag to generate
-bash scripts:
+Provide a CSV file identical to those used for EIDF runs and use the `generate.py` script
+with the `--vast` flag to generate bash scripts:
 
 ```bash
 cd pipeline
@@ -510,23 +491,26 @@ cd pipeline
     --vast
 ```
 
-then run one of the generated bash scripts:
+Then, run one of the generated bash scripts:
 
 ```bash
 bash out/vast_agentic_swe-bench-lite_sglang_H200x1.sh
 ```
 
-which will use the Vast.ai CLI to list appropriate offers and prompt you to select one.
-The appropriate container will run on the instance you select, pushing benchmark results
+This will use the Vast.ai CLI to find and list appropriate offers and prompt you to select one.
+The appropriate benchmark container will run on the instance you select, pushing benchmark results
 to GitHub as they complete.
 
-### 6.4 What differs from EIDF
+### 6.3 What differs from the EIDF
 
-| | EIDF | Vast.ai |
-|---|---|---|
+Due to the way agents run, there are some differences in how they are executed on Vast.ai instances vs the EIDF.
+The following table summarises those differences:
+
+|                       | EIDF              | Vast.ai                            |
+|-----------------------|-------------------|------------------------------------|
 | MCP Atlas tool server | sidecar container | background process, same container |
-| SWE-bench sandboxes | Kubernetes pods | **Modal** |
-| SWE-bench grading | exec pods | Modal (`--modal true`) |
+| SWE-bench sandboxes   | Kubernetes pods   | Modal                              |
+| SWE-bench grading     | exec pods         | Modal                              |
 
 ---
 
