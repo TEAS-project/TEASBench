@@ -280,20 +280,31 @@ GPU_SPECS: dict[str, dict] = {
         "tdp_w": 300,
         "tdp_source": "https://docs.tenstorrent.com/aibs/blackhole/",
     },
-    # Cerebras publishes no CS-3 list price: the figure is derived from the Galaxy-1
-    # contract ($100M / 32 nodes = $3.13M) less bundled services, and the public range
-    # spans $1.56M (bulk) to ~$4M (full MemoryX). CS-3 is buy-only, so this estimate is
-    # the whole cost basis for its cells — unlike every other entry here, which cites a
-    # vendor or retail price. The unit is one CS-3 system.
+    # Cerebras publishes no CS-3 list price. The Next Platform reports the Galaxy-1
+    # contract at $100M / 32 nodes including Cerebras operations and calls $2.5M per
+    # node its best estimate. This is therefore an analyst estimate, not a vendor quote.
+    # Both it and the 23 kW figure cover one complete integrated CS-3 system, so the
+    # normal 1.2x host/chassis uplift must not be added a second time.
     "cs3": {
         "price_per_unit_usd": 2500000.0,
         "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
         "tdp_w": 23000,
         "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
+        "capital_scale": 1.0,
     },
 }
 
 CPU_SPECS: dict[str, dict] = {
+    # Accounting-only host for an integrated system. CPU, MemoryX, SwarmX, management
+    # hardware and the rest of the deployed boundary are already inside the CS-3 price
+    # and power entries above; zeroes prevent compute_cost from adding them twice.
+    "cs3-integrated-host": {
+        "model": "Included in complete Cerebras CS-3 system",
+        "price_per_unit_usd": 0.0,
+        "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
+        "tdp_w": 0,
+        "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
+    },
     "gb10-soc": {
         "model": "Arm Cortex-X925/A725 integrated in NVIDIA GB10",
         "price_per_unit_usd": 0.0,
@@ -333,6 +344,7 @@ GPU_HOST_CPU: dict[str, tuple[int, str]] = {
     "gb10": (1, "gb10-soc"),
     "mi355x": (2, "epyc-7713p"),
     "blackhole-p150b": (1, "xeon-8468"),  # PCIe dev card in a single-CPU workstation host
+    "cs3": (1, "cs3-integrated-host"),
 }
 
 

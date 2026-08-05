@@ -28,13 +28,15 @@ RENT (vast.ai etc.):
 
 BUY (per https://arxiv.org/html/2412.07067v6, Eqs. 1-3):
   Amortize hardware capital over lifetime, add energy:
-    capital_$  = (gpu_$ * num_gpus + cpu_$ * num_cpus) * scale_other_capital
+    capital_$  = (gpu_$ * num_gpus + cpu_$ * num_cpus) * capital_scale
     power_W    = gpu_W * num_gpus + cpu_W * num_cpus
     amort_$/h  = capital_$ / lifetime_hours
     energy_$/h = (power_W / 1000) * electricity_$_per_kWh
     effective_$/h = amort_$/h + energy_$/h
     effective_$/s = effective_$/h / 3600
 
+  capital_scale normally equals --buy-scale-other-capital; a catalogued complete
+  system can set a per-entry scale of 1 to avoid adding its included host twice.
   Defaults use curated current/recent-average market estimates plus vendor
   datasheets for power. Override via --buy-gpu-price <gpu>=<usd>,
   --buy-gpu-prices-json <path>, --buy-gpu-tdp <gpu>=<W>, etc.
@@ -468,7 +470,8 @@ def build_buy_block(
 
     gpu_capital = gpu["price_per_unit_usd"] * num_gpus
     cpu_capital = cpu["price_per_unit_usd"] * num_cpus
-    total_capital_usd = (gpu_capital + cpu_capital) * scale_other_capital
+    capital_scale = gpu.get("capital_scale", scale_other_capital)
+    total_capital_usd = (gpu_capital + cpu_capital) * capital_scale
     total_power_w = gpu["tdp_w"] * num_gpus + cpu["tdp_w"] * num_cpus
 
     amort_per_h = total_capital_usd / lifetime_hours
@@ -482,6 +485,7 @@ def build_buy_block(
         "utilisation": utilisation,
         "electricity_usd_per_kwh": electricity_usd_per_kwh,
         "scale_other_capital": scale_other_capital,
+        **({"capital_scale": capital_scale} if "capital_scale" in gpu else {}),
         "gpu": {
             "key": gpu_key,
             "num": num_gpus,

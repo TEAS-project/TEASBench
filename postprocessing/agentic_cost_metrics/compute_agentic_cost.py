@@ -298,8 +298,9 @@ def build_buy_pricing(
     if cpu is None:
         return None
 
-    gpu_capital = gpu["price_per_unit_usd"] * num_gpus * scale_other_capital
-    cpu_capital = cpu["price_per_unit_usd"] * num_cpus * scale_other_capital
+    capital_scale = gpu.get("capital_scale", scale_other_capital)
+    gpu_capital = gpu["price_per_unit_usd"] * num_gpus * capital_scale
+    cpu_capital = cpu["price_per_unit_usd"] * num_cpus * capital_scale
     gpu_power_w = gpu["tdp_w"] * num_gpus
     cpu_power_w = cpu["tdp_w"] * num_cpus
 
@@ -313,6 +314,7 @@ def build_buy_pricing(
         "lifetime_hours": lifetime_hours,
         "electricity_usd_per_kwh": electricity_usd_per_kwh,
         "scale_other_capital": scale_other_capital,
+        **({"capital_scale": capital_scale} if "capital_scale" in gpu else {}),
         "gpu": {
             "key": gpu_key, "num": num_gpus,
             "price_per_unit_usd": gpu["price_per_unit_usd"],
