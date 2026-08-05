@@ -16,7 +16,7 @@ Where S_activated counts only the experts actually loaded
 
 Parameter accounting is local to this script: MLA and GQA attention are
 counted separately, as are shared and routed experts, and the hardware
-peaks come from the catalogs below. KV-cache and attention-compute
+peaks come from hardware_catalog.py. KV-cache and attention-compute
 terms are set to 0 because the aggregated metrics here do not carry
 per-request prefill/output lengths — the reported S-MBU is therefore a
 lower bound (weights-only) and S-MFU is a lower bound (no attention
@@ -36,141 +36,33 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-# Bandwidth is owned here for the same reason as peak FLOPS below: vendors quote it on
-# different bases, and a second catalog patched over a first is how a corrected figure gets
-# silently reverted. One table per axis, nothing overriding it later in the module.
-#
-# Sources are the vendor datasheets listed in the peak-FLOPS block below, plus the two edge
-# parts those datacentre datasheets do not cover:
-#   GB10 (DGX Spark)          273 GB/s LPDDR5X   https://www.nvidia.com/en-us/products/workstations/dgx-spark/
-#   Blackhole p150b           512 GB/s GDDR6     https://docs.tenstorrent.com/aibs/blackhole/specifications.html
-#
-# The Blackwell entries are the HGX per-GPU column, 7.7 TB/s. Reading the NVL72 column of the
-# same table instead gives 8.0, which is what these held before, and the measured part is an
-# air-cooled SXM module rather than an NVL72 tray.
-MEM_BW_DICT = {
-    "NVIDIA-A100-SXM4-80GB": 2.039e12,
-    "NVIDIA-H100-HBM3-80GB": 3.35e12,
-    "NVIDIA-H200-141GB": 4.8e12,
-    "NVIDIA-B200-183GB": 7.7e12,
-    "NVIDIA-B300-269GB": 7.7e12,
-    "AMD-Instinct-MI355X-288GB": 8.0e12,
-    "NVIDIA-GB10": 273e9,
-    "Tenstorrent-Blackhole-P150b": 512e9,
-}
-
-
-def get_peak_bw(gpu_key):
-    return MEM_BW_DICT.get(gpu_key, 0)
-
-
-# Peak FLOPS is owned here for the same reason, because vendors quote it on
-# different bases and mixing them silently biases S-MFU across vendors.
-#
-# Every entry is DENSE and per GPU, and S-MFU divides by the value as written. Each names its
-# with-sparsity counterpart inline where the vendor publishes one. The bases differ by
-# vendor and part:
-#   - H100/H200 datasheets lead with the with-sparsity figure; dense is half.
-#   - A100's leads with dense (312) and footnotes the sparse one (624).
-#   - Blackwell's per-GPU rows are with-sparsity and halve, except FP4, which prints
-#     `sparse | dense` outright and is taken as printed. Its board totals disagree with its
-#     own per-GPU rows there: HGX B300 reads 18 | 14 PFLOPS per GPU while the total on the
-#     same page reads 144 | 108, and 108/8 is 13.5. A per-GPU catalog follows the per-GPU row.
-#   - AMD names dense and with-sparsity as separate rows, and its sparse figures are 2.02x
-#     dense rather than 2x: OCP-FP8 reads 10.1 PFLOPS sparse against 5.0 dense, INT8 10.1
-#     POPS against 5.0. Halving the sparse row is what put FP8 and INT8 at 5050 here.
-#     MXFP4/6/8 have no sparsity row at all.
-#
-# The Blackwell figures are the HGX per-GPU columns, not the NVL72 ones: the measured part
-# reports `NVIDIA-B300-SXM6-AC-269GB`, an air-cooled SXM module. NVL72 trays run higher clocks
-# and are quoted above HGX on several rows — FP4 15 PFLOPS dense against 14, INT8 330 TOPS
-# against 307, bandwidth 8.0 TB/s against 7.7.
-#
-# Sources (vendor primary, per-GPU dense figures):
-#   A100        https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf
-#   H100/H200   https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306
-#   B200        https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
-#   B300        https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-datasheet
-#   MI355X      https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
-#   GB10        https://www.nvidia.com/en-us/products/workstations/dgx-spark/ — NVIDIA
-#               publishes one figure, 1 PFLOP FP4 with sparsity. The dense FP4 entry halves
-#               it (the NVIDIA convention above) and each wider precision halves again,
-#               mirroring the B200 ladder. Derived, not datasheet, below FP4.
-#   Blackhole   deliberately absent: Tenstorrent publishes only a BLOCKFP8 figure (664
-#               TFLOPS at the 120-core spec), no FP16/BF16 rate, so bf16 runs have no
-#               defensible denominator and publish a null S-MFU.
-PEAK_FLOPS_BASIS = "dense"
-PEAK_FLOPS_DICT = {
-    "bfloat16": {
-        "NVIDIA-A100-SXM4-80GB": 312e12,      # 624 w/ sparsity
-        "NVIDIA-H100-HBM3-80GB": 989.5e12,    # 1979 w/ sparsity
-        "NVIDIA-H200-141GB": 989.5e12,        # 1979 w/ sparsity
-        "NVIDIA-B200-183GB": 2250e12,         # 4500 w/ sparsity
-        "NVIDIA-B300-269GB": 2250e12,         # 4500 w/ sparsity
-        "AMD-Instinct-MI355X-288GB": 2500e12,
-        "NVIDIA-GB10": 125e12,
-    },
-    "float16": {
-        "NVIDIA-A100-SXM4-80GB": 312e12,
-        "NVIDIA-H100-HBM3-80GB": 989.5e12,
-        "NVIDIA-H200-141GB": 989.5e12,
-        "NVIDIA-B200-183GB": 2250e12,
-        "NVIDIA-B300-269GB": 2250e12,
-        "AMD-Instinct-MI355X-288GB": 2500e12,
-        "NVIDIA-GB10": 125e12,
-    },
-    "fp8": {
-        "NVIDIA-A100-SXM4-80GB": 312e12,      # A100 has no FP8 tensor cores -> upcasts to bf16
-        "NVIDIA-H100-HBM3-80GB": 1979e12,     # 3958 w/ sparsity
-        "NVIDIA-H200-141GB": 1979e12,
-        "NVIDIA-B200-183GB": 4500e12,         # 9000 w/ sparsity
-        "NVIDIA-B300-269GB": 4500e12,         # 9000 w/ sparsity
-        "AMD-Instinct-MI355X-288GB": 5000e12, # 10100 w/ sparsity; the published dense row
-        "NVIDIA-GB10": 250e12,
-    },
-    "int8": {
-        "NVIDIA-A100-SXM4-80GB": 624e12,      # 1248 w/ sparsity
-        "NVIDIA-H100-HBM3-80GB": 1979e12,
-        "NVIDIA-H200-141GB": 1979e12,
-        "NVIDIA-B200-183GB": 4500e12,          # 9000 w/ sparsity
-        # Blackwell Ultra's INT8 tensor path is far narrower than B200's: 307 TOPS per GPU
-        # against 9 POPS, both with-sparsity figures from the same table.
-        "NVIDIA-B300-269GB": 153.5e12,         # 307 w/ sparsity
-        "AMD-Instinct-MI355X-288GB": 5000e12,  # 10100 w/ sparsity; the published dense row
-        "NVIDIA-GB10": 250e12,                 # the fp8 rate, as on every card but A100/B300
-    },
-    "fp4": {
-        "NVIDIA-A100-SXM4-80GB": 312e12,      # A100 has no FP4 tensor cores -> mxfp4 upcasts to bf16
-        "NVIDIA-H100-HBM3-80GB": 1979e12,     # no FP4 tensor cores -> FP8 path
-        "NVIDIA-H200-141GB": 1979e12,
-        "NVIDIA-B200-183GB": 9000e12,         # 18000 w/ sparsity
-        # The one row NVIDIA prints as `sparse | dense` rather than sparse alone: HGX B300
-        # reads 18 | 14 PFLOPS per GPU, so dense is taken as printed rather than halved, and
-        # sparse is 1.29x dense here. The board total on the same page implies 13.5 (108
-        # PFLOPS across 8 GPUs), which is where this entry sat before.
-        "NVIDIA-B300-269GB": 14000e12,        # 18000 w/ sparsity
-        "AMD-Instinct-MI355X-288GB": 10100e12, # MXFP4; AMD publishes no sparsity row for it
-        "NVIDIA-GB10": 500e12,
-    },
-    # `int4` is reached by weight-only 4-bit checkpoints (compressed-tensors
-    # `num_bits=4 type=int`), which dequantise before the matmul rather than using a native
-    # INT4 tensor path; only A100 has one. Each entry mirrors the card's fp4 rate. That is a
-    # modelling assumption rather than a datasheet figure: the exact denominator is whatever
-    # precision the kernel computes in, which the run does not record.
-    "int4": {
-        "NVIDIA-A100-SXM4-80GB": 1248e12,     # 2496 w/ sparsity; Ampere has a real INT4 path
-        "NVIDIA-H100-HBM3-80GB": 1979e12,
-        "NVIDIA-H200-141GB": 1979e12,
-        "NVIDIA-B200-183GB": 9000e12,
-        "NVIDIA-B300-269GB": 14000e12,
-        "AMD-Instinct-MI355X-288GB": 10100e12,
-        "NVIDIA-GB10": 500e12,
-    },
-}
-
-
-def get_peak_flops(gpu_key, precision="bfloat16"):
-    return PEAK_FLOPS_DICT.get((precision or "").lower(), {}).get(gpu_key, 0)
+# Hardware specs live in hardware_catalog.py, not here: they are published by this script and
+# by the dashboard assembler in the results repo, and a second copy is how a corrected figure
+# gets silently reverted in one publisher and not the other. Imported under both invocations —
+# as a package module (tests) and as a standalone script (the sync workflow).
+if __package__:
+    from .hardware_catalog import (  # noqa: F401  (re-exported for existing importers)
+        B300_KEY,
+        GPU_KEY_FALLBACK,
+        GPU_TYPE_MAP,
+        MEM_BW_DICT,
+        PEAK_FLOPS_BASIS,
+        PEAK_FLOPS_DICT,
+        get_peak_bw,
+        get_peak_flops,
+    )
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from hardware_catalog import (  # noqa: F401  (re-exported for existing importers)
+        B300_KEY,
+        GPU_KEY_FALLBACK,
+        GPU_TYPE_MAP,
+        MEM_BW_DICT,
+        PEAK_FLOPS_BASIS,
+        PEAK_FLOPS_DICT,
+        get_peak_bw,
+        get_peak_flops,
+    )
 
 
 DATASET_TOKEN_PROFILE = {
@@ -220,35 +112,6 @@ def kv_per_token_entries(cfg_d: dict, n_layers: int, d_head: int, n_kv_heads: in
         return n_layers * (cfg_d["kv_lora_rank"] + cfg_d["qk_rope_head_dim"])
     return 2 * n_layers * d_head * n_kv_heads
 
-
-B300_KEY = "NVIDIA-B300-269GB"
-
-
-GPU_TYPE_MAP = {
-    "AMD-Instinct-MI355X-288GB": "AMD-Instinct-MI355X-288GB",
-    "AMD-Instinct-MI355X": "AMD-Instinct-MI355X-288GB",
-    "AMD--288GB": "AMD-Instinct-MI355X-288GB",
-    "NVIDIA-A100-SXM4-80GB": "NVIDIA-A100-SXM4-80GB",
-    "NVIDIA-B200-180GB": "NVIDIA-B200-183GB",
-    "NVIDIA-B200-183GB": "NVIDIA-B200-183GB",
-    "NVIDIA-B300-SXM6-AC-269GB": B300_KEY,
-    "NVIDIA-H100-HBM3-80GB": "NVIDIA-H100-HBM3-80GB",
-    "NVIDIA-H200-140GB": "NVIDIA-H200-141GB",
-    "NVIDIA-H200-141GB": "NVIDIA-H200-141GB",
-    "NVIDIA-GB10": "NVIDIA-GB10",
-    "Tenstorrent-Blackhole-P150b": "Tenstorrent-Blackhole-P150b",
-}
-
-GPU_KEY_FALLBACK = {
-    "a100": "NVIDIA-A100-SXM4-80GB",
-    "h100": "NVIDIA-H100-HBM3-80GB",
-    "h200": "NVIDIA-H200-141GB",
-    "b200": "NVIDIA-B200-183GB",
-    "b300": B300_KEY,
-    "mi355x": "AMD-Instinct-MI355X-288GB",
-    "gb10": "NVIDIA-GB10",
-    "blackhole-p150b": "Tenstorrent-Blackhole-P150b",
-}
 
 MODEL_REPO_MAP = {
     "openai/gpt-oss-120b": "openai/gpt-oss-120b",

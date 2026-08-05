@@ -53,6 +53,24 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Hardware specs live in hardware_catalog.py, not here: they are published by this script and
+# by the dashboard assembler in the results repo, and a second copy is how a corrected figure
+# gets silently reverted in one publisher and not the other. Imported under both invocations —
+# as a package module (tests) and as a standalone script (the sync workflow).
+if __package__:
+    from .hardware_catalog import (  # noqa: F401  (re-exported for existing importers)
+        CPU_SPECS,
+        GPU_HOST_CPU,
+        GPU_SPECS,
+    )
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from hardware_catalog import (  # noqa: F401  (re-exported for existing importers)
+        CPU_SPECS,
+        GPU_HOST_CPU,
+        GPU_SPECS,
+    )
+
 
 VASTAI_PRICING_URL = "https://vast.ai/pricing"
 DEFAULT_RENT_PRICE_SOURCE = VASTAI_PRICING_URL
@@ -60,111 +78,6 @@ DEFAULT_RENT_PRICE_SOURCE = VASTAI_PRICING_URL
 DEFAULT_LIFETIME_HOURS = 3 * 365 * 24
 DEFAULT_ELECTRICITY_USD_PER_KWH = 0.15
 DEFAULT_SCALE_OTHER_CAPITAL = 1.2
-
-GPU_SPECS: dict[str, dict] = {
-    "a100": {
-        "price_per_unit_usd": 15000.0,
-        "price_source": "https://www.trgdatacenters.com/resource/h100-vs-a100/",
-        "tdp_w": 400,
-        "tdp_source": "https://lenovopress.lenovo.com/lp1734-thinksystem-nvidia-a100-pcie-40-gpu",
-    },
-    "h100": {
-        "price_per_unit_usd": 27000.0,
-        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h100-price/",
-        "tdp_w": 700,
-        "tdp_source": "https://lenovopress.lenovo.com/lp1732-thinksystem-nvidia-h100-pcie-gen5-gpu",
-    },
-    "h200": {
-        "price_per_unit_usd": 31000.0,
-        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h200-price/",
-        "tdp_w": 700,
-        "tdp_source": "https://lenovopress.lenovo.com/lp1944-nvidia-h200-141gb-gpu",
-    },
-    "b200": {
-        "price_per_unit_usd": 40000.0,
-        "price_source": "https://epoch.ai/blog/how-much-does-it-cost-to-train-frontier-ai-models",
-        "tdp_w": 1000,
-        "tdp_source": "https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf",
-    },
-    "b300": {
-        "price_per_unit_usd": 37500.0,
-        "price_source": "https://tech-insider.org/nvidia-blackwell-gpu-pricing/",
-        "tdp_w": 1400,
-        "tdp_source": "https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-data-sheet",
-    },
-    "gb10": {
-        "price_per_unit_usd": 3999.0,
-        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
-        "tdp_w": 140,
-        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
-    },
-    "mi355x": {
-        "price_per_unit_usd": 30000.0,
-        "price_source": "https://www.fitmyllm.com/gpu/radeon-instinct-mi355x",
-        "tdp_w": 1400,
-        "tdp_source": "https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html",
-    },
-    "blackhole-p150b": {
-        "price_per_unit_usd": 1399.0,
-        "price_source": "https://tenstorrent.com/en/hardware/cards",
-        "tdp_w": 300,
-        "tdp_source": "https://docs.tenstorrent.com/aibs/blackhole/",
-    },
-    # Cerebras publishes no CS-3 list price: the figure is derived from the Galaxy-1
-    # contract ($100M / 32 nodes = $3.13M) less bundled services, and the public range
-    # spans $1.56M (bulk) to ~$4M (full MemoryX). CS-3 is buy-only, so this estimate is
-    # the whole cost basis for its cells — unlike every other entry here, which cites a
-    # vendor or retail price. The unit is one CS-3 system.
-    "cs3": {
-        "price_per_unit_usd": 2500000.0,
-        "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
-        "tdp_w": 23000,
-        "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
-    },
-}
-
-CPU_SPECS: dict[str, dict] = {
-    "gb10-soc": {
-        "model": "Arm Cortex-X925/A725 integrated in NVIDIA GB10",
-        "price_per_unit_usd": 0.0,
-        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
-        "tdp_w": 0,
-        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
-    },
-    "epyc-7713p": {
-        "model": "AMD EPYC 7713P",
-        "price_per_unit_usd": 5010.0,
-        "price_source": "https://www.amd.com/en/products/processors/server/epyc/7003-series/amd-epyc-7713p.html",
-        "tdp_w": 225,
-        "tdp_source": "https://www.amd.com/en/products/processors/server/epyc/7003-series/amd-epyc-7713p.html",
-    },
-    "xeon-8468": {
-        "model": "Intel Xeon Platinum 8468",
-        "price_per_unit_usd": 7214.0,
-        "price_source": "https://www.intel.com/content/www/us/en/products/sku/231735/intel-xeon-platinum-8468-processor-105m-cache-2-10-ghz/specifications.html",
-        "tdp_w": 350,
-        "tdp_source": "https://www.intel.com/content/www/us/en/products/sku/231735/intel-xeon-platinum-8468-processor-105m-cache-2-10-ghz/specifications.html",
-    },
-    "xeon-8558": {
-        "model": "Intel Xeon Platinum 8558",
-        "price_per_unit_usd": 5208.0,
-        "price_source": "https://www.intel.com/content/www/us/en/products/sku/237255/intel-xeon-platinum-8558-processor-260m-cache-2-10-ghz/specifications.html",
-        "tdp_w": 330,
-        "tdp_source": "https://www.intel.com/content/www/us/en/products/sku/237255/intel-xeon-platinum-8558-processor-260m-cache-2-10-ghz/specifications.html",
-    },
-}
-
-GPU_HOST_CPU: dict[str, tuple[int, str]] = {
-    "a100": (2, "xeon-8468"),
-    "h100": (2, "xeon-8468"),
-    "h200": (2, "xeon-8468"),
-    "b200": (2, "xeon-8468"),
-    "b300": (2, "xeon-8558"),
-    "gb10": (1, "gb10-soc"),
-    "mi355x": (2, "epyc-7713p"),
-    "blackhole-p150b": (1, "xeon-8468"),  # PCIe dev card in a single-CPU workstation host
-}
-
 
 GPU_DIR_RE = re.compile(r"^([a-z][a-z0-9-]*?)x(\d+)(?:[_-].*)?$")  # hyphen allows blackhole-p150b
 
