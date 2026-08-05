@@ -1,5 +1,0 @@
-family,benchmark,inference_engine,model,gpu,num_gpu,num_tasks,concurrency,batch_size
-agentic,swe-bench-lite,sglang,gpt-oss-120b,H100,2,100,4,default
-agentic,swe-bench-lite,sglang,gpt-oss-120b,H200,1,100,4,default
-agentic,swe-bench-lite,vllm,gpt-oss-120b,H100,2,100,4,default
-agentic,swe-bench-lite,vllm,gpt-oss-120b,H200,1,100,4,default

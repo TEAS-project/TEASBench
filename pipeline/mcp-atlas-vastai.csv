@@ -1,5 +1,0 @@
-family,benchmark,inference_engine,model,gpu,num_gpu,num_tasks,concurrency,batch_size
-agentic,mcp-atlas,sglang,gpt-oss-120b,H100,2,60,4,default
-agentic,mcp-atlas,sglang,gpt-oss-120b,H200,1,60,4,default
-agentic,mcp-atlas,vllm,gpt-oss-120b,H100,2,60,4,default
-agentic,mcp-atlas,vllm,gpt-oss-120b,H200,1,60,4,default
