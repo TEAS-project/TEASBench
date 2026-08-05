@@ -391,9 +391,8 @@ bash out/vllm-gptoss120b-swe-bench-lite-nt2-a100x1.sh
 A low or zero accuracy on 2 tasks is normal and not a failure signal; what
 matters is that every stage ran and wrote its outputs.
 
-Run §4.7 first — if the mechanism is broken, this fails for that reason after
-queueing for a GPU.
----
+**Run §4.7 first — if the mechanism is broken, this fails for that reason after queueing for a GPU.**
+
 
 ## 5. Running MoE benchmarks on Vast.ai
 
@@ -628,3 +627,12 @@ more general ones.
 
 Two failures in `test_agentic_compute_cost_cli.py` and
 `test_moe_compute_sparsity_cli.py` are pre-existing and unrelated.
+
+## 10. Support for emerging hardware 
+
+### Tenstorrent 
+
+Currently the TEASBench pipeline does not support running the TEASBench benchmarks on Tenstorrent accelerators due to limited [Tenstorrent inference engine model support](https://github.com/tenstorrent/tt-inference-server/blob/main/docs/model_support/llm/README.md). As model support matures we expect to extend the pipeline to target Tenstorrent hardware building on our approach validated by running a simpler dense model, [Llama3.1-8b-Instruct on a Tenstorrent Blackhole p150b](./pipeline/dev/tenstorrent/tt-inference_llama-3.1-8b-instruct_p150bx1.sh), which serves as a concrete example following the documentation on [how to deploy LLMs using tt-inference](https://docs.tenstorrent.com/getting-started/vLLM-servers.html). 
+
+Note: [https://www.teasbench.com](https://www.teasbench.com) includes benchmark results for `qwen3-4B` -  another dense model - on Tenstorrent Blackhole p150, however this was produced using custom kernels under development rather than the publicly available Tenstorrent software stack (`tt-inference`) available at time of writing (August 2026). 
+
