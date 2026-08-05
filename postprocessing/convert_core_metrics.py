@@ -5,8 +5,15 @@
 Walks the results repo tree the same way aggregate_results.py does -- descending
 into each timestamped run directory (see aggregate_results.parse_run_path for
 what constitutes a valid run directory) -- and rewrites the .json files found in
-each such directory in place. Wherever a key "e2e_s" appears (at any depth, and
-possibly more than once), two sibling keys are added alongside it:
+each such directory in place.
+
+Writing requires --apply. Without it the script dry-runs: it does all the same
+work and reports, file by file, exactly what it would write, but touches
+nothing. The rewrite is in place and one branch below replaces a measured
+"e2e_s", so the default must not be to write.
+
+Wherever a key "e2e_s" appears (at any depth, and possibly more than once), two
+sibling keys are added alongside it:
 
     "unnormalized_e2e" = e2e_s * num_tasks
     "request/s"        = 1.0 / e2e_s
@@ -187,11 +194,13 @@ def read_run_metadata(run_dir):
     return num_tasks, schema
 
 
-def process_file(path, num_tasks, is_aggregate, indent):
+def process_file(path, num_tasks, is_aggregate, indent, apply_changes):
     """Load, annotate, and (if changed) rewrite one json file in place.
 
-    Returns True if the file was modified. Files that don't parse as json are
-    reported and skipped.
+    Returns True if the file was modified -- or, when `apply_changes` is False,
+    would have been; the annotation is computed either way and only the write
+    is skipped, so a dry run reports exactly the set of files an apply run
+    writes. Files that don't parse as json are reported and skipped.
     """
     try:
         with open(path, "r") as f:
@@ -203,9 +212,10 @@ def process_file(path, num_tasks, is_aggregate, indent):
     if not annotate_e2e(data, num_tasks, is_aggregate):
         return False
 
-    with open(path, "w") as f:
-        json.dump(data, f, indent=indent)
-        f.write("\n")
+    if apply_changes:
+        with open(path, "w") as f:
+            json.dump(data, f, indent=indent)
+            f.write("\n")
     return True
 
 
@@ -226,11 +236,15 @@ def find_run_dirs(root):
     return sorted(run_dirs)
 
 
-def main(root_dir, indent):
+def main(root_dir, indent, apply_changes):
     root = pathlib.Path(root_dir)
     modified = 0
     scanned = 0
     aggregate_dirs = []
+    verb = "Updated" if apply_changes else "Would update"
+
+    if not apply_changes:
+        print("DRY RUN -- no file will be written. Re-run with --apply to write.\n")
 
     for run_dir in find_run_dirs(root):
         num_tasks, schema = read_run_metadata(run_dir)
@@ -241,23 +255,27 @@ def main(root_dir, indent):
         if is_aggregate:
             aggregate_dirs.append(run_dir)
             print(f"WARNING: {run_dir} looks like e2e_s is an aggregate whole-run "
-                  f"total, not a per-request mean; normalizing by num_tasks={num_tasks} "
-                  f"before computing companions.")
+                  f"total, not a per-request mean; {'normalizing' if apply_changes else 'would normalize'} "
+                  f"by num_tasks={num_tasks} before computing companions.")
 
         for path in sorted(run_dir.glob("*.json")):
             if not path.is_file():
                 continue
             scanned += 1
-            if process_file(path, num_tasks, is_aggregate, indent):
+            if process_file(path, num_tasks, is_aggregate, indent, apply_changes):
                 modified += 1
-                print(f"Updated {path} (num_tasks={num_tasks})")
+                print(f"{verb} {path} (num_tasks={num_tasks})")
 
-    print(f"Done. Scanned {scanned} run json file(s); updated {modified}.")
+    print(f"Done. Scanned {scanned} run json file(s); "
+          f"{'updated' if apply_changes else 'would update'} {modified}.")
     if aggregate_dirs:
+        normalized = "normalized in place" if apply_changes else "would be normalized in place"
         print(f"\n{len(aggregate_dirs)} run director{'y' if len(aggregate_dirs) == 1 else 'ies'} "
-              f"had an aggregate-schema e2e_s (normalized in place, see WARNINGs above):")
+              f"had an aggregate-schema e2e_s ({normalized}, see WARNINGs above):")
         for d in aggregate_dirs:
             print(f"  {d}")
+    if not apply_changes:
+        print("\nDRY RUN -- nothing was written.")
 
 
 if __name__ == "__main__":
@@ -267,7 +285,10 @@ if __name__ == "__main__":
                         help="Top level directory containing the benchmark run results to convert")
     parser.add_argument("--indent", type=int, default=2,
                         help="Indentation (spaces) used when rewriting json files (default: 2)")
+    parser.add_argument("--apply", action="store_true",
+                        help="Actually rewrite the json files. Without it the script only "
+                             "reports, file by file, what it would write.")
 
     args = parser.parse_args()
 
-    main(args.root_dir, args.indent)
+    main(args.root_dir, args.indent, args.apply)

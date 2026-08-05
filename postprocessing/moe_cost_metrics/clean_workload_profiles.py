@@ -15,6 +15,11 @@ workload_profile*.json files to a lean schema:
     "decode_tokens_total": 456
   }
 }
+
+The rewrite is in place and lossy: every field outside that schema is dropped and
+is recoverable only from version control. Writing therefore requires --apply;
+without it the script reports, file by file, what it would rewrite and touches
+nothing.
 """
 
 from __future__ import annotations
@@ -115,17 +120,30 @@ def clean_file(path: Path, root: Path, dry_run: bool = False) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."), help="Tree containing workload_profile*.json files")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--apply", action="store_true",
+                        help="Actually rewrite the profiles. Without it the script only "
+                             "reports, file by file, what it would write.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Report only. Now the default; kept so existing invocations still work.")
     args = parser.parse_args()
+
+    # The rewrite is in place and lossy -- every field outside the compact schema is
+    # dropped -- so writing is opt-in, and an explicit --dry-run still wins over --apply.
+    dry_run = args.dry_run or not args.apply
+    if dry_run:
+        print("DRY RUN -- no file will be written. Re-run with --apply to write.")
 
     root = args.root.resolve()
     files = sorted(root.rglob("workload_profile*.json"))
     changed = 0
+    action = "Would update" if dry_run else "Updated"
     for path in files:
-        if clean_file(path, root, dry_run=args.dry_run):
+        if clean_file(path, root, dry_run=dry_run):
             changed += 1
-    action = "Would update" if args.dry_run else "Updated"
+            print(f"{action} {path}")
     print(f"{action} {changed} workload profile files (scanned {len(files)})")
+    if dry_run:
+        print("DRY RUN -- nothing was written.")
     return 0
 
 
