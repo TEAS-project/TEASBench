@@ -25,7 +25,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install pandas pyyaml re
 
-python3 generate.py --csv_file=data/smoke_tests.csv
+python3 generate.py --csv_file=data/moe-smoke-tests-eidf.csv
 ```
 
 
@@ -69,7 +69,7 @@ only so the results-repo path keeps its usual `batch-size-<...>` level). See:
 - [`../experiments/imo-answerbench-eidf.csv`](../experiments/imo-answerbench-eidf.csv)
 - [`../experiments/mcp-atlas-eidf.csv`](../experiments/mcp-atlas-eidf.csv)
 - [`../experiments/swe-bench-lite-eidf.csv`](../experiments/swe-bench-lite-eidf.csv)
-- [`../experiments/smoke_tests_agentic.csv`](../experiments/smoke_tests_agentic.csv) --
+- [`../experiments/agentic-smoke-tests-eidf.csv`](../experiments/agentic-smoke-tests-eidf.csv) --
   two tiny (`num_tasks: 2`) rows (mcp-atlas, swe-bench-lite) for a quick pipeline shakeout
 
 ### Generate and submit

@@ -259,6 +259,6 @@ echo
 echo "  source $PREFIX/env.sh"
 echo
 echo "Then generate and run as usual (docs/USER_GUIDE.md 4.8):"
-echo "  cd pipeline && python generate.py --csv_file=../experiments/smoke_tests_agentic.csv --target_dir=./out"
+echo "  cd pipeline && python generate.py --csv_file=../experiments/agentic-smoke-tests-eidf.csv --target_dir=./out"
 echo "  bash out/<run>.sh"
 echo "=============================================================="

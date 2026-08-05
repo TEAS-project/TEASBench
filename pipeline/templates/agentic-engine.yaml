@@ -49,8 +49,8 @@ spec:
 
             mkdir -p /mnt/input/hf_cache /mnt/input/pip_cache
 
-            # This image ships no inference engine pre-baked (unlike
-            # agentcap_image, used by the all-in-one agentic job) -- install
+            # This image ships no inference engine pre-baked (unlike the
+            # all-in-one groups' images, e.g. imoanswerbench_image) -- install
             # it now, pinned to the version validated for this benchmark.
             @agentic_env_setup@
 

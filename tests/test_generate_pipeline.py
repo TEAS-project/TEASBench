@@ -224,7 +224,7 @@ class AgenticYamlGenerationTests(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory(dir=str(REPO))
         cls.out_dir = Path(cls._tmp.name)
         cls.csvs = [csv_path for csv_path, _ in AGENTIC_CSVS_AND_EXPECTED_CONTAINERS.values()]
-        cls.csvs.append(EXPERIMENTS / "smoke_tests_agentic.csv")
+        cls.csvs.append(EXPERIMENTS / "agentic-smoke-tests-eidf.csv")
         for csv_path in cls.csvs:
             run_generate(PIPELINE, csv_path, cls.out_dir)
         cls.generated = sorted(cls.out_dir.glob("*.yaml"))

@@ -172,8 +172,8 @@ def swe_bench_lite_k8s(p: dict):
 
     Deliberately NOT the same condition as needs_login_node_driver, even
     though the two happen to agree everywhere today: this one is about which
-    engine build/launch-flags to use (see agentic_engine_image /
-    agentic_engine_server_flags in configs/config.yaml, and _agentic()) --
+    engine build/launch-flags to use (see swebench_eidf_engine_image /
+    swebench_eidf_engine_server_command in configs/config.yaml, and _agentic()) --
     a property of the benchmark, not of where the driver process runs.
     needs_login_node_driver is a topology question (RBAC availability) that
     will diverge from this one the day EIDF gets RBAC or a second k8s
