@@ -393,44 +393,69 @@ Run §4.7 first — if the mechanism is broken, this fails for that reason after
 queueing for a GPU.
 ---
 
-## 5. Running MoE on Vast.ai
+## 5. Running MoE benchmarks on Vast.ai
 
-### 5.1 Generate
+Most of the engine driving the benchmarks is built into the container images we use
+in the Vast.ai pipeline.
+
+### 5.1 Vast.ai setup
+
+On Vast.ai itself, either through the command line interface or the web console,
+you will need to set the following environment variables to be injected into any
+instances you create:
+
+- `GIT_TOKEN`, a GitHub personal access token with read access to the TEASBench repository. This is used to push new results to 
+  the repository inside the instance.
+- `HF_TOKEN`, a Hugging Face token used to download the models inside the instance.
+- `OPENAI_API_KEY`, an OpenAI API key used for accessing OpenAI services when judging `arena-hard` benchmark results.
+
+### 5.2 Local prerequisites
+
+Aside from the prerequisites listed above, you will need to install the Vast.ai CLI and authenticate it: https://docs.vast.ai/cli/.
+The Vast.ai pipeline uses the CLI to search for offers and launch instances; from that point on, a benchmark run will manage itself.
+
+### 5.3 Generate launch scripts
+
+The scripts to launch Vast.ai instances are created in a similar fashion to the EIDF YAMLs. The addition of the
+`--vast` flag tells the generator to produce scripts for Vast.ai. For example, the following command generates
+Vast.ai scripts in the `out/` directory for the MoE experiments described in `moe-experiments-vastai.csv`:
 
 ```bash
 cd pipeline
-~/pyvenvs/teasbench/bin/python generate.py \
+python generate.py \
     --csv_file=../experiments/moe-experiments-vastai.csv \
-    --target_dir=./out --vast
+    --target_dir=./out \
+    --vast
 ```
 
-Add `--private-image` if the image is still private on ghcr.io; the generated
-script then expects `GHCR_USERNAME` / `GHCR_PAT` in *your* environment.
+This produces one script per (engine, GPU, num_gpu) triplet, e.g.
+`vast_sglang_H200x8.sh`, with the relevant rows from the original CSV file base64 encoded within.
 
-Produces one script per (engine, GPU, num_gpu) group, e.g.
-`vast_sglang_H200x8.sh`, with the CSV rows base64-embedded.
+### 5.4 Launch benchmarks
 
-### 5.2 Launch
+Run a generated script to launch a Vast.ai instance running one of the TEASBench images. This will
+automatically run the benchmarks described in the original CSV file corresponding to this
+script's (engine, GPU, num_gpu) triplet and push results to GitHub.
+
+The scripts take no arguments. For example, to launch the example script generated just above,
+for a `sglang` engine on a `H200` instance with 8 GPUs, run:
 
 ```bash
 bash out/vast_sglang_H200x8.sh
 ```
 
-It lists matching offers cheapest-first, prompts for an offer ID, and creates
-the instance. The instance then works through its rows, pushing results as it
-goes, and **destroys itself** at the end.
+The script will show current offers from Vast.ai matching the requested GPU type and number,
+prompting you to select one of the offer IDs. The offers shown are sorted by price, cheapest first.
 
-### 5.3 Secrets
+Selecting an offer will launch the instance, printing its ID to the terminal.
 
-Set in the Vast.ai console: `GIT_TOKEN`, `HF_TOKEN`, `OPENAI_API_KEY`.
-
-`CONTAINER_ID` and `CONTAINER_API_KEY` are injected by Vast.ai automatically —
-they're how the instance destroys itself. Without them it would restart and
-rerun the whole sweep.
+The running instance can be monitored through the Vast.ai web console or CLI. The benchmarks will run
+sequentially, pushing results to GitHub as they complete. Once all are complete, the instance will
+automatically destroy itself.
 
 ---
 
-## 6. Running agentic on Vast.ai
+## 6. Running agentic benchmarks on Vast.ai
 
 ### 6.1 Build and push the agentic images (once)
 
@@ -452,34 +477,48 @@ Same for `vllm/Dockerfile.agentic` → `vllm-agentic`.
 > npm MCP package preinstall and a streaming-patched SWE-agent on top of a
 > version-brittle engine base image. Build one before renting a GPU.
 
-### 6.2 Secrets
+### 6.2 Vast.ai setup
 
-| Secret | Needed for |
-|---|---|
-| `GIT_TOKEN`, `HF_TOKEN` | everything |
-| `GEMINI_API_KEY` | judge for `imo-answerbench`, `mcp-atlas` |
-| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | `swe-bench-lite` only (Modal sandboxes) |
-| `GITHUB_TOKEN`, `BRAVE_API_KEY`, `ALCHEMY_API_KEY`, … | `mcp-atlas` tool servers |
+As with the MoE benchmarks, some environment variables within the container must be provided
+through the Vast.ai interface so they can be picked up and used within the instance. Exactly
+which are required depend on the benchmark(s) being run. Use the following table:
+
+| Environment variable                                  | Purpose                           | Needed for benchmark?          |
+|-------------------------------------------------------|-----------------------------------|--------------------------------|
+| `GIT_TOKEN`                                           | Push results to repo              | everything                     |
+| `HF_TOKEN`                                            | Download models from Hugging Face | everything                     |
+| `GEMINI_API_KEY`                                      | Judge                             | `imo-answerbench`, `mcp-atlas` |
+| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`                | Run Modal sandboxes               | `swe-bench-lite`               |
+| `GITHUB_TOKEN`, `BRAVE_API_KEY`, `ALCHEMY_API_KEY`, … | Tool server API keys (see below)  | `mcp-atlas`                    |
 
 The generated script's header lists exactly what its rows need.
 
-For `mcp-atlas`, any key in the mcp-atlas `env.template` is picked up from a
-same-named environment variable — set whichever you have.
+For `mcp-atlas`, any tool server API key in the [mcp-atlas `env.template`](https://github.com/scaleapi/mcp-atlas/blob/main/env.template)
+is picked up from a same-named environment variable — set whichever you have, using the template as a guide.
 
 ### 6.3 Generate and launch
+
+Running an agentic benchmark suite is otherwise identical to the MoE benchmark process.
+Provide a CSV file and use the `generate.py` script with the `--vast` flag to generate
+bash scripts:
 
 ```bash
 cd pipeline
 ~/pyvenvs/teasbench/bin/python generate.py \
     --csv_file=../experiments/swe-bench-lite-vastai.csv \
-    --target_dir=./out --vast
+    --target_dir=./out \
+    --vast
+```
 
+then run one of the generated bash scripts:
+
+```bash
 bash out/vast_agentic_swe-bench-lite_sglang_H200x1.sh
 ```
 
-Agentic scripts are named `vast_agentic_<benchmark>_<engine>_<gpu>x<n>.sh` when
-the group is a single benchmark, so per-benchmark CSVs don't overwrite each
-other in one output directory.
+which will use the Vast.ai CLI to list appropriate offers and prompt you to select one.
+The appropriate container will run on the instance you select, pushing benchmark results
+to GitHub as they complete.
 
 ### 6.4 What differs from EIDF
 
