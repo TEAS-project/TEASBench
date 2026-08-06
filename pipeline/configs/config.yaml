@@ -534,7 +534,7 @@ variables_defaults:
         python3 -c "import sglang; print('SGLang', sglang.__version__)"
     vllm:
       value: |
-        pip install --break-system-packages vllm==0.19.0 2>&1 | tail -3
+        pip install --break-system-packages vllm==0.21.0 2>&1 | tail -3
         python3 -c "import vllm; print('vLLM', vllm.__version__)"
 
   swebench_eidf_engine_server_command:

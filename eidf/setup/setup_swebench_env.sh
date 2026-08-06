@@ -26,7 +26,7 @@
 set -uo pipefail
 
 PREFIX="${TEASBENCH_ENV_PREFIX:-$HOME/teasbench-env}"
-AGENTCAP_REPO="${AGENTCAP_REPO:-https://github.com/aproeme/AgentCAP.git}"
+AGENTCAP_REPO="${AGENTCAP_REPO:-https://github.com/AgentCAP.git}"
 AGENTCAP_REF="${AGENTCAP_REF:-arno/teasbench}"
 SWEAGENT_REPO="${SWEAGENT_REPO:-https://github.com/SWE-agent/SWE-agent.git}"
 SWEAGENT_REF="${SWEAGENT_REF:-main}"

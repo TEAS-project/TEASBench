@@ -170,7 +170,7 @@ echo "  pod: $ENGINE_POD"
 # The server's own stdout/stderr (weight loading, warnings, crashes) is
 # otherwise invisible while we sit in the readiness poll below.
 echo "  streaming engine logs -> $RUN_DIR/engine.log"
-kubectl -n "$NAMESPACE" logs -f "$ENGINE_POD" 2>&1 | tee -a "$RUN_DIR/engine.log" &
+kubectl -n "$NAMESPACE" logs -f "$ENGINE_POD" &> "$RUN_DIR/engine.log" &
 LOGS_PID=$!
 
 # OS-assigned local port: a fixed one collides with a stale forward from a
@@ -299,11 +299,12 @@ if [ $PUSH -eq 1 ]; then
         DEST="$REPO_CLONE/$RESULTS_SUBDIR"
         mkdir -p "$DEST"
         shopt -s nullglob
-        cp "$RUN_DIR"/metrics_*.json "$RUN_DIR"/metadata_*.json \
-           "$RUN_DIR"/detailed-results_*.jsonl "$RUN_DIR"/output-data*.jsonl \
-           "$RUN_DIR"/results.jsonl "$RUN_DIR"/*.log "$DEST/" 2>/dev/null
+        cp "$RUN_DIR"/metrics*.json "$RUN_DIR"/metadata*.json \
+           "$RUN_DIR"/*.log "$DEST/" 2>/dev/null
+	cp "$ENGINE_MANIFEST" "$RUN_DIR/" 2>/dev/null
         cp "$ENGINE_MANIFEST" "$DEST/" 2>/dev/null
-        cp "${BASH_SOURCE[0]}" "$DEST/run.sh" 2>/dev/null
+        cp "${BASH_SOURCE[0]}" "$RUN_DIR/" 2>/dev/null
+        cp "${BASH_SOURCE[0]}" "$DEST/" 2>/dev/null
         shopt -u nullglob
         ( cd "$REPO_CLONE" \
           && git config user.email "autopush@eidf" \
