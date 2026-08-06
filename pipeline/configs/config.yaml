@@ -634,12 +634,11 @@ rules:
       value: |
         find "$SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR" -name 'expert_distribution_record.jsonl' -exec cp {} $RUN_DIR/ \; 2>/dev/null || true
 
+  # Natural-length runs go through the chat endpoint, every model and both engines: that is what
+  # produced the published results, and the client-side templating on the completions path is a
+  # different serving surface with different sampling defaults. Fixed-length mode is the one
+  # exception and disables it below, because the chat endpoint there did not serialise ignore_eos.
   - match:
-      model:
-        not:
-          - "Qwen3-4B"
-          - "Qwen3-235B-A22B-Instruct-2507"
-          - "Qwen3-235B-A22B-Instruct-2507-FP8"
       input_length:
         not:
           - "<defined>"

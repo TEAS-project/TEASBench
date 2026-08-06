@@ -11,7 +11,6 @@ moe,sglang,gpt-oss-120b,arena-hard,256,A100,1,default,8192,1024
 moe,vllm,gpt-oss-120b,arena-hard,256,A100,1,default,1024,1024
 moe,vllm,gpt-oss-120b,arena-hard,256,A100,1,default,1024,8192
 moe,vllm,gpt-oss-120b,arena-hard,256,A100,1,default,8192,1024
-moe,inference_engine,model,dataset,num_samples,gpu,num_gpu,batch_size,input_length,output_length
 moe,sglang,gpt-oss-120b,longbench_v1,256,A100,1,default,1024,1024
 moe,sglang,gpt-oss-120b,longbench_v1,256,A100,1,default,1024,8192
 moe,sglang,gpt-oss-120b,longbench_v1,256,A100,1,default,8192,1024
