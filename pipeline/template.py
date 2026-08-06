@@ -275,11 +275,6 @@ class Template:
         client_cmd = self.build_command("agentic_client", config, parameters, matching_rules)
 
         if swe_bench_lite_engine:
-            # agentic-engine.yaml / agentic-driver.sh (the templates this branch
-            # ultimately renders) never reference @agentcap_repo@/@agentcap_ref@/
-            # @agentic_engine_version@ at all -- the login-node driver clones
-            # AgentCAP itself via eidf/setup/setup_swebench_env.sh instead, so
-            # there is nothing meaningful to resolve here.
             image_name = self.resolve_generic_variable(f"{group}_image", config, matching_rules, parameters)
             env_setup = self.resolve_generic_variable(f"{group}_install_command", config, matching_rules, parameters)
             agentcap_repo = agentcap_ref = agentic_engine_version = ""
@@ -292,9 +287,6 @@ class Template:
             agentcap_ref = self.resolve_generic_variable(f"{group}_ref", config, matching_rules, parameters)
             agentic_engine_version = self.resolve_generic_variable(f"{group}_inference_engine_version", config, matching_rules, parameters)
 
-        # Composable blocks (see docs/agentic-pipeline-design.md): each
-        # defaults to "" in variables_defaults, so a benchmark that doesn't
-        # need e.g. a sidecar just renders an empty block in the template.
         sidecar_containers = self.resolve_generic_variable("sidecar_containers", config, matching_rules, parameters)
         sidecar_wait = self.resolve_generic_variable("sidecar_wait", config, matching_rules, parameters)
         extra_setup = self.resolve_generic_variable("extra_setup", config, matching_rules, parameters)

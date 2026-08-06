@@ -2,8 +2,7 @@
 #
 # Generated alongside a driver script for benchmarks that cannot run the client
 # inside the cluster -- currently SWE-bench Lite on EIDF, where pods are not
-# granted the RBAC needed to provision per-task sandboxes (see
-# utils.needs_login_node_driver and docs/DEVELOPER_GUIDE.md 5).
+# granted the RBAC needed to provision per-task sandboxes
 #
 # The driver submits this, port-forwards to it, runs the benchmark against it,
 # and deletes it on exit. It is never submitted by hand.
@@ -49,9 +48,6 @@ spec:
 
             mkdir -p /mnt/input/hf_cache /mnt/input/pip_cache
 
-            # This image ships no inference engine pre-baked (unlike the
-            # all-in-one groups' images, e.g. imoanswerbench_image) -- install
-            # it now, pinned to the version validated for this benchmark.
             @agentic_env_setup@
 
             # Binding to the container's loopback is fine: `kubectl port-forward`

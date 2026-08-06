@@ -520,11 +520,11 @@ variables_defaults:
   ###############################################
   # SWE-BENCH-LITE EIDF ENGINE-ONLY JOB (bare image)
   ###############################################
-  # image/install-command/version/flags below are copied from the
-  # validated swe-bench-lite EIDF runs recorded in
-  # TEAS_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/
   swebench_eidf_engine_image:
-    value: "ghcr.io/pytorch/pytorch:2.10.0-cuda12.9-cudnn9-devel"
+    sglang:
+      value: "lmsysorg/sglang:v0.5.12.post1"
+    vllm:
+      value: "vllm/vllm-openai:v0.21.0"
 
   swebench_eidf_engine_install_command:
     sglang:
