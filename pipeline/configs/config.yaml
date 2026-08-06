@@ -635,11 +635,11 @@ rules:
         find "$SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR" -name 'expert_distribution_record.jsonl' -exec cp {} $RUN_DIR/ \; 2>/dev/null || true
 
   - match:
-      inference_engine:
-        - "vllm"
       model:
         not:
           - "Qwen3-4B"
+          - "Qwen3-235B-A22B-Instruct-2507"
+          - "Qwen3-235B-A22B-Instruct-2507-FP8"
       input_length:
         not:
           - "<defined>"
