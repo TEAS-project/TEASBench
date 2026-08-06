@@ -134,6 +134,38 @@ class Template:
         return parameters.get(param)
 
 
+    def _server_flags_def(self, config, engine, family):
+        """The flag vocabulary a server command for `engine` may draw on.
+
+        config.yaml holds one shared server_flags dictionary split into
+        'common' (same flag string on both engines) plus a block per engine,
+        because what sglang/vllm accept depends on the engine, not on whether
+        MoE-CAP or AgentCAP is driving it. Merging is per-key, so an engine
+        block can restate just the flag string and still inherit a default
+        from common. server_flag_defaults then layers on the defaults that
+        legitimately differ between the two families (ports, bind address,
+        context length); a family default naming a parameter this engine does
+        not define is ignored rather than inventing an entry, so it cannot
+        conjure a flag the engine has no spelling for.
+
+        Returning only the resolved engine's vocabulary is also what keeps a
+        rule from leaking across engines: build_command drops any override
+        whose parameter is absent here, so a gpu_memory_fraction meant for
+        sglang cannot render on a vllm command.
+        """
+        vocab = config["variables_defaults"]["server_flags"]
+        merged = {}
+        for source in (vocab.get("common", {}), vocab.get(engine, {})):
+            for param, flag_def in source.items():
+                merged[param] = {**merged.get(param, {}), **flag_def}
+
+        defaults = config["variables_defaults"].get("server_flag_defaults", {})
+        for param, value in defaults.get(family, {}).items():
+            if param in merged:
+                merged[param] = {**merged[param], "value": value}
+        return merged
+
+
     def build_command(self, cmd_type, config, parameters, matching_rules):
         """Generalized command builder for server, client and agentic commands.
 
@@ -145,25 +177,26 @@ class Template:
         'imoanswerbench_server', 'mcpatlas_server', 'swebenchlite_vastai_server'
         (all-in-one: client+server, same pod, AgentCAP image) and
         'swebench_eidf_engine_server' (EIDF only: bare-image engine-only Job, no
-        AgentCAP image, no in-pod client at all) -- all share ONE flags
-        definition, config.yaml's agentic_server_flags, because a variable's
-        concrete CLI flag is a property of sglang/vllm rather than of the
-        benchmark. What the cmd_type actually selects is the per-scenario part:
-        its own base_command and `flags` list. Values come from rules, keyed on
-        that same shared 'agentic_server_flags' name and separated by their
-        match conditions. See config.yaml's AGENTIC FAMILY section and
-        docs/agentic-pipeline-design.md.
+        AgentCAP image, no in-pod client at all) -- all draw on the same flag
+        vocabulary as the MoE 'server' command, since a variable's concrete CLI
+        flag is a property of sglang/vllm rather than of the benchmark or the
+        family (see _server_flags_def). What the cmd_type actually selects is
+        the per-scenario part: its own base_command and `flags` list. Values
+        come from rules, still keyed 'server_flags' for MoE and
+        'agentic_server_flags' for agentic so a rule stays aimed at one family,
+        and separated further by their match conditions. See config.yaml's
+        AGENTIC FAMILY section and docs/agentic-pipeline-design.md.
         """
         engine = parameters.get('inference_engine')
 
         # Handle server vs client vs agentic config paths
         if cmd_type == "server":
-            flags_def = config["variables_defaults"]["server_flags"][engine]
+            flags_def = self._server_flags_def(config, engine, "moe")
             cmd_cfg = config["variables_defaults"]["server_command"][engine]
             rule_key = "server_flags"
         elif cmd_type in ("imoanswerbench_server", "mcpatlas_server",
                           "swebenchlite_vastai_server", "swebench_eidf_engine_server"):
-            flags_def = config["variables_defaults"]["agentic_server_flags"]
+            flags_def = self._server_flags_def(config, engine, "agentic")
             cmd_cfg = config["variables_defaults"][f"{cmd_type}_command"][engine]
             rule_key = "agentic_server_flags"
         elif cmd_type == "agentic_client":
@@ -247,9 +280,9 @@ class Template:
         # section) supplies this row's server image/flags/command: swe-bench-lite
         # on any k8s cluster that grants pod RBAC (EIDF today via
         # PortForwardK8sProvider, see swe_bench_lite_k8s) uses swebench_eidf_engine_*
-        # -- a bare base image with the engine pip-installed at
-        # generation-validated versions, no AgentCAP client stack at all, since
-        # that Job never runs agent_cap.agents in-pod. Every other row uses one
+        # -- a bare base image with the engine already installed, no AgentCAP
+        # client stack at all, since that Job never runs agent_cap.agents
+        # in-pod. Every other row uses one
         # of the three all-in-one (client+server, same pod, AgentCAP image)
         # groups, kept one per benchmark rather than shared, so a value
         # validated for one benchmark is never silently assumed correct for
@@ -276,7 +309,7 @@ class Template:
 
         if swe_bench_lite_engine:
             image_name = self.resolve_generic_variable(f"{group}_image", config, matching_rules, parameters)
-            env_setup = self.resolve_generic_variable(f"{group}_install_command", config, matching_rules, parameters)
+            env_setup = ""
             agentcap_repo = agentcap_ref = agentic_engine_version = ""
         else:
             image_name = self.resolve_generic_variable(f"{group}_image", config, matching_rules, parameters)

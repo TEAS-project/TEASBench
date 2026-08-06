@@ -8,59 +8,131 @@
 
 variables_defaults:
 
-# Dict mapping engine-agnostic settings to actual flag names
-# for each inference engine, and any default values for these flags
+# Maps engine-agnostic settings ("canonical parameters", the names used by
+# every command's `flags` list and by every rule below) to the actual CLI flag
+# each inference engine spells them with.
+#
+# This is pure engine vocabulary. What sglang/vllm accept is a property of the
+# engine and its version, not of the benchmark family -- an engine does not
+# grow or lose flags because the thing driving it happens to be MoE-CAP rather
+# than AgentCAP. So both families share this one definition, and a flag name
+# is written down exactly once.
+#
+#   common:  the flag string is identical on both engines
+#   sglang:  sglang-only flags, plus this engine's spelling where they differ
+#   vllm:    vllm-only flags, plus this engine's spelling where they differ
+#
+# `common` and the engine block are merged key-by-key, so an engine block can
+# override just the flag string and still inherit a default value from common.
+#
+# An inline `value:` is a default that holds for every family. Defaults that
+# differ between MoE and agentic runs live in server_flag_defaults below,
+# keyed by family, since the same engine flag legitimately wants a different
+# default depending on what is driving it (e.g. the port, or whether the
+# server binds loopback or all interfaces). `value: true` renders the flag
+# bare, with no argument; a null/absent value omits the flag entirely.
   server_flags:
-    sglang:
-      port:
-        flag: "--port"
-        value: "30000"
-      reasoning_parser:
-        flag: "--reasoning-parser"
-      hf_model_path:
-        flag: "--model-path"
-      tensor_parallel_size:
-        flag: "--tp-size"
-      expert_recording:
-        flag: "--expert-distribution-recorder-mode"
-        value: "stat"
-      batch_size:
-        flag: "--max-running-requests"
-      max_context:
-        flag: "--context-length"
-      model_load_timeout:
-        flag: "--dist-timeout"
-        value: "3600"
-      gpu_memory_fraction:
-        flag: "--mem-fraction-static"
+    common:
       host:
         flag: "--host"
-      trust_remote_code:
-        flag: "--trust-remote-code"
-
-    vllm:
       port:
         flag: "--port"
-        value: "30000"
-      host:
-        flag: "--host"
-        value: "0.0.0.0"
+      served_model_name:
+        flag: "--served-model-name"
       reasoning_parser:
         flag: "--reasoning-parser"
-      hf_model_path:
-        flag: "--model"
-      tensor_parallel_size:
-        flag: "--tensor-parallel-size"
-      batch_size:
-        flag: "--max_num_seqs"
-      max_context:
-        flag: "--max-model-len"
-      gpu_memory_fraction:
-        flag: "--gpu_memory_utilization"
+      tool_call_parser:
+        flag: "--tool-call-parser"
       kv_cache_dtype:
         flag: "--kv-cache-dtype"
       trust_remote_code:
         flag: "--trust-remote-code"
+        value: true
+      dtype:
+        flag: "--dtype"
+        value: "auto"
+
+    sglang:
+      hf_model_path:
+        flag: "--model-path"
+      tensor_parallel_size:
+        flag: "--tp-size"
+      gpu_memory_fraction:
+        flag: "--mem-fraction-static"
+      max_context:
+        flag: "--context-length"
+      batch_size:
+        flag: "--max-running-requests"
+      seed:
+        flag: "--random-seed"
+        value: "42"
+      expert_recording:
+        flag: "--expert-distribution-recorder-mode"
+        value: "stat"
+      model_load_timeout:
+        flag: "--dist-timeout"
+        value: "3600"
+      enable_cache_report:
+        flag: "--enable-cache-report"
+        value: true
+      log_level:
+        flag: "--log-level"
+        value: "warning"
+      chunked_prefill_size:
+        flag: "--chunked-prefill-size"
+        value: "16384"
+      cuda_graph_max_bs:
+        flag: "--cuda-graph-max-bs"
+        value: "8"
+      allow_auto_truncate:
+        flag: "--allow-auto-truncate"
+        value: true
+
+    vllm:
+      hf_model_path:
+        flag: "--model"
+      tensor_parallel_size:
+        flag: "--tensor-parallel-size"
+      gpu_memory_fraction:
+        flag: "--gpu-memory-utilization"
+      max_context:
+        flag: "--max-model-len"
+      batch_size:
+        flag: "--max-num-seqs"
+      seed:
+        flag: "--seed"
+        value: "42"
+      enable_auto_tool_choice:
+        flag: "--enable-auto-tool-choice"
+      enable_prompt_tokens_details:
+        flag: "--enable-prompt-tokens-details"
+      stream_interval:
+        flag: "--stream-interval"
+        value: "1"
+      async_scheduling:
+        flag: "--async-scheduling"
+        value: true
+      disable_log_stats:
+        flag: "--disable-log-stats"
+        value: true
+      enable_prefix_caching:
+        flag: "--enable-prefix-caching"
+        value: true
+
+# Per-family defaults, applied on top of server_flags above. Only canonical
+# parameters whose default genuinely differs between the two families belong
+# here; anything with one family-independent default keeps its `value:` inline
+# next to the flag name. A key naming a parameter the engine does not define
+# is ignored, so a family default costs nothing on the engine that lacks it.
+  server_flag_defaults:
+    moe:
+      port: "30000"
+      host: "0.0.0.0"
+    agentic:
+      port: "8000"
+      host: "127.0.0.1"
+      max_context: "131072"
+      served_model_name: "gpt-oss"
 
   client_flags:
     hf_model_path:
@@ -164,89 +236,14 @@ variables_defaults:
   ###################
 
 
-  agentic_server_flags:
-    # --- Model / endpoint ---
-    hf_model_path:
-      flag: "--model-path"             # sglang
-    model_id:
-      flag: "--model"                  # vllm
-      from_parameter: hf_model_path
-    host:
-      flag: "--host"
-      value: "127.0.0.1"
-    port:
-      flag: "--port"
-      value: "8000"
-    served_model_name:
-      flag: "--served-model-name"
-      value: "gpt-oss"
-    tensor_parallel_size:
-      flag: "--tensor-parallel-size"
-    # --- Memory / capacity: no defaults, values are per-GPU (see rules) ---
-    mem_fraction_static:
-      flag: "--mem-fraction-static"    # sglang
-    gpu_memory_utilization:
-      flag: "--gpu-memory-utilization" # vllm
-    max_num_seqs:
-      flag: "--max-num-seqs"           # vllm
-    kv_cache_dtype:
-      flag: "--kv-cache-dtype"
-    context_length:
-      flag: "--context-length"         # sglang
-      value: "131072"
-    max_model_len:
-      flag: "--max-model-len"          # vllm
-      value: "131072"
-    # --- gpt-oss harmony parsing: no defaults, see rules ---
-    reasoning_parser:
-      flag: "--reasoning-parser"
-    tool_call_parser:
-      flag: "--tool-call-parser"
-    enable_auto_tool_choice:
-      flag: "--enable-auto-tool-choice"  # vllm
-    # --- Shared misc ---
-    trust_remote_code:
-      flag: "--trust-remote-code"
-      value: true
-    dtype:
-      flag: "--dtype"
-      value: "auto"
-    enable_cache_report:
-      flag: "--enable-cache-report"    # sglang
-      value: true
-    # --- SGLang-specific ---
-    log_level:
-      flag: "--log-level"
-      value: "warning"
-    random_seed:
-      flag: "--random-seed"
-      value: "42"
-    chunked_prefill_size:
-      flag: "--chunked-prefill-size"
-      value: "16384"
-    cuda_graph_max_bs:
-      flag: "--cuda-graph-max-bs"
-      value: "8"
-    allow_auto_truncate:
-      flag: "--allow-auto-truncate"
-      value: true
-    # --- vllm-specific ---
-    seed:
-      flag: "--seed"
-      value: "42"
-    stream_interval:
-      flag: "--stream-interval"
-      value: "1"
-    async_scheduling:
-      flag: "--async-scheduling"
-      value: true
-    disable_log_stats:
-      flag: "--disable-log-stats"
-      value: true
-    enable_prefix_caching:
-      flag: "--enable-prefix-caching"
-      value: true
-
+  # Agentic server commands. The canonical parameter names below come from the
+  # shared server_flags vocabulary at the top of this file -- there is no
+  # separate agentic flag dictionary. `batch_size` is deliberately absent from
+  # every list: it is also a live experiment parameter (generate.py defaults it
+  # to the string "default"), and _resolve_flag_value prefers a parameter over
+  # a flag's own default, so listing it would render `--max-num-seqs default`
+  # on any row no rule happens to cover. The rules below set it instead, and a
+  # rule override renders whether or not the list mentions it.
   imoanswerbench_server_command:
     sglang:
       base_command: "TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 python -m sglang.launch_server"
@@ -256,8 +253,8 @@ variables_defaults:
         - port
         - log_level
         - served_model_name
-        - context_length
-        - mem_fraction_static
+        - max_context
+        - gpu_memory_fraction
         - tensor_parallel_size
         - trust_remote_code
         - dtype
@@ -268,14 +265,13 @@ variables_defaults:
     vllm:
       base_command: "python -m vllm.entrypoints.openai.api_server"
       flags:
-        - model_id
+        - hf_model_path
         - host
         - port
         - served_model_name
         - tensor_parallel_size
-        - max_num_seqs
-        - gpu_memory_utilization
-        - max_model_len
+        - gpu_memory_fraction
+        - max_context
         - dtype
         - kv_cache_dtype
         - stream_interval
@@ -294,8 +290,8 @@ variables_defaults:
         - port
         - log_level
         - served_model_name
-        - context_length
-        - mem_fraction_static
+        - max_context
+        - gpu_memory_fraction
         - tensor_parallel_size
         - trust_remote_code
         - dtype
@@ -306,14 +302,13 @@ variables_defaults:
     vllm:
       base_command: "python -m vllm.entrypoints.openai.api_server"
       flags:
-        - model_id
+        - hf_model_path
         - host
         - port
         - served_model_name
         - tensor_parallel_size
-        - max_num_seqs
-        - gpu_memory_utilization
-        - max_model_len
+        - gpu_memory_fraction
+        - max_context
         - dtype
         - kv_cache_dtype
         - stream_interval
@@ -332,8 +327,8 @@ variables_defaults:
         - port
         - log_level
         - served_model_name
-        - context_length
-        - mem_fraction_static
+        - max_context
+        - gpu_memory_fraction
         - tensor_parallel_size
         - trust_remote_code
         - dtype
@@ -344,14 +339,13 @@ variables_defaults:
     vllm:
       base_command: "python -m vllm.entrypoints.openai.api_server"
       flags:
-        - model_id
+        - hf_model_path
         - host
         - port
         - served_model_name
         - tensor_parallel_size
-        - max_num_seqs
-        - gpu_memory_utilization
-        - max_model_len
+        - gpu_memory_fraction
+        - max_context
         - dtype
         - kv_cache_dtype
         - stream_interval
@@ -526,17 +520,6 @@ variables_defaults:
     vllm:
       value: "vllm/vllm-openai:v0.21.0"
 
-  swebench_eidf_engine_install_command:
-    sglang:
-      value: |
-        apt-get update -qq && apt-get install -y -qq libnuma-dev > /dev/null 2>&1
-        pip install --break-system-packages "sglang[all]==0.5.9" 2>&1 | tail -3
-        python3 -c "import sglang; print('SGLang', sglang.__version__)"
-    vllm:
-      value: |
-        pip install --break-system-packages vllm==0.21.0 2>&1 | tail -3
-        python3 -c "import vllm; print('vLLM', vllm.__version__)"
-
   swebench_eidf_engine_server_command:
     sglang:
       base_command: "python3 -m sglang.launch_server"
@@ -545,16 +528,18 @@ variables_defaults:
         - served_model_name
         - host
         - port
-        - context_length
+        - max_context
+        - tensor_parallel_size
         - enable_cache_report
     vllm:
       base_command: "vllm serve"
       flags:
-        - model_id
+        - hf_model_path
         - served_model_name
         - host
         - port
-        - max_model_len
+        - max_context
+        - tensor_parallel_size
 
   # Composable blocks referenced by pipeline/templates/agentic.yaml 
   # Each defaults to empty here, so a benchmark that doesn't need one renders an empty block;
@@ -932,37 +917,39 @@ rules:
 # inline defaults duplicated into each benchmark's own copy of the flag
 # definitions; they live here as per-benchmark rules now so the definitions
 # stay pure vocabulary and each benchmark's value can move independently.
-# Every rule is scoped by inference_engine because a rule-set override renders
-# regardless of the command's `flags` list (see build_command), so an unscoped
-# mem_fraction_static would leak --mem-fraction-static into a vllm command.
+# gpu_memory_fraction is one canonical parameter across both engines now
+# (--mem-fraction-static on sglang, --gpu-memory-utilization on vllm), so the
+# engine split below is about the values and the vllm-only flags, not about
+# keeping one engine's flag out of the other's command -- build_command drops
+# an override the resolved engine has no definition for.
 # EIDF swe-bench-lite is absent by design: its engine-only path gets these
 # from the individually-validated per-(model, gpu, num_gpu) rules further down.
   - match:
       benchmark: ["imo-answerbench"]
       inference_engine: ["sglang"]
     agentic_server_flags:
-      mem_fraction_static: "0.85"
+      gpu_memory_fraction: "0.85"
 
   - match:
       benchmark: ["imo-answerbench"]
       inference_engine: ["vllm"]
     agentic_server_flags:
-      gpu_memory_utilization: "0.85"
-      max_num_seqs: "256"
+      gpu_memory_fraction: "0.85"
+      batch_size: "256"
       tool_call_parser: "openai"
 
   - match:
       benchmark: ["mcp-atlas"]
       inference_engine: ["sglang"]
     agentic_server_flags:
-      mem_fraction_static: "0.85"
+      gpu_memory_fraction: "0.85"
 
   - match:
       benchmark: ["mcp-atlas"]
       inference_engine: ["vllm"]
     agentic_server_flags:
-      gpu_memory_utilization: "0.85"
-      max_num_seqs: "256"
+      gpu_memory_fraction: "0.85"
+      batch_size: "256"
       tool_call_parser: "openai"
 
   - match:
@@ -970,15 +957,15 @@ rules:
       platform: ["vastai"]
       inference_engine: ["sglang"]
     agentic_server_flags:
-      mem_fraction_static: "0.85"
+      gpu_memory_fraction: "0.85"
 
   - match:
       benchmark: ["swe-bench-lite"]
       platform: ["vastai"]
       inference_engine: ["vllm"]
     agentic_server_flags:
-      gpu_memory_utilization: "0.85"
-      max_num_seqs: "256"
+      gpu_memory_fraction: "0.85"
+      batch_size: "256"
       tool_call_parser: "openai"
 
 
@@ -1420,10 +1407,11 @@ rules:
 # engine-only path inherits neither. Each engine spells the same harmony
 # parser differently: sglang registers a detector literally named "gpt-oss"
 # (function_call_parser.py / reasoning_parser.py), while vLLM calls its
-# equivalent tool-call parser "openai" and auto-enables its reasoning parser
-# for gpt-oss without being asked. Both cover gpt-oss-120b (the validated
-# model) and gpt-oss-20b (quick smoke tests) -- the format is shared across
-# the family, not tied to a size.
+# equivalent reasoning parser "openai_gptoss" and tool-call parser "openai".
+# Values copied verbatim from the validated swe-bench-lite EIDF runs in
+# TEAS_Development_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/.
+# Both cover gpt-oss-120b (the validated model) and gpt-oss-20b (quick smoke
+# tests) -- the format is shared across the family, not tied to a size.
   - match:
       benchmark: ["swe-bench-lite"]
       inference_engine: ["sglang"]
@@ -1437,91 +1425,51 @@ rules:
       inference_engine: ["vllm"]
       model: ["gpt-oss-120b", "gpt-oss-20b"]
     agentic_server_flags:
+      reasoning_parser: "openai_gptoss"
       tool_call_parser: "openai"
+      enable_auto_tool_choice: true
+      enable_prompt_tokens_details: true
 
 # --- swe-bench-lite: EIDF engine-only Job launch flags ---------------------
-# GPU-specific values for agentic_server_flags on the EIDF engine-only path, copied verbatim from
-# the validated swe-bench-lite EIDF runs in
-# TEAS_Results_Private/agentic/eidf/{sglang,vllm}/gpt-oss-120b/swe-bench-lite/.
-# tensor_parallel_size only appears on A100 and H100 (num_gpu 2); H200
-# runs on a single GPU, matching history. kv_cache_dtype is omitted entirely
-# on A100 for both engines, matching history (not even "auto"). num_gpu is
-# matched explicitly (not inferred from gpu) so a row that pairs a validated
-# GPU type with an unvalidated GPU count (e.g. A100 x1, never run historically)
-# falls through with none of these flags set, rather than silently applying a
-# tensor-parallel-size that doesn't fit the pod's actual GPU count
-# Every validated run these values come from served gpt-oss-120b, so a different
-# model (e.g. gpt-oss-20b, used for quick smoke tests) falls through to the engine's
-# own defaults rather than silently inheriting memory/parallelism settings tuned
-# for a model of a different size.
+# Memory fraction is deliberately NOT tuned per GPU: both engines take the one
+# value AgentCAP's own k8s/launch_llm_server.sh uses on every GPU type, so a
+# run started by this pipeline and one started by that script serve the model
+# identically. Each engine has its own flat value there (sglang 0.85 via
+# --mem-fraction-static, vllm 0.92 via --gpu-memory-utilization), hence one
+# rule per engine rather than one shared rule.
+#
+# kv_cache_dtype is set nowhere on this path, also matching that script, which
+# passes no --kv-cache-dtype at all. Earlier per-GPU values here (fp8_e4m3 on
+# H100/H200, absent on A100) came from the 2026-07 validated EIDF runs; the
+# script is now the reference instead. Note this scoping is EIDF-only -- the
+# Vast.ai swe-bench-lite rules above keep their own kv_cache_dtype, since
+# nothing about that platform is driven by launch_llm_server.sh.
+#
+# Values come from runs that served gpt-oss-120b, so a different model (e.g.
+# gpt-oss-20b, used for quick smoke tests) falls through to the engine's own
+# defaults rather than silently inheriting settings tuned for another size.
   - match:
       benchmark: ["swe-bench-lite"]
       platform: ["eidf"]
       inference_engine: ["sglang"]
       model: ["gpt-oss-120b"]
-      gpu: ["A100"]
-      num_gpu: [2]
     agentic_server_flags:
-      mem_fraction_static: "0.92"
-      tensor_parallel_size: "2"
-
-  - match:
-      benchmark: ["swe-bench-lite"]
-      platform: ["eidf"]
-      inference_engine: ["sglang"]
-      model: ["gpt-oss-120b"]
-      gpu: ["H100"]
-      num_gpu: [2]
-    agentic_server_flags:
-      mem_fraction_static: "0.85"
-      tensor_parallel_size: "2"
-      kv_cache_dtype: "fp8_e4m3"
-
-  - match:
-      benchmark: ["swe-bench-lite"]
-      platform: ["eidf"]
-      inference_engine: ["sglang"]
-      model: ["gpt-oss-120b"]
-      gpu: ["H200"]
-      num_gpu: [1]
-    agentic_server_flags:
-      mem_fraction_static: "0.88"
-      kv_cache_dtype: "fp8_e4m3"
+      gpu_memory_fraction: "0.85"
 
   - match:
       benchmark: ["swe-bench-lite"]
       platform: ["eidf"]
       inference_engine: ["vllm"]
       model: ["gpt-oss-120b"]
-      gpu: ["A100"]
-      num_gpu: [2]
     agentic_server_flags:
-      gpu_memory_utilization: "0.92"
-      tensor_parallel_size: "2"
+      gpu_memory_fraction: "0.92"
 
-  - match:
-      benchmark: ["swe-bench-lite"]
-      platform: ["eidf"]
-      inference_engine: ["vllm"]
-      model: ["gpt-oss-120b"]
-      gpu: ["H100"]
-      num_gpu: [2]
-    agentic_server_flags:
-      gpu_memory_utilization: "0.85"
-      tensor_parallel_size: "2"
-
-  - match:
-      benchmark: ["swe-bench-lite"]
-      platform: ["eidf"]
-      inference_engine: ["vllm"]
-      model: ["gpt-oss-120b"]
-      gpu: ["H200"]
-      num_gpu: [1]
-    agentic_server_flags:
-      gpu_memory_utilization: "0.88"
-      kv_cache_dtype: "fp8_e4m3"
-      max_num_seqs: "32"
-      enable_auto_tool_choice: true
+# Tensor parallelism is NOT set by any rule here. It is a property of the pod's
+# GPU count, which comes from the experiments CSV: generate.py derives
+# tensor_parallel_size from that row's num_gpu, and this path's server command
+# lists the flag, so it resolves from the CSV like every other server command
+# does. A rule pinning it to a literal would silently override the requested
+# GPU count -- exactly the mismatch the flag is supposed to express.
 
 # --- swe-bench-lite: Vast.ai (Modal sandboxes, native to swe-rex) ----------
 # No sandbox_provider/exec_provider at all: Modal is not a TEASBench-owned
