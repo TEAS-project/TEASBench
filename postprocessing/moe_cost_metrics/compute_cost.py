@@ -65,6 +65,7 @@ if __package__:
         GPU_HOST_CPU,
         GPU_SPECS,
     )
+    from .prefill_rate import resolve_for_metrics_path
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from hardware_catalog import (  # noqa: F401  (re-exported for existing importers)
@@ -72,6 +73,7 @@ else:
         GPU_HOST_CPU,
         GPU_SPECS,
     )
+    from prefill_rate import resolve_for_metrics_path
 
 
 VASTAI_PRICING_URL = "https://vast.ai/pricing"
@@ -283,6 +285,7 @@ def build_cost_metrics(
     ttft: Optional[float],
     tpot: float,
     batch_profile: dict,
+    prefill_rate: Optional[dict] = None,
 ) -> dict:
     """Return cost metrics plus an auditable throughput/cost breakdown.
 
@@ -330,9 +333,16 @@ def build_cost_metrics(
             decode_seconds_per_request * price_per_s
             if decode_seconds_per_request is not None else None
         )
-        prefill_tokens_per_s = None
-        if have_prefill and isinstance(prefill_tokens_per_request, (int, float)) and prefill_tokens_per_request > 0:
-            prefill_tokens_per_s = prefill_tokens_per_request * prefill_avg_batch_size / ttft
+        # Diagnostic node-aggregate prefill rate from the shared resolver
+        # (prefill_rate.py) — the same call compute_sparsity_metrics.py makes,
+        # so the two sidecars agree by construction. An independent local
+        # formula here is how the same run once shipped two prefill rates
+        # differing by exactly the batch size.
+        prefill_resolved = prefill_rate or {
+            "value": None, "basis": None, "method": None,
+            "token_basis": None, "reason": "no-batch-evidence",
+        }
+        prefill_tokens_per_s = prefill_resolved["value"]
         return {
             "avg_cost_per_request_usd": avg_cost_per_request_usd,
             "avg_cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
@@ -365,6 +375,10 @@ def build_cost_metrics(
                 "throughput": {
                     "effective_output_tokens_per_s": effective_output_tokens_per_s,
                     "prefill_tokens_per_s": prefill_tokens_per_s,
+                    "prefill_basis": prefill_resolved["basis"],
+                    "prefill_method": prefill_resolved["method"],
+                    "prefill_token_basis": prefill_resolved["token_basis"],
+                    "prefill_reason": prefill_resolved["reason"],
                     "formula": "decode_avg_batch_size / tpot_s",
                 },
                 "request_seconds": {
@@ -458,6 +472,7 @@ def build_buy_block(
     scale_other_capital: float,
     buy_price_quote_time: Optional[str] = None,
     include_token_cost: bool = True,
+    prefill_rate: Optional[dict] = None,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
     host = gpu_host_cpu.get(gpu_key)
@@ -517,6 +532,7 @@ def build_buy_block(
             ttft=ttft,
             tpot=tpot,
             batch_profile=batch_profile,
+            prefill_rate=prefill_rate,
         )} if include_token_cost else {}),
     }
 
@@ -780,6 +796,11 @@ def main() -> int:
         if not token_cost_ok:
             wall_only += 1
 
+        # One resolution per run, shared by the rent and buy blocks. Uses the
+        # run's original metrics (not the bs-1-sanitised copy above): the
+        # resolver applies the batch-size-1 pin from the regime name itself.
+        prefill_resolved = resolve_for_metrics_path(f, metrics)
+
         payload = {
             "recorded_at": recorded_at,
             "run": {
@@ -819,6 +840,7 @@ def main() -> int:
                     ttft=ttft,
                     tpot=tpot,
                     batch_profile=batch_profile,
+                    prefill_rate=prefill_resolved,
                 )
 
         buy = build_buy_block(
@@ -831,6 +853,7 @@ def main() -> int:
             scale_other_capital=args.buy_scale_other_capital,
             buy_price_quote_time=buy_price_quote_time,
             include_token_cost=token_cost_ok,
+            prefill_rate=prefill_resolved,
         )
         if buy is not None:
             payload["buy"] = buy

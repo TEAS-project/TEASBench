@@ -126,9 +126,41 @@ is what keeps a nameplate table and a device-reported figure from ending up in o
 Metadata `gpu_type` strings normalized to the keys above; raw variants seen and mapped:
 `AMD-Instinct-MI355X`, `AMD-Instinct-MI355X-288GB`, `AMD--288GB`, `NVIDIA-A100-SXM4-80GB`, `NVIDIA-B200-180GB`, `NVIDIA-B200-183GB`, `NVIDIA-B300-SXM6-AC-269GB`, `NVIDIA-H100-HBM3-80GB`, `NVIDIA-H200-140GB`, `NVIDIA-H200-141GB`. `Unknown` falls back to the path prefix (`a100|h100|h200|b200|b300|mi355x`).
 
-## 5. Per-dataset token defaults
+## 5. The prefill rate comes from the shared resolver; token defaults feed KV only
 
-Used as fallbacks to materialize the KV-cache term (S-MBU) and derive throughput when `batch_token_profile` is absent. When present, `batch_token_profile` is authoritative for default batching: `prefill_tokens_per_s = prefill_tokens_per_request × prefill_avg_batch_size / ttft`, and `decode output_tokens_per_s = decode_avg_batch_size / tpot`. For `batch-size-1` and `batch-size-1_input..._output...` result directories, the effective prefill/decode batch size is forced to `1` even if a historical profile block contains larger averages. Override fallback lengths globally with `--avg-prefill-len` / `--avg-decode-ctx-len`.
+The published `prefill.prefill_tokens_per_s` is the **node-aggregate** rate returned by the
+shared resolver (`prefill_rate.py`), which `compute_cost.py` also calls — one formula for both
+sidecars, so they cannot diverge. Its dispositions, each a pure function of the run's own
+recorded evidence:
+
+- **`identity-bs1`** (`basis: measured`) — the run pins prefill batch 1 (its `batch-size-1*`
+  regime, or a measured average batch ≤ 1.01): `prefill_tokens_per_request / ttft` is
+  aggregation-exact.
+- **`trace-exact`** (`basis: measured`) — a `prefill_profile*.json` sidecar exists beside the
+  run (written by `compute_prefill_profile.py` from the run's own trace): nominal attempted
+  prompt tokens over the exact physical prefill-step elapsed time.
+- **`hybrid-rung1`** (`basis: estimated`) — concurrent run whose per-request prefill fits one
+  scheduler pass: `tokens/request × prefill_avg_batch_size / prefill_pass_latency_s`. The
+  token count is the run's recorded per-request count (`token_basis: nominal-attempted`), or
+  the run-witnessed fixed input target (`token_basis: configured-input-target`) where the
+  recorded count is absent.
+- **`hybrid-rung2`** (`basis: estimated`) — concurrent long-context run where chunking may
+  split a request across passes: `(tokens/request / ttft) × prefill_avg_batch_size`.
+- **null** — anything else, with `reason` naming the missing evidence
+  (`no-batch-evidence` / `no-token-evidence` / `no-latency-evidence`). There is **no
+  fallback** to `performance.prefill_tokens_per_s` or to the dataset token constants below:
+  those two unlabelled stand-ins are gone from this path.
+
+`S_MFU` is computed from the resolver's rate, so an estimated rate makes an estimated S-MFU;
+the sidecar's `prefill.basis/method/token_basis` fields record which case applies.
+
+The per-dataset defaults below now feed **only** the KV-cache byte term (S-MBU) and the decode
+context-length default when a run records no token profile of its own. Decode is unchanged:
+`output_tokens_per_s = decode_avg_batch_size / tpot`. For `batch-size-1` and
+`batch-size-1_input..._output...` result directories, the effective prefill/decode batch size
+is forced to `1` even if a historical profile block contains larger averages (the resolver
+applies the same pin from the regime name). Override fallback lengths globally with
+`--avg-prefill-len` / `--avg-decode-ctx-len`.
 
 | dataset prefix | avg prefill | avg decode ctx = prefill + output/2 |
 |---|---:|---:|
@@ -198,6 +230,10 @@ across accelerators, which is why one run's value cannot stand in for another's.
     "prefill": {
       "ttft_s": 0.079,
       "prefill_tokens_per_s": 126428.15,
+      "basis": "estimated",            // measured | estimated | null — see §5
+      "method": "hybrid-rung1",        // identity-bs1 | trace-exact | hybrid-rung1 | hybrid-rung2
+      "token_basis": "nominal-attempted",  // or configured-input-target
+      "reason": null,                  // names the missing evidence when the rate is null
       "S_MBU": 0.0565,
       "S_MFU": 0.1110
     },

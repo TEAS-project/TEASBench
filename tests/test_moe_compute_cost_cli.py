@@ -21,7 +21,8 @@ def make_batched_run(root: Path) -> Path:
     run = root / "moe" / "vastai" / "sglang" / "gpt-oss-120b" / "gsm8k_256samples" / "b200x1" / "batch-size-default" / "20260101-0000"
     run.mkdir(parents=True)
     (run / "metrics.json").write_text(json.dumps({
-        "performance": {"e2e_s": 10.0, "ttft": 0.2, "tpot": 0.01},
+        "performance": {"e2e_s": 10.0, "ttft": 0.2, "tpot": 0.01,
+                        "prefill_pass_latency_s": 0.2},
         "batch_token_profile": {
             "prefill_tokens": 2000,
             "prefill_tokens_per_request": 20.0,
@@ -61,7 +62,15 @@ class MoeComputeCostCliTests(unittest.TestCase):
             )
             self.assertEqual(rent_cost["breakdown"]["pricing"]["price_per_hour_usd"], 3.6)
             self.assertEqual(rent_cost["breakdown"]["throughput"]["effective_output_tokens_per_s"], 2000.0)
-            self.assertEqual(rent_cost["breakdown"]["throughput"]["prefill_tokens_per_s"], 1000.0)
+            # Node-aggregate prefill rate from the shared resolver: short-prompt
+            # concurrent run -> tokens x batch / pass latency, labelled as the
+            # estimate it is. 20 x 10 / 0.2 s.
+            throughput = rent_cost["breakdown"]["throughput"]
+            self.assertEqual(throughput["prefill_tokens_per_s"], 1000.0)
+            self.assertEqual(throughput["prefill_basis"], "estimated")
+            self.assertEqual(throughput["prefill_method"], "hybrid-rung1")
+            self.assertEqual(throughput["prefill_token_basis"], "nominal-attempted")
+            self.assertIsNone(throughput["prefill_reason"])
             self.assertEqual(rent_cost["breakdown"]["request_seconds"]["prefill_seconds_per_request"], 0.02)
             self.assertEqual(rent_cost["breakdown"]["request_seconds"]["decode_seconds_per_request"], 0.025)
             self.assertEqual(rent_cost["breakdown"]["output_token_cost"]["cost_per_1M_output_tokens_usd"], 0.5)

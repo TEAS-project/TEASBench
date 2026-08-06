@@ -51,6 +51,7 @@ if __package__:
         get_peak_bw,
         get_peak_flops,
     )
+    from .prefill_rate import resolve_for_metrics_path
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from hardware_catalog import (  # noqa: F401  (re-exported for existing importers)
@@ -63,8 +64,14 @@ else:
         get_peak_bw,
         get_peak_flops,
     )
+    from prefill_rate import resolve_for_metrics_path
 
 
+# Per-dataset token-length defaults. These feed ONLY the KV-cache byte terms
+# (S-MBU) and the decode context-length default when a run records no token
+# profile of its own. They are NOT reachable from the prefill token rate: that
+# rate comes solely from the shared resolver (prefill_rate.py), which nulls
+# rather than borrowing a dataset constant.
 DATASET_TOKEN_PROFILE = {
     "gsm8k":        {"avg_input": 60,     "avg_output": 300},
     "arena-hard":   {"avg_input": 110,    "avg_output": 940},
@@ -294,6 +301,7 @@ def compute_for_run(
     force_batch_size_one: bool = False,
     concurrent: bool = False,
     checkpoint_dtype_served: bool = True,
+    prefill_rate: Optional[dict] = None,
 ) -> dict:
     perf = metrics.get("performance") or {}
     ea = metrics.get("expert_activation") or {}
@@ -311,7 +319,6 @@ def compute_for_run(
     ttft = perf.get("ttft")
     tpot = perf.get("tpot")
     batch_profile = metrics.get("batch_token_profile") or {}
-    prefill_tps = perf.get("prefill_tokens_per_s") or 0
     output_tps = perf.get("output_tokens_per_s") or 0
 
     profile_prefill_len = batch_profile.get("prefill_tokens_per_request")
@@ -428,16 +435,16 @@ def compute_for_run(
         # PEAK_FLOPS_DICT is dense for every vendor, so the peak divides in as written.
         return flops_per_s / (num_gpus * peak_flops)
 
-    if (
-        isinstance(profile_prefill_len, (int, float)) and profile_prefill_len > 0
-        and isinstance(profile_prefill_bs, (int, float)) and profile_prefill_bs > 0
-    ):
-        # per-request prefill rate: len / ttft. NOT x prefill_bs — ttft is one request's
-        # first-token latency, so the batch's prefills are not all realised within it (that
-        # over-counted throughput -> S-MFU > 100%). Matches the else-branch's avg_prefill_len/ttft.
-        prefill_tp = float(profile_prefill_len) / ttft
-    else:
-        prefill_tp = prefill_tps or (avg_prefill_len / ttft if avg_prefill_len else 0)
+    # Node-aggregate prefill rate from the shared resolver (prefill_rate.py) — the same
+    # call compute_cost.py makes, so the two sidecars agree by construction. The old
+    # per-request derivation and its unlabelled fallbacks (performance.prefill_tokens_per_s,
+    # the dataset token constants) are gone from this path: a run without resolvable
+    # evidence publishes a null rate with its reason, never a lookalike quantity.
+    resolved = prefill_rate or {
+        "value": None, "basis": None, "method": None,
+        "token_basis": None, "reason": "no-batch-evidence",
+    }
+    prefill_tp = resolved["value"]
     # S-MBU wants the duration of ONE forward pass, not one request's time to first token: it
     # divides the bytes a pass moves by the time that pass took. Runs from before the harness split
     # the two report the per-pass mean under `ttft`, so fall back to it and keep them comparable.
@@ -451,7 +458,8 @@ def compute_for_run(
     )
     prefill_smfu = (
         smfu(prefill_tp)
-        if prefill_tp > 0 and peak_flops > 0 and precision_evidenced else None
+        if prefill_tp is not None and prefill_tp > 0 and peak_flops > 0
+        and precision_evidenced else None
     )
 
     if isinstance(profile_decode_bs, (int, float)) and profile_decode_bs > 0:
@@ -526,6 +534,15 @@ def compute_for_run(
         "prefill": {
             "ttft_s": ttft,
             "prefill_tokens_per_s": prefill_tp,
+            # Resolver provenance (prefill_rate.py): how the rate aggregates
+            # (identity-bs1 / trace-exact / hybrid-rung1 / hybrid-rung2), on
+            # which epistemic basis (measured / estimated), counting which
+            # tokens (nominal-attempted / configured-input-target). A null
+            # rate names its missing evidence in `reason` instead.
+            "basis": resolved["basis"],
+            "method": resolved["method"],
+            "token_basis": resolved["token_basis"],
+            "reason": resolved["reason"],
             "S_MBU": prefill_smbu,
             "S_MFU": prefill_smfu,
         },
@@ -645,6 +662,7 @@ def main() -> int:
             # kai (KernelAgentIR on Tenstorrent) quantizes at load time, so the checkpoint
             # dtype the profiler records is not what the engine necessarily served.
             checkpoint_dtype_served=info["framework"] != "kai",
+            prefill_rate=resolve_for_metrics_path(f, metrics),
         )
         if "skipped" in result:
             skipped += 1
