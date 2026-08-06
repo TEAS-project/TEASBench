@@ -21,7 +21,7 @@ The TEAS benchmarks use Mixture of Experts (MoE) models, served using vLLM or SG
 | Family/workload | Models | Benchmark Datasets |
 |---|---|---|
 | moe (basic tasks/single turn) | `gpt-oss-120b`, `qwen3-235b-a22b-instruct-fp8`, `deepseek-r1`, `kimi-k2.5` | `gsm8k`, `arena-hard`, `longbench_v1` |
-| agentic | `gpt-oss-120b`, `deepseek-v3.2` | `imo-answerbench`, `mcp-atlas`, `swe-bench-lite` |
+| agentic (multi-turn, tools) | `gpt-oss-120b`, `deepseek-v3.2` | `imo-answerbench`, `mcp-atlas`, `swe-bench-lite` |
 
 In addition to the MoE models listed above the TEASBench pipeline supports `qwen3-4b` - a dense model - for basic tasks, as a small lowest common denominator model with regards to memory capacity requirements that enables comparisons across a wide range of devices.
 
