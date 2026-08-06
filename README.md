@@ -1,80 +1,80 @@
-# TEASBench pipeline — user guide
+# TEASBench
 
 Uniting Models, Algorithms, and System Innovators with Top-Down Evolutionary Benchmarks
 
 🌐 **Website:** [www.teasbench.com](https://www.teasbench.com)
 
-How to run benchmark experiments on **EIDF** (Kubernetes) or **Vast.ai** (rented
-GPU instances), for both the **MoE** and **agentic** benchmark families.
+**TEASBench** is a benchmark suite developed to measure the **cost**, **accuracy**, and **performance** of AI inference on **realistic state-of-the-art workloads** running on **diverse hardware architectures**. It is developed in the TEAS (**T**racking **E**volving **A**I and **S**ystems) project funded by **[ARIA](https://aria.org.uk/)** as part of the ["Scaling compute"](https://aria.org.uk/opportunity-spaces/nature-computes-better/scaling-compute/) programme. 
+
+In contrast to benchmarks that use fixed (short) context lengths, TEASBench does not artifically constrain input and output sequences to fixed numbers of tokens.  This enables assessment of accuracy and means TEASBench is more capable of exposing **real-world hardware limitations**. 
+
+TEASBench is continuously evolving to track new and emergent workloads following a 6-monthly release cycle. The August 2026 release of TEASBench capture recent shifts towards **sparse Mixture-of-Experts**, **reasoning models**, and **agentic tool use**. 
 
 ---
 
-## 1. The idea in 60 seconds
+## 0. TEASBench Workloads, Models, and Datasets
 
-You describe experiments as **rows in a CSV**. A generator turns each row into
-something you can launch:
+The benchmarks in this release cover two workload classes / families that jointly characterise contemporary production traffic while stressing inference systems in distinct ways. The first consists of **basic tasks** (single-turn chat) on relatively short input and output contexts. Secondly, to track the state of the art we include a workload based on **reasoning and agentic** workflows. The long outputs, multi-turn structure, and tool-calling traces in this workload yield latency and cost profiles unlike traditional inference workloads. 
 
-- **EIDF** → one Kubernetes Job YAML per row. Submit it; it runs unattended and
+The TEAS benchmarks use Mixture of Experts (MoE) models, served using vLLM or SGLang on a range of hardware including NVIDIA A100, H100, H200, B200, B300, GB10, AMD MI355X (for emerging hardware see §10).
+
+| Family/workload | Models | Benchmark Datasets |
+|---|---|---|---|
+| moe (basic tasks/single turn) | `gpt-oss-120b`, `qwen3-235b-a22b-instruct-fp8`, `deepseek-r1`, `kimi-k2.5` |  `gsm8k`, `arena-hard`, `longbench_v1` | 
+| agentic | `gpt-oss-120b`, `deepseek-v3.2` | `imo-answerbench`, `mcp-atlas`, `swe-bench-lite`|
+
+In addition to the MoE models listed above the TEASBench pipeline supports `qwen3-4b` - a dense model - for basic tasks, as a small lowest common denominator model with regards to memory capacity requirements that enables comparisons across a wide range of devices.
+
+For more information, see the [TEASBench - Methods](https://www.teasbench.com/methods)
+
+## 1. The TEASBench benchmarking pipeline
+
+The TEASBench pipeline tool provided in this repository encodes many of the settings and parameters used to produce the results shown on the [TEASBench website](https://www.teasbench.com), though does it not cover all cases, for example where part of the software stack used is not yet publicly available or currently somewhat fragile / difficult to standardise on. <!-- link to results repository -->
+
+This README describes how to use the TEASBench pipeline provided in this repository to run the TEAS benchmark experiments on a Kubernetes (K8s) GPU cluster such as EIDF (the [Edinburgh International Data Facility](https://eidf.ed.ac.uk/)) or a cloud provider such as Vast.ai (rented GPU instances). 
+
+Each experiment is described by a **row in a CSV file** (see `./experiments/` for example CSV files). 
+
+The pipeline generator (`./pipeline/generator.py`) turns each row in given CSV file into something you can launch:
+
+- **K8s cluster (e.g. EIDF)** → one Kubernetes Job YAML per row. Submit it; it runs unattended and
   pushes its own results.
-- **Vast.ai** → one bash launch script per (family, engine, GPU) group. Run it;
-  it rents an instance, runs every row in that group, pushes results, and
+- **Vast.ai** → one bash launch script per (family, engine, GPU) group. Run it; it rents an instance, runs every row in that group, pushes results, and
   destroys itself.
 
-Two families:
-
-| Family | Benchmarks | Shape |
-|---|---|---|
-| `moe` | `gsm8k`, `arena-hard`, `longbench_v1` | inference server + client |
-| `agentic` | `imo-answerbench`, `mcp-atlas`, `swe-bench-lite` | server + agent loop (+ tools/sandboxes) |
 
 ---
-
 ## 2. Prerequisites
 
 ### Everywhere
 
-```bash
-~/pyvenvs/teasbench/bin/python --version
-```
+Generation needs a Python environment with `pandas` and `pyyaml`. Run the generator **from inside the git repo** (it embeds the TEASBench commit for provenance).
 
-Generation needs `pandas` and `pyyaml`. **The system `python3` lacks pandas** —
-use the venv above. Run the generator **from inside the git repo** (it embeds
-the TEASBench commit for provenance).
+### K8s only
 
-### EIDF only
-
-- `kubectl` configured for your project namespace (default `eidf230ns`)
+- `kubectl` configured for your project namespace 
 - These cluster secrets must exist:
 
 | Secret | Key | Needed for |
 |---|---|---|
-| `teas-develop-results-private-ap` | `token` | pushing results (all runs) |
-| `teasbench-pat` | `token` | cloning TEASBench in-job (agentic) |
 | `gemini-api-key` | `key` | judge for `imo-answerbench`, `mcp-atlas` |
 | `mcp-atlas-github-token` | `token` | `mcp-atlas` tool servers |
 | `mcp-atlas-brave-api-key` | `key` | `mcp-atlas` tool servers |
 
-- **SWE-bench Lite** needs a Python environment on the login node. One script
-  builds it, once:
+**SWE-bench Lite**
+
+SWE-bench Lite needs a Python environment on the login node and several environment variables set. One script builds it, once:
 
 ```bash
 bash eidf/setup/setup_swebench_env.sh
-source ~/teasbench-env/env.sh          # in every shell that runs a driver
 ```
 
-  It clones AgentCAP (`aproeme/AgentCAP`, branch `arno/teasbench`), installs
-  `agent_cap`, `swe-rex` and `swebench` into a venv, clones SWE-agent and applies
-  **and verifies** AgentCAP's streaming patch, then writes `env.sh` (the exports
-  drivers read) and `versions.json` (recorded into each run's metadata). Every
-  step checks first, so re-running is cheap and safe; `--force` rebuilds.
-  Options: `--prefix`, `--agentcap-ref`, `--agentcap-repo`, `--python`.
-  See §4.8 — on EIDF this benchmark runs from the login node, not as an
-  unattended Job.
+  This installs `agent_cap`, `swe-rex` and `swebench` into a Python venv, clones SWE-agent and applies
+  and verifies AgentCAP's streaming patch, then writes `env.sh` (environment setup) and `versions.json` (recorded into each run's metadata). 
+  
+On EIDF and other clusters that do not grant pods role-based access control (RBAC), SWE-bench Lite benchmarks are launched not as an unattended K8s Job but using a bash driver script on the login node that can be run interactively or backgrounded - see §4.6 and §4.7. 
 
-> **EIDF does not grant pods RBAC**, so `eidf/rbac/teasbench-runner-rbac.yaml`
-> and the in-cluster preflight (§4.6) do not apply here. They are kept for a
-> cluster that does grant it. On EIDF, SWE-bench always uses
-> `PortForwardK8sProvider` — see §4.8.
+> On EIDF and other clusters that do not grant pods RBAC, SWE-bench experiments are run using TEASBench's `PortForwardK8sProvider` mechanism described in §4.6 and §4.7. On clusters that permit RBAC the alternative `InClusterK8sProvider` mechanism is available - see §4.5, however this has not been tested. 
 
 ### Vast.ai only
 
@@ -86,74 +86,69 @@ source ~/teasbench-env/env.sh          # in every shell that runs a driver
 
 ## 3. The experiments CSV
 
-Every CSV starts with a **`family`** column — `moe` or `agentic`. It is required
-and never guessed.
+Predefined validated benchmark parameters are provided in CSV files in [`./experiments/`](./experiments/).
+
 
 **MoE:**
-```csv
-family,inference_engine,model,dataset,num_samples,gpu,num_gpu,batch_size
+
+Ordered column header fields headers that define an MoE experiment:
+
+```
+family,inference_engine,model,dataset,num_samples,gpu,num_gpu,batch_size,input_length,output_length
+```
+
+Example row for an MoE experiment:
+
+```
 moe,sglang,gpt-oss-120b,gsm8k,256,A100,1,default
 ```
-Optional: `input_length`, `output_length` (fixed-length mode), `platform`.
+
+> Note: `input_length` and `output_length` are optional and only used for fixed-length mode as referenced in [TEASBench Insights](https://www.teasbench.com/insights))
 
 **Agentic:**
-```csv
+
+Ordered column header fields that define an agentic experiment:
+
+```
 family,benchmark,inference_engine,model,gpu,num_gpu,num_tasks,concurrency,batch_size
+```
+
+Example row for an agentic experiment:
+
+```
 agentic,swe-bench-lite,sglang,gpt-oss-120b,H100,2,100,4,default
 ```
 
-| Column | Notes |
-|---|---|
-| `benchmark` | `imo-answerbench`, `mcp-atlas`, `swe-bench-lite` |
-| `num_tasks` | 100 / 60 / 100 respectively, to match reference runs |
-| `concurrency` | parallel tasks; defaults to 4 |
-| `batch_size` | `default` — agentic runs don't batch in the MoE sense; it only keeps the results path level |
-| `platform` | `eidf` (default) or `vastai` |
-
-Existing CSVs live in [`experiments/`](../experiments/).
-
-> **Note:** a CSV without a leading `family` column now fails with an explicit
-> error. Add `family,` to the header and the value to each row.
-
 ---
 
-## 4. Running on EIDF
-
+## 4. Running on K8s cluster
 ### 4.1 Generate
 
 ```bash
 cd pipeline
-~/pyvenvs/teasbench/bin/python generate.py --csv_file=../experiments/moe-experiments-eidf.csv --target_dir=./out
+python3 generate.py --csv_file=../experiments/moe-experiments-eidf.csv
 ```
 
-Options: `--target_dir` (default `./`), `--results_repo` (default
+Options: 
+
+* `--target_dir` specifies where to output job yaml files generated (default `./`)
+* `--results_repo` specifies a repository to which to commit results (default
 `TEAS_Development_Results_Private`).
 
-One YAML per row, named after the run:
+Generate creates one YAML per row, named after the run:
 
 ```
 sglang-gptoss120b-gsm8k-ns256-a100x1-bsd.yaml
 sglang-gptoss120b-swe-bench-lite-nt100-h100x2.yaml
 ```
 
-### 4.2 Inspect before submitting
-
-Worth doing at least once — the manifest is fully self-describing:
+### 4.2 Submit
 
 ```bash
-grep -E "image:|nvidia.com/gpu:|serviceAccountName" out/<run>.yaml
-grep -A3 "output_repo_dir\|RUN_OUTPUT_DIR=" out/<run>.yaml
+./submit_job.sh sglang-gptoss120b-gsm8k-ns256-a100x1-bsd.yaml
 ```
 
-### 4.3 Submit
-
-```bash
-./submit_job.sh out/sglang-gptoss120b-gsm8k-ns256-a100x1-bsd.yaml
-```
-
-This creates the Job, copies the YAML to the shared job-configs dir (so it ends
-up alongside the results as provenance), and appends the name to
-`submitted_jobs.log`.
+This creates the Job, copies the job yaml to a job-config-dir, and appends the name to `submitted_jobs.log`. You will need to `submit_job.sh` and set JOB\_CONFIGS\_DIR to a location that is accessible from your job so that it can copy and store (commit) the job yaml alongside the results for the sake of provenance. 
 
 Submit several by looping:
 
@@ -161,12 +156,12 @@ Submit several by looping:
 for f in out/*.yaml; do ./submit_job.sh "$f"; done
 ```
 
-### 4.4 Watch
+### 4.3 Watch
 
 ```bash
-kubectl -n eidf230ns get jobs
-kubectl -n eidf230ns get pods -w
-kubectl -n eidf230ns logs -f <pod>
+kubectl -n <namespace> get jobs
+kubectl -n <namespace> get pods -w
+kubectl -n <namespace> logs -f <pod>
 ```
 
 Helpers in [`eidf/scripts/`](../eidf/scripts/): `k8_pod_log.sh`,
@@ -175,10 +170,10 @@ Helpers in [`eidf/scripts/`](../eidf/scripts/): `k8_pod_log.sh`,
 For SWE-bench Lite you will also see transient sandbox pods appear and vanish:
 
 ```bash
-kubectl -n eidf230ns get pods -l app=teasbench-sandbox
+kubectl -n <namespace> get pods -l app=teasbench-sandbox
 ```
 
-### 4.5 Agentic specifics
+### 4.4 Agentic specifics
 
 **IMO AnswerBench** — nothing extra; one container.
 
@@ -186,18 +181,18 @@ kubectl -n eidf230ns get pods -l app=teasbench-sandbox
 Check both:
 
 ```bash
-kubectl -n eidf230ns logs <pod> -c mcp-atlas-sidecar
+kubectl -n <namespace> logs <pod> -c mcp-atlas-sidecar
 ```
 
 **SWE-bench Lite** — *not* an unattended Job on EIDF. See §4.8: the driver runs
 on a login node and creates the Jobs itself. The GPUs are still used through a
 Kubernetes Job, as always — only the driver process sits outside the cluster.
 
-### 4.6 Preflight for in-cluster mode (not applicable on EIDF)
+### 4.5 Preflight check for InClusterK8sProvider mode (not applicable on EIDF)
 
 > **Skip this on EIDF.** It tests `InClusterK8sProvider`, which needs pod RBAC
-> that EIDF does not grant. Kept for a cluster that does. On EIDF go to §4.7
-> (mechanism check) and §4.8 (running it).
+> that EIDF does not grant. Kept for a cluster that does. On EIDF go to §4.6
+> (mechanism check) and §4.7 (running it).
 
 In-cluster SWE-bench depends on two facts about the cluster that are worth
 confirming *before* a GPU job queues, because both fail late and confusingly:
@@ -209,8 +204,8 @@ confirming *before* a GPU job queues, because both fail late and confusingly:
    kubeconfig, and the RBAC grants the verbs the provider uses.
 
 ```bash
-kubectl -n eidf230ns create -f eidf/preflight/teasbench-preflight.yaml
-kubectl -n eidf230ns logs -f job/teasbench-preflight
+kubectl -n <namespace> create -f eidf/preflight/teasbench-preflight.yaml
+kubectl -n <namespace> logs -f job/teasbench-preflight
 ```
 
 The preflight does exactly what `InClusterK8sProvider.acquire()` does — same
@@ -234,9 +229,9 @@ It exits non-zero on any failure and names which assumption broke. Two quick
 manual cross-checks if you want them independently:
 
 ```bash
-kubectl -n eidf230ns get networkpolicy          # empty = nothing blocking pod-to-pod
-kubectl -n eidf230ns auth can-i create jobs \
-        --as=system:serviceaccount:eidf230ns:teasbench-runner
+kubectl -n <namespace> get networkpolicy          # empty = nothing blocking pod-to-pod
+kubectl -n <namespace> auth can-i create jobs \
+        --as=system:serviceaccount:<namespace>:teasbench-runner
 ```
 
 The second impersonates the ServiceAccount from your own session, so it checks
@@ -247,9 +242,9 @@ ServiceAccount.
 If the routability check fails, in-cluster mode is unusable on this cluster; use
 `PortForwardK8sProvider` (§7.3), which needs neither assumption.
 
-### 4.7 Preflight: check the port-forward mechanism
+### 4.6 Preflight check for PortForwardK8sProvider mode (e.g. EIDF)
 
-Everything SWE-bench does on EIDF rests on `PortForwardK8sProvider`, so check it
+Everything SWE-bench does on a K8s cluster without RBAC, such as EIDF, rests on `PortForwardK8sProvider`, so check it
 before committing GPU time. This runs **on a login node**, not as a Job, because
 that is where the provider itself runs. It uses your own kubectl credentials and
 needs no ServiceAccount and no RBAC manifest — which is exactly why this is the
@@ -258,7 +253,7 @@ path EIDF can support.
 **Fast probe** (~1 min, no GPU):
 
 ```bash
-python3 eidf/preflight/preflight_portforward.py --namespace eidf230ns
+python3 eidf/preflight/preflight_portforward.py --namespace <namespace>
 ```
 
 It drives the **real** `PortForwardK8sProvider` — OS port allocation, the
@@ -284,7 +279,7 @@ provider never needs it, because it talks to pod IPs directly.
 **Full-fidelity probe** (minutes, still no GPU):
 
 ```bash
-python3 eidf/preflight/preflight_portforward.py --namespace eidf230ns --real-image
+python3 eidf/preflight/preflight_portforward.py --namespace <namespace> --real-image
 ```
 
 `--real-image` drops the busybox substitution for a genuine
@@ -293,7 +288,7 @@ pull works and that `swe-rex` installs and runs inside the instance image — an
 old conda env where a dependency clash is plausible. Pass an instance id to
 override the default (`--real-image django__django-11099`).
 
-### 4.8 SWE-bench Lite on EIDF
+### 4.7 SWE-bench Lite on EIDF
 
 **EIDF does not grant pods RBAC**, so SWE-bench here always uses
 `PortForwardK8sProvider`, with the **driver** running on a login node.
@@ -315,7 +310,7 @@ credentials — and all of it handled for you:
 The driver reaches the engine and each sandbox over `kubectl port-forward`.
 
 Why this is allowed when in-cluster mode is not: *you* may create Jobs and
-port-forward — §4.7 confirms both on EIDF. What EIDF refuses is granting those
+port-forward — §4.6 confirms both on EIDF. What EIDF refuses is granting those
 rights to a **pod's ServiceAccount**. Running the driver as yourself sidesteps
 that entirely.
 
@@ -329,13 +324,19 @@ files for a SWE-bench row on EIDF instead of one:
 
 ```bash
 cd pipeline
-~/pyvenvs/teasbench/bin/python generate.py \
+python3 generate.py \
     --csv_file=../experiments/swe-bench-lite-eidf.csv --target_dir=./out
 ```
 
 ```
-sglang-gptoss120b-swe-bench-lite-nt100-h200x1.sh           <- run this
-sglang-gptoss120b-swe-bench-lite-nt100-h200x1.engine.yaml  <- submitted for you
+sglang-gptoss120b-swe-bench-lite-nt100-h200x1.sh           <- driver script 
+sglang-gptoss120b-swe-bench-lite-nt100-h200x1.engine.yaml  <- driver script submits for you
+```
+
+Any shell that wants to launch the driver script to run an `swe-bench-lite` experiment must first source the resulting environment initialisation script:
+
+```
+source ~/teasbench-env/env.sh
 ```
 
 Then start it and walk away:
@@ -362,19 +363,8 @@ than editing anything generated.
 
 After the run the driver stamps `versions.json` into every `metadata_*.json`, so
 a directory in the results repo records the exact code that produced it without
-reference to anything outside it:
+reference to anything outside it.
 
-```json
-"system_environment": {
-  "agentcap_commit": "8df4332", "sweagent_commit": "3ea751c",
-  "teasbench_commit": "2d5d59d",
-  "swe_rex_version": "1.4.0", "swebench_version": "4.1.0"
-},
-"dependencies": { "agentcap": {"commit": "...", "ref": "arno/teasbench", "path": "..."}, ... }
-```
-
-The short commits are mirrored into `system_environment` because that is where
-MoE runs record `teasbench_commit`, keeping aggregation across families uniform.
 
 #### Smoke test first
 
@@ -383,7 +373,7 @@ small scale — same driver, same engine Job, same sandboxes, same grading:
 
 ```bash
 cd pipeline
-~/pyvenvs/teasbench/bin/python generate.py \
+python3 generate.py \
     --csv_file=../experiments/agentic-smoke-tests-eidf.csv --target_dir=./out
 bash out/vllm-gptoss120b-swe-bench-lite-nt2-a100x1.sh
 ```
@@ -391,7 +381,7 @@ bash out/vllm-gptoss120b-swe-bench-lite-nt2-a100x1.sh
 A low or zero accuracy on 2 tasks is normal and not a failure signal; what
 matters is that every stage ran and wrote its outputs.
 
-**Run §4.7 first — if the mechanism is broken, this fails for that reason after queueing for a GPU.**
+**Run §4.6 first — if the mechanism is broken, this fails for that reason after queueing for a GPU.**
 
 
 ## 5. Running MoE benchmarks on Vast.ai
@@ -423,7 +413,7 @@ Vast.ai scripts in the `out/` directory for the MoE experiments described in `mo
 
 ```bash
 cd pipeline
-python generate.py \
+python3 generate.py \
     --csv_file=../experiments/moe-experiments-vastai.csv \
     --target_dir=./out \
     --vast
@@ -486,7 +476,7 @@ with the `--vast` flag to generate bash scripts:
 
 ```bash
 cd pipeline
-~/pyvenvs/teasbench/bin/python generate.py \
+python3 generate.py \
     --csv_file=../experiments/swe-bench-lite-vastai.csv \
     --target_dir=./out \
     --vast
@@ -517,36 +507,15 @@ The following table summarises those differences:
 
 ## 7. Troubleshooting
 
-### 7.1 Generation
-
-| Symptom | Cause |
-|---|---|
-| `experiment row has family None` | CSV is missing the leading `family` column |
-| `family 'agentic' row has benchmark 'gsm8k'` | agentic rows need an agentic benchmark |
-| `GPU 'B200' not in VAST_GPU_MAP` | add it to `pipeline/utils.py` — take the exact `gpu_name` from `vastai search offers`, don't guess |
-| `ModuleNotFoundError: pandas` | using system `python3`; use `~/pyvenvs/teasbench/bin/python` |
-| `fatal: not a git repository` | run the generator from inside the repo |
-
-### 7.2 EIDF runs
-
-**Job pending forever** — usually queue/quota. `kubectl -n eidf230ns describe job <name>`.
-
-**Server never becomes ready** — read `server.log` in the run dir, or the pod
-logs. Model download and load can take tens of minutes.
-
-**Nothing pushed to the results repo** — results are copied to the PVC *before*
-any git operation, so look there first:
-`$TEAS_OUTPUT_DIR/<results_repo>/<output_repo_dir>/<timestamp>/`.
-
-### 7.3 SWE-bench Lite permissions
+### 7.1 SWE-bench Lite permissions (if using InClusterK8sProvider) 
 
 If sandbox creation fails with a `kubectl` permissions error, either apply
 `eidf/rbac/teasbench-runner-rbac.yaml`, or switch to the login-node fallback by
 pointing the run at `PortForwardK8sProvider` instead of `InClusterK8sProvider` —
 that provider uses *your* kubectl credentials via port-forwarding rather than
-the pod's ServiceAccount. Confirm it works first with §4.7.
+the pod's ServiceAccount. Confirm it works first with §4.6.
 
-### 7.4 MCP Atlas scores lower than expected
+### 7.2 MCP Atlas scores lower than expected
 
 **Check the credential log first.** Tool servers with blank API keys still start
 and fail only at tool-call time, so missing credentials look like poor model
@@ -561,33 +530,29 @@ left empty: ALCHEMY_API_KEY EXA_API_KEY ...
 Also confirm the server set matches — it is pinned to the same 22 servers on
 both platforms, because the server set *is* the benchmark definition.
 
-### 7.5 Agentic metrics are empty
-
-SWE-agent wasn't streaming-patched. Both platforms assert the
-`AGENTCAP_STREAMING_PATCH_APPLIED` marker and should fail loudly; if you see
-empty TTFT/TPOT, that check was bypassed or the image is stale — rebuild.
-
 ---
 
 ## 8. Where results go
 
 ```
-<family>/<platform>/<engine>/<model>/<dataset-or-benchmark>/<hw>x<n>/batch-size-<bs>/<timestamp>/
+<family>/<platform>/<engine>/<model>/<dataset-or-benchmark>/<gpu_type>x<num_gpu>/batch-size-<default-or-1>/<timestamp>/
 ```
+
+Example paths:
 
 ```
 moe/eidf/sglang/gpt-oss-120b/gsm8k_256samples/a100x1/batch-size-default/20260727-1432/
 agentic/vastai/sglang/gpt-oss-120b/swe-bench-lite/h200x1/batch-size-default/20260727-1432/
 ```
 
-Each run directory holds `metrics_*.json`, `metadata_*.json`,
-`detailed-results_*.jsonl`, `output-data_*.jsonl`, `timings.json`, the job YAML
+Each timestamped run directory holds `metrics_*.json`, `metadata_*.json`,
+`detailed-results_*.jsonl`, `output-data_*.jsonl`, `timings.json`, the job YAML and/or driver run script
 or provenance, and logs.
 
 Aggregate with:
 
 ```bash
-~/pyvenvs/teasbench/bin/python postprocessing/aggregate_results.py --results_dir <repo>/moe
+python3 postprocessing/aggregate_results.py --results_dir <repo>/moe
 ```
 
 Point `--results_dir` at the `moe` or `agentic` subdirectory, **not** the repo
@@ -601,32 +566,36 @@ root.
 
 ```bash
 cd pipeline
-~/pyvenvs/teasbench/bin/python generate.py --csv_file=../experiments/moe-smoke-tests-eidf.csv --target_dir=./out
-~/pyvenvs/teasbench/bin/python generate.py --csv_file=../experiments/agentic-smoke-tests-eidf.csv --target_dir=./out
+python3 generate.py --csv_file=../experiments/moe-smoke-tests-eidf.csv --target_dir=./out
+python3 generate.py --csv_file=../experiments/agentic-smoke-tests-eidf.csv --target_dir=./out
 ```
 
-**Add a model** — add to `HF_MODEL_MAP`, `MODEL_SHORT_NAME_MAP` and (for
+**Add a model**
+
+Add to `HF_MODEL_MAP`, `MODEL_SHORT_NAME_MAP` and (for
 Vast.ai) `MODEL_DISK_GB_MAP` in `pipeline/utils.py`.
 
-**Add a GPU** — add to `EIDF_GPU_MAP` and/or `VAST_GPU_MAP`, plus
+**Add a GPU or other device** 
+
+Add to `EIDF_GPU_MAP` and/or `VAST_GPU_MAP`, plus
 `TEAS_GPU_NAME_MAP`. For Vast.ai, take the string from `vastai search offers`.
 
-**Change engine flags for one case** — add a rule to
-`pipeline/configs/config.yaml`. Rules match on any parameter (`benchmark`,
+**Change inference engine, client, environment, or other parameters for one case** 
+
+Add a rule to `pipeline/configs/config.yaml`. Rules match on any parameter or combinations of parameters (`benchmark`,
 `platform`, `gpu`, `model`, `inference_engine`, …); more specific rules override
 more general ones.
 
-**Change agent sampling parameters** — edit the relevant
+**Change agent sampling parameters** 
+
+Edit the relevant
 `pipeline/configs/agents/<benchmark>_<model>_<engine>.yaml`.
 
 **Verify you haven't broken anything**
 
 ```bash
-~/pyvenvs/teasbench/bin/python -m pytest tests/ -q
+python3 -m pytest tests/ -q
 ```
-
-Two failures in `test_agentic_compute_cost_cli.py` and
-`test_moe_compute_sparsity_cli.py` are pre-existing and unrelated.
 
 ## 10. Support for emerging hardware 
 
