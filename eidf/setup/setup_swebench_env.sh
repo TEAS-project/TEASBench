@@ -27,7 +27,7 @@ set -uo pipefail
 
 PREFIX="${TEASBENCH_ENV_PREFIX:-$HOME/teasbench-env}"
 AGENTCAP_REPO="${AGENTCAP_REPO:-https://github.com/Auto-CAP/AgentCAP.git}"
-AGENTCAP_REF="${AGENTCAP_REF:-arno/teasbench}"
+AGENTCAP_REF="${AGENTCAP_REF:-main}"
 SWEAGENT_REPO="${SWEAGENT_REPO:-https://github.com/SWE-agent/SWE-agent.git}"
 SWEAGENT_REF="${SWEAGENT_REF:-main}"
 SWEREX_SPEC="${SWEREX_SPEC:-swe-rex>=1.4.0}"
