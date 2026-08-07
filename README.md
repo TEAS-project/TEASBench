@@ -16,7 +16,7 @@ TEASBench is continuously evolving to track new and emergent workloads and hardw
 
 The benchmarks in this release cover two workload classes / families that jointly characterise contemporary production traffic while stressing inference systems in distinct ways. The first consists of **basic tasks** (single-turn chat) on relatively short input and output contexts. Secondly, to track the state of the art we include a workload based on **reasoning and agentic** workflows. The long outputs, multi-turn structure, and tool-calling traces in this workload yield latency and cost profiles unlike traditional inference workloads. 
 
-The TEAS benchmarks use mostly Mixture of Experts (MoE) models as they represent the majority of state-of-the-art open-source LLMs, as well as a small dense model (`qwen3-4b`) as a low memory requirement control that enables comparison across a wide range of devices. These are served using vLLM or SGLang on a range of GPUs including NVIDIA A100, H100, H200, B200, B300, GB10, AMD MI355X (as well as custom engines for emerging hardware, see [§10](#support-for-emerging-hardware)).
+The TEAS benchmarks use mostly Mixture of Experts (MoE) models as they represent the majority of state-of-the-art open-source LLMs, as well as a small dense model (`qwen3-4b`) as a low memory requirement control that enables comparison across a wide range of devices. These are served using vLLM or SGLang on a range of GPUs including NVIDIA A100, H100, H200, B200, B300, GB10, AMD MI355X (as well as custom engines for emerging hardware, see [§10](#10-support-for-emerging-hardware)).
 
 | Family/workload | Models | Benchmark Datasets |
 |---|---|---|
