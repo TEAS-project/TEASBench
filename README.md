@@ -189,7 +189,7 @@ Check both:
 kubectl -n <namespace> logs <pod> -c mcp-atlas-sidecar
 ```
 
-**SWE-bench Lite**: *not* an unattended Job on EIDF. See §4.8: the driver runs
+**SWE-bench Lite**: *not* an unattended Job on EIDF. See [§4.7](#47-swe-bench-lite-on-eidf): the driver runs
 on a login node and creates the Jobs itself. The GPUs are still used through a
 Kubernetes Job, as always, only the driver process sits outside the cluster.
 
@@ -245,7 +245,7 @@ every project grants, the preflight Job needs none, since it *is* the
 ServiceAccount.
 
 If the routability check fails, in-cluster mode is unusable on this cluster; use
-`PortForwardK8sProvider` (§7.3), which needs neither assumption.
+`PortForwardK8sProvider` [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf), which needs neither assumption.
 
 ### 4.6 Preflight check for PortForwardK8sProvider mode (e.g. EIDF)
 
