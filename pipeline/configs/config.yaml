@@ -869,10 +869,10 @@ rules:
 # precision; H100/H200 quantise the KV cache to fp8. One rule pair per
 # benchmark rather than one rule listing all three, so each benchmark's value
 # can be corrected independently once its own runs are validated.
-# swe-bench-lite here means Vast.ai specifically (the all-in-one shape); EIDF
-# swe-bench-lite's kv_cache_dtype is set by its own engine-only rules further
-# down instead, which intentionally use different, individually-validated
-# per-GPU values (see there for why).
+# swe-bench-lite here means Vast.ai specifically (the all-in-one shape), which
+# is why those two rules match on platform. EIDF swe-bench-lite sets no
+# kv_cache_dtype at all -- its engine-only rules further down follow
+# AgentCAP's k8s/launch_llm_server.sh, which passes no --kv-cache-dtype.
   - match:
       benchmark: ["imo-answerbench"]
       gpu: ["A100"]
