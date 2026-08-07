@@ -73,16 +73,16 @@ TEASBench owns this table rather than importing MoE-CAP's, because vendors quote
 different bases and mixing them biases S-MFU across vendors. Every figure below is dense and
 per GPU.
 
-| GPU key | HBM BW | BF16 | FP8 | INT8 | FP4 | INT4 | Source |
-|---|---:|---:|---:|---:|---:|---:|---|
-| `NVIDIA-A100-SXM4-80GB` | 2.039 TB/s | 312 | 312¹ | 624 | 312¹ | 1248 | A100 datasheet (leads dense; 2× sparse footnoted) |
-| `NVIDIA-H100-HBM3-80GB` | 3.35 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H100 datasheet (leads with-sparsity) |
-| `NVIDIA-H200-141GB` | 4.80 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H200 datasheet (same die as H100) |
-| `NVIDIA-B200-183GB` | 7.70 TB/s | 2250 | 4500 | 4500 | 9000 | 9000³ | Blackwell datasheet, HGX B200 per-GPU column |
-| `NVIDIA-B300-269GB` | 7.70 TB/s | 2250 | 4500 | **153.5** | **14000** | 14000³ | Blackwell Ultra datasheet, HGX B300 per-GPU column |
-| `AMD-Instinct-MI355X-288GB` | 8.00 TB/s | 2500 | 5000 | 5000 | 10100 | 10100³ | MI355X product page, dense rows as published |
-| `NVIDIA-GB10` | 0.273 TB/s | 125⁴ | 250⁴ | 250⁴ | 500⁴ | 500³ | DGX Spark page (one published figure) |
-| `Tenstorrent-Blackhole-P150b` | 0.512 TB/s | — | — | — | — | — | Tenstorrent specifications⁵ |
+| GPU key | Memory⁶ | HBM BW | BF16 | FP8 | INT8 | FP4 | INT4 | Source |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `NVIDIA-A100-SXM4-80GB` | 80 GB | 2.039 TB/s | 312 | 312¹ | 624 | 312¹ | 1248 | A100 datasheet (leads dense; 2× sparse footnoted) |
+| `NVIDIA-H100-HBM3-80GB` | 80 GB | 3.35 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H100 datasheet (leads with-sparsity) |
+| `NVIDIA-H200-141GB` | 141 GB | 4.80 TB/s | 989.5 | 1979 | 1979 | 1979² | 1979 | H200 datasheet (same die as H100) |
+| `NVIDIA-B200-183GB` | 192 GB | 7.70 TB/s | 2250 | 4500 | 4500 | 9000 | 9000³ | Blackwell datasheet, HGX B200 per-GPU column |
+| `NVIDIA-B300-269GB` | 288 GB | 7.70 TB/s | 2250 | 4500 | **153.5** | **14000** | 14000³ | Blackwell Ultra datasheet, HGX B300 per-GPU column |
+| `AMD-Instinct-MI355X-288GB` | 288 GB | 8.00 TB/s | 2500 | 5000 | 5000 | 10100 | 10100³ | MI355X product page, dense rows as published |
+| `NVIDIA-GB10` | 128 GB | 0.273 TB/s | 125⁴ | 250⁴ | 250⁴ | 500⁴ | 500³ | DGX Spark page (one published figure) |
+| `Tenstorrent-Blackhole-P150b` | 32 GB | 0.512 TB/s | — | — | — | — | — | Tenstorrent specifications⁵ |
 
 ¹ No FP8/FP4 tensor path on Ampere; falls back to the BF16 rate.
 ² No FP4 tensor path on Hopper; falls back to the FP8 rate.
@@ -94,6 +94,11 @@ Dense FP4 halves it, and each wider precision halves again, mirroring the B200 l
 ⁵ No dense FLOPS figure published: Tenstorrent quotes only a BLOCKFP8 rate (664 TFLOPS at the
 120-core spec). Blackhole runs therefore publish S-MBU with a null S-MFU rather than divide by
 a denominator we cannot defend.
+⁶ Nameplate memory capacity per device, from the same vendor pages the Source column names.
+These cells carry that source but **not** the cell-by-cell datasheet confirmation the bandwidth
+and FLOPS columns have — they are the figures the dashboard was already publishing, moved into
+the catalog so that they are checkable in one place rather than restated in the assembler. No
+metric on this page divides by them; they are published as a hardware spec.
 
 **Two B300 rows sit apart from the pattern.** Every other Blackwell row is published with
 sparsity and halved here; FP4 is the one NVIDIA prints as `sparse | dense` outright, `18 | 14`
@@ -109,14 +114,53 @@ B300 comparable. Where a datasheet's board total disagrees with its own per-GPU 
 FP4 totals `144 | 108` PFLOPS across 8 GPUs, implying 13.5 dense against the 14 printed
 per GPU — the per-GPU row governs, because S-MFU divides by `num_gpus × peak`.
 
-All units TFLOPS, per GPU. Each precision dict in the script is a complete literal with nothing patched over it after the table is built, so the dispatch either finds a documented value or returns zero — as it does for Blackhole, em-dashed in every FLOPS column above, whose runs publish a null S-MFU rather than a guess.
+FLOPS columns are TFLOPS per GPU; the other two columns carry their units in the cell. Each precision dict in the script is a complete literal with nothing patched over it after the table is built, so the dispatch either finds a documented value or returns zero — as it does for Blackhole, em-dashed in every FLOPS column above, whose runs publish a null S-MFU rather than a guess.
+
+**A capacity in a key is not a capacity reading.** Several keys carry a device-reported figure
+that differs from the nameplate in the Memory column — B200 keyed `183GB` against 192, B300
+keyed `269GB` against 288, and H200 reaching the map as both `140GB` and `141GB`. The number in
+a key is part of an identifier: keys are resolved by lookup and containment against
+`GPU_TYPE_MAP`, and nothing in the producers or the assembler parses a capacity out of one. That
+is what keeps a nameplate table and a device-reported figure from ending up in one computation.
 
 Metadata `gpu_type` strings normalized to the keys above; raw variants seen and mapped:
 `AMD-Instinct-MI355X`, `AMD-Instinct-MI355X-288GB`, `AMD--288GB`, `NVIDIA-A100-SXM4-80GB`, `NVIDIA-B200-180GB`, `NVIDIA-B200-183GB`, `NVIDIA-B300-SXM6-AC-269GB`, `NVIDIA-H100-HBM3-80GB`, `NVIDIA-H200-140GB`, `NVIDIA-H200-141GB`. `Unknown` falls back to the path prefix (`a100|h100|h200|b200|b300|mi355x`).
 
-## 5. Per-dataset token defaults
+## 5. The prefill rate comes from the shared resolver; token defaults feed KV only
 
-Used as fallbacks to materialize the KV-cache term (S-MBU) and derive throughput when `batch_token_profile` is absent. When present, `batch_token_profile` is authoritative for default batching: `prefill_tokens_per_s = prefill_tokens_per_request × prefill_avg_batch_size / ttft`, and `decode output_tokens_per_s = decode_avg_batch_size / tpot`. For `batch-size-1` and `batch-size-1_input..._output...` result directories, the effective prefill/decode batch size is forced to `1` even if a historical profile block contains larger averages. Override fallback lengths globally with `--avg-prefill-len` / `--avg-decode-ctx-len`.
+The published `prefill.prefill_tokens_per_s` is the **node-aggregate** rate returned by the
+shared resolver (`prefill_rate.py`), which `compute_cost.py` also calls — one formula for both
+sidecars, so they cannot diverge. Its dispositions, each a pure function of the run's own
+recorded evidence:
+
+- **`identity-bs1`** (`basis: measured`) — the run pins prefill batch 1 (its `batch-size-1*`
+  regime, or a measured average batch ≤ 1.01): `prefill_tokens_per_request / ttft` is
+  aggregation-exact.
+- **`trace-exact`** (`basis: measured`) — a `prefill_profile*.json` sidecar exists beside the
+  run (written by `compute_prefill_profile.py` from the run's own trace): nominal attempted
+  prompt tokens over the exact physical prefill-step elapsed time.
+- **`hybrid-rung1`** (`basis: estimated`) — concurrent run whose per-request prefill fits one
+  scheduler pass: `tokens/request × prefill_avg_batch_size / prefill_pass_latency_s`. The
+  token count is the run's recorded per-request count (`token_basis: nominal-attempted`), or
+  the run-witnessed fixed input target (`token_basis: configured-input-target`) where the
+  recorded count is absent.
+- **`hybrid-rung2`** (`basis: estimated`) — concurrent long-context run where chunking may
+  split a request across passes: `(tokens/request / ttft) × prefill_avg_batch_size`.
+- **null** — anything else, with `reason` naming the missing evidence
+  (`no-batch-evidence` / `no-token-evidence` / `no-latency-evidence`). There is **no
+  fallback** to `performance.prefill_tokens_per_s` or to the dataset token constants below:
+  those two unlabelled stand-ins are gone from this path.
+
+`S_MFU` is computed from the resolver's rate, so an estimated rate makes an estimated S-MFU;
+the sidecar's `prefill.basis/method/token_basis` fields record which case applies.
+
+The per-dataset defaults below now feed **only** the KV-cache byte term (S-MBU) and the decode
+context-length default when a run records no token profile of its own. Decode is unchanged:
+`output_tokens_per_s = decode_avg_batch_size / tpot`. For `batch-size-1` and
+`batch-size-1_input..._output...` result directories, the effective prefill/decode batch size
+is forced to `1` even if a historical profile block contains larger averages (the resolver
+applies the same pin from the regime name). Override fallback lengths globally with
+`--avg-prefill-len` / `--avg-decode-ctx-len`.
 
 | dataset prefix | avg prefill | avg decode ctx = prefill + output/2 |
 |---|---:|---:|
@@ -186,6 +230,10 @@ across accelerators, which is why one run's value cannot stand in for another's.
     "prefill": {
       "ttft_s": 0.079,
       "prefill_tokens_per_s": 126428.15,
+      "basis": "estimated",            // measured | estimated | null — see §5
+      "method": "hybrid-rung1",        // identity-bs1 | trace-exact | hybrid-rung1 | hybrid-rung2
+      "token_basis": "nominal-attempted",  // or configured-input-target
+      "reason": null,                  // names the missing evidence when the rate is null
       "S_MBU": 0.0565,
       "S_MFU": 0.1110
     },

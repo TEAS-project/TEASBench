@@ -21,7 +21,8 @@ def make_batched_run(root: Path) -> Path:
     run = root / "moe" / "vastai" / "sglang" / "gpt-oss-120b" / "gsm8k_256samples" / "b200x1" / "batch-size-default" / "20260101-0000"
     run.mkdir(parents=True)
     (run / "metrics.json").write_text(json.dumps({
-        "performance": {"e2e_s": 10.0, "ttft": 0.2, "tpot": 0.01},
+        "performance": {"e2e_s": 10.0, "ttft": 0.2, "tpot": 0.01,
+                        "prefill_pass_latency_s": 0.2},
         "batch_token_profile": {
             "prefill_tokens": 2000,
             "prefill_tokens_per_request": 20.0,
@@ -61,7 +62,15 @@ class MoeComputeCostCliTests(unittest.TestCase):
             )
             self.assertEqual(rent_cost["breakdown"]["pricing"]["price_per_hour_usd"], 3.6)
             self.assertEqual(rent_cost["breakdown"]["throughput"]["effective_output_tokens_per_s"], 2000.0)
-            self.assertEqual(rent_cost["breakdown"]["throughput"]["prefill_tokens_per_s"], 1000.0)
+            # Node-aggregate prefill rate from the shared resolver: short-prompt
+            # concurrent run -> tokens x batch / pass latency, labelled as the
+            # estimate it is. 20 x 10 / 0.2 s.
+            throughput = rent_cost["breakdown"]["throughput"]
+            self.assertEqual(throughput["prefill_tokens_per_s"], 1000.0)
+            self.assertEqual(throughput["prefill_basis"], "estimated")
+            self.assertEqual(throughput["prefill_method"], "hybrid-rung1")
+            self.assertEqual(throughput["prefill_token_basis"], "nominal-attempted")
+            self.assertIsNone(throughput["prefill_reason"])
             self.assertEqual(rent_cost["breakdown"]["request_seconds"]["prefill_seconds_per_request"], 0.02)
             self.assertEqual(rent_cost["breakdown"]["request_seconds"]["decode_seconds_per_request"], 0.025)
             self.assertEqual(rent_cost["breakdown"]["output_token_cost"]["cost_per_1M_output_tokens_usd"], 0.5)
@@ -128,6 +137,47 @@ class MoeComputeCostCliTests(unittest.TestCase):
                 buy_wall["cost_per_request_usd"],
                 cost["buy"]["effective_hourly_rate_usd"] / 3600 * 10.0,
             )
+
+    def test_cs3_buy_uses_one_complete_system_and_withholds_token_dependent_cost(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = root / "moe" / "cerebras" / "waferengine" / "qwen3-4b" / "gsm8k_256samples" / "cs3x1" / "batch-size-1" / "20260804-011335"
+            run.mkdir(parents=True)
+            (run / "metrics.json").write_text(json.dumps({
+                "performance": {"e2e_s": 2.0, "ttft": 0.1, "tpot": 0.001},
+                "batch_token_profile": {
+                    "prefill_tokens_per_request": 100.0,
+                    "prefill_avg_batch_size": 1.0,
+                    "decode_generated_tokens": None,
+                    "decode_generated_tokens_per_request": None,
+                    "decode_avg_batch_size": 1.0,
+                },
+            }))
+            (run / "metadata.json").write_text(json.dumps({
+                "system_environment": {"inference_engine_version": None},
+            }))
+
+            subprocess.run([
+                sys.executable, str(SCRIPT), "--root", str(root / "moe"),
+            ], check=True, cwd=REPO, text=True, capture_output=True)
+
+            cost = json.loads((run / "cost.json").read_text())
+            buy = cost["buy"]
+            expected_rate_h = 2_500_000 / (5 * 365 * 24 * 0.9) + 23 * 0.15
+            self.assertEqual(buy["total_capital_usd"], 2_500_000)
+            self.assertEqual(buy["total_power_w"], 23_000)
+            self.assertEqual(buy["scale_other_capital"], 1.2)
+            self.assertEqual(buy["capital_scale"], 1.0)
+            self.assertEqual(buy["cpu"]["price_per_unit_usd"], 0.0)
+            self.assertEqual(buy["cpu"]["tdp_w"], 0)
+            self.assertAlmostEqual(buy["effective_hourly_rate_usd"], expected_rate_h)
+            self.assertAlmostEqual(buy["wall"]["cost_per_request_usd"], expected_rate_h / 3600 * 2.0)
+            self.assertAlmostEqual(
+                buy["cost"]["avg_cost_per_1M_output_tokens_usd"],
+                expected_rate_h / 3600 * 0.001 * 1_000_000,
+            )
+            self.assertIsNone(buy["cost"]["avg_cost_per_request_usd"])
+            self.assertIsNone(buy["cost"]["decode_generated_tokens_per_request"])
 
     def test_concurrent_run_without_profile_gets_wall_only_block(self):
         with tempfile.TemporaryDirectory() as td:

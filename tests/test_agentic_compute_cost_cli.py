@@ -47,6 +47,7 @@ class AgenticComputeCostCliTests(unittest.TestCase):
                 "--buy-cpu-price", "xeon-8468=7200",
                 "--buy-cpu-tdp", "xeon-8468=0",
                 "--buy-lifetime-hours", "3600",
+                "--utilisation", "1.0",
                 "--buy-scale-other-capital", "1",
             ], check=True, cwd=REPO, text=True, capture_output=True)
 
@@ -81,6 +82,7 @@ class AgenticComputeCostCliTests(unittest.TestCase):
                 "--buy-cpu-price", "xeon-8468=7200",
                 "--buy-cpu-tdp", "xeon-8468=0",
                 "--buy-lifetime-hours", "3600",
+                "--utilisation", "1.0",
                 "--buy-scale-other-capital", "1",
             ], check=True, cwd=REPO, text=True, capture_output=True)
 

@@ -28,13 +28,15 @@ RENT (vast.ai etc.):
 
 BUY (per https://arxiv.org/html/2412.07067v6, Eqs. 1-3):
   Amortize hardware capital over lifetime, add energy:
-    capital_$  = (gpu_$ * num_gpus + cpu_$ * num_cpus) * scale_other_capital
+    capital_$  = (gpu_$ * num_gpus + cpu_$ * num_cpus) * capital_scale
     power_W    = gpu_W * num_gpus + cpu_W * num_cpus
     amort_$/h  = capital_$ / lifetime_hours
     energy_$/h = (power_W / 1000) * electricity_$_per_kWh
     effective_$/h = amort_$/h + energy_$/h
     effective_$/s = effective_$/h / 3600
 
+  capital_scale normally equals --buy-scale-other-capital; a catalogued complete
+  system can set a per-entry scale of 1 to avoid adding its included host twice.
   Defaults use curated current/recent-average market estimates plus vendor
   datasheets for power. Override via --buy-gpu-price <gpu>=<usd>,
   --buy-gpu-prices-json <path>, --buy-gpu-tdp <gpu>=<W>, etc.
@@ -53,118 +55,34 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Hardware specs live in hardware_catalog.py, not here: they are published by this script and
+# by the dashboard assembler in the results repo, and a second copy is how a corrected figure
+# gets silently reverted in one publisher and not the other. Imported under both invocations —
+# as a package module (tests) and as a standalone script (the sync workflow).
+if __package__:
+    from .hardware_catalog import (  # noqa: F401  (re-exported for existing importers)
+        CPU_SPECS,
+        GPU_HOST_CPU,
+        GPU_SPECS,
+    )
+    from .prefill_rate import resolve_for_metrics_path
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from hardware_catalog import (  # noqa: F401  (re-exported for existing importers)
+        CPU_SPECS,
+        GPU_HOST_CPU,
+        GPU_SPECS,
+    )
+    from prefill_rate import resolve_for_metrics_path
+
 
 VASTAI_PRICING_URL = "https://vast.ai/pricing"
 DEFAULT_RENT_PRICE_SOURCE = VASTAI_PRICING_URL
 
-DEFAULT_LIFETIME_HOURS = 3 * 365 * 24
+DEFAULT_LIFETIME_HOURS = 5 * 365 * 24
+DEFAULT_UTILISATION = 0.9
 DEFAULT_ELECTRICITY_USD_PER_KWH = 0.15
 DEFAULT_SCALE_OTHER_CAPITAL = 1.2
-
-GPU_SPECS: dict[str, dict] = {
-    "a100": {
-        "price_per_unit_usd": 15000.0,
-        "price_source": "https://www.trgdatacenters.com/resource/h100-vs-a100/",
-        "tdp_w": 400,
-        "tdp_source": "https://lenovopress.lenovo.com/lp1734-thinksystem-nvidia-a100-pcie-40-gpu",
-    },
-    "h100": {
-        "price_per_unit_usd": 27000.0,
-        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h100-price/",
-        "tdp_w": 700,
-        "tdp_source": "https://lenovopress.lenovo.com/lp1732-thinksystem-nvidia-h100-pcie-gen5-gpu",
-    },
-    "h200": {
-        "price_per_unit_usd": 31000.0,
-        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h200-price/",
-        "tdp_w": 700,
-        "tdp_source": "https://lenovopress.lenovo.com/lp1944-nvidia-h200-141gb-gpu",
-    },
-    "b200": {
-        "price_per_unit_usd": 40000.0,
-        "price_source": "https://epoch.ai/blog/how-much-does-it-cost-to-train-frontier-ai-models",
-        "tdp_w": 1000,
-        "tdp_source": "https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf",
-    },
-    "b300": {
-        "price_per_unit_usd": 37500.0,
-        "price_source": "https://tech-insider.org/nvidia-blackwell-gpu-pricing/",
-        "tdp_w": 1400,
-        "tdp_source": "https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-data-sheet",
-    },
-    "gb10": {
-        "price_per_unit_usd": 3999.0,
-        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
-        "tdp_w": 140,
-        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
-    },
-    "mi355x": {
-        "price_per_unit_usd": 30000.0,
-        "price_source": "https://www.fitmyllm.com/gpu/radeon-instinct-mi355x",
-        "tdp_w": 1400,
-        "tdp_source": "https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html",
-    },
-    "blackhole-p150b": {
-        "price_per_unit_usd": 1399.0,
-        "price_source": "https://tenstorrent.com/en/hardware/cards",
-        "tdp_w": 300,
-        "tdp_source": "https://docs.tenstorrent.com/aibs/blackhole/",
-    },
-    # Cerebras publishes no CS-3 list price: the figure is derived from the Galaxy-1
-    # contract ($100M / 32 nodes = $3.13M) less bundled services, and the public range
-    # spans $1.56M (bulk) to ~$4M (full MemoryX). CS-3 is buy-only, so this estimate is
-    # the whole cost basis for its cells — unlike every other entry here, which cites a
-    # vendor or retail price. The unit is one CS-3 system.
-    "cs3": {
-        "price_per_unit_usd": 2500000.0,
-        "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
-        "tdp_w": 23000,
-        "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
-    },
-}
-
-CPU_SPECS: dict[str, dict] = {
-    "gb10-soc": {
-        "model": "Arm Cortex-X925/A725 integrated in NVIDIA GB10",
-        "price_per_unit_usd": 0.0,
-        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
-        "tdp_w": 0,
-        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
-    },
-    "epyc-7713p": {
-        "model": "AMD EPYC 7713P",
-        "price_per_unit_usd": 5010.0,
-        "price_source": "https://www.amd.com/en/products/processors/server/epyc/7003-series/amd-epyc-7713p.html",
-        "tdp_w": 225,
-        "tdp_source": "https://www.amd.com/en/products/processors/server/epyc/7003-series/amd-epyc-7713p.html",
-    },
-    "xeon-8468": {
-        "model": "Intel Xeon Platinum 8468",
-        "price_per_unit_usd": 7214.0,
-        "price_source": "https://www.intel.com/content/www/us/en/products/sku/231735/intel-xeon-platinum-8468-processor-105m-cache-2-10-ghz/specifications.html",
-        "tdp_w": 350,
-        "tdp_source": "https://www.intel.com/content/www/us/en/products/sku/231735/intel-xeon-platinum-8468-processor-105m-cache-2-10-ghz/specifications.html",
-    },
-    "xeon-8558": {
-        "model": "Intel Xeon Platinum 8558",
-        "price_per_unit_usd": 5208.0,
-        "price_source": "https://www.intel.com/content/www/us/en/products/sku/237255/intel-xeon-platinum-8558-processor-260m-cache-2-10-ghz/specifications.html",
-        "tdp_w": 330,
-        "tdp_source": "https://www.intel.com/content/www/us/en/products/sku/237255/intel-xeon-platinum-8558-processor-260m-cache-2-10-ghz/specifications.html",
-    },
-}
-
-GPU_HOST_CPU: dict[str, tuple[int, str]] = {
-    "a100": (2, "xeon-8468"),
-    "h100": (2, "xeon-8468"),
-    "h200": (2, "xeon-8468"),
-    "b200": (2, "xeon-8468"),
-    "b300": (2, "xeon-8558"),
-    "gb10": (1, "gb10-soc"),
-    "mi355x": (2, "epyc-7713p"),
-    "blackhole-p150b": (1, "xeon-8468"),  # PCIe dev card in a single-CPU workstation host
-}
-
 
 GPU_DIR_RE = re.compile(r"^([a-z][a-z0-9-]*?)x(\d+)(?:[_-].*)?$")  # hyphen allows blackhole-p150b
 
@@ -368,6 +286,7 @@ def build_cost_metrics(
     ttft: Optional[float],
     tpot: float,
     batch_profile: dict,
+    prefill_rate: Optional[dict] = None,
 ) -> dict:
     """Return cost metrics plus an auditable throughput/cost breakdown.
 
@@ -415,9 +334,16 @@ def build_cost_metrics(
             decode_seconds_per_request * price_per_s
             if decode_seconds_per_request is not None else None
         )
-        prefill_tokens_per_s = None
-        if have_prefill and isinstance(prefill_tokens_per_request, (int, float)) and prefill_tokens_per_request > 0:
-            prefill_tokens_per_s = prefill_tokens_per_request * prefill_avg_batch_size / ttft
+        # Diagnostic node-aggregate prefill rate from the shared resolver
+        # (prefill_rate.py) — the same call compute_sparsity_metrics.py makes,
+        # so the two sidecars agree by construction. An independent local
+        # formula here is how the same run once shipped two prefill rates
+        # differing by exactly the batch size.
+        prefill_resolved = prefill_rate or {
+            "value": None, "basis": None, "method": None,
+            "token_basis": None, "reason": "no-batch-evidence",
+        }
+        prefill_tokens_per_s = prefill_resolved["value"]
         return {
             "avg_cost_per_request_usd": avg_cost_per_request_usd,
             "avg_cost_per_1M_output_tokens_usd": avg_cost_per_1m_output_tokens_usd,
@@ -450,6 +376,10 @@ def build_cost_metrics(
                 "throughput": {
                     "effective_output_tokens_per_s": effective_output_tokens_per_s,
                     "prefill_tokens_per_s": prefill_tokens_per_s,
+                    "prefill_basis": prefill_resolved["basis"],
+                    "prefill_method": prefill_resolved["method"],
+                    "prefill_token_basis": prefill_resolved["token_basis"],
+                    "prefill_reason": prefill_resolved["reason"],
                     "formula": "decode_avg_batch_size / tpot_s",
                 },
                 "request_seconds": {
@@ -543,6 +473,7 @@ def build_buy_block(
     scale_other_capital: float,
     buy_price_quote_time: Optional[str] = None,
     include_token_cost: bool = True,
+    prefill_rate: Optional[dict] = None,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
     host = gpu_host_cpu.get(gpu_key)
@@ -555,7 +486,8 @@ def build_buy_block(
 
     gpu_capital = gpu["price_per_unit_usd"] * num_gpus
     cpu_capital = cpu["price_per_unit_usd"] * num_cpus
-    total_capital_usd = (gpu_capital + cpu_capital) * scale_other_capital
+    capital_scale = gpu.get("capital_scale", scale_other_capital)
+    total_capital_usd = (gpu_capital + cpu_capital) * capital_scale
     total_power_w = gpu["tdp_w"] * num_gpus + cpu["tdp_w"] * num_cpus
 
     amort_per_h = total_capital_usd / lifetime_hours
@@ -569,6 +501,7 @@ def build_buy_block(
         "utilisation": utilisation,
         "electricity_usd_per_kwh": electricity_usd_per_kwh,
         "scale_other_capital": scale_other_capital,
+        **({"capital_scale": capital_scale} if "capital_scale" in gpu else {}),
         "gpu": {
             "key": gpu_key,
             "num": num_gpus,
@@ -600,6 +533,7 @@ def build_buy_block(
             ttft=ttft,
             tpot=tpot,
             batch_profile=batch_profile,
+            prefill_rate=prefill_rate,
         )} if include_token_cost else {}),
     }
 
@@ -671,13 +605,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS,
-        help=f"Server calendar lifetime hours before utilisation (default: {DEFAULT_LIFETIME_HOURS} = 3 yr)",
+        help=f"Server calendar lifetime hours before utilisation (default: {DEFAULT_LIFETIME_HOURS} = 5 yr)",
     )
     parser.add_argument(
-        "--utilisation", "--utilization", dest="utilisation", type=float, default=1.0,
+        "--utilisation", "--utilization", dest="utilisation", type=float, default=DEFAULT_UTILISATION,
         help=(
             "Average hardware utilisation in (0, 1]; effective buy lifetime "
-            "hours are --buy-lifetime-hours * utilisation (default: 1.0)"
+            f"hours are --buy-lifetime-hours * utilisation (default: {DEFAULT_UTILISATION})"
         ),
     )
     parser.add_argument(
@@ -863,6 +797,11 @@ def main() -> int:
         if not token_cost_ok:
             wall_only += 1
 
+        # One resolution per run, shared by the rent and buy blocks. Uses the
+        # run's original metrics (not the bs-1-sanitised copy above): the
+        # resolver applies the batch-size-1 pin from the regime name itself.
+        prefill_resolved = resolve_for_metrics_path(f, metrics)
+
         payload = {
             "recorded_at": recorded_at,
             "run": {
@@ -902,6 +841,7 @@ def main() -> int:
                     ttft=ttft,
                     tpot=tpot,
                     batch_profile=batch_profile,
+                    prefill_rate=prefill_resolved,
                 )
 
         buy = build_buy_block(
@@ -914,6 +854,7 @@ def main() -> int:
             scale_other_capital=args.buy_scale_other_capital,
             buy_price_quote_time=buy_price_quote_time,
             include_token_cost=token_cost_ok,
+            prefill_rate=prefill_resolved,
         )
         if buy is not None:
             payload["buy"] = buy

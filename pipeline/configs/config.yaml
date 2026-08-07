@@ -437,9 +437,9 @@ variables_defaults:
 
   imoanswerbench_image:
     sglang:
-      value: "ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312"
+      value: "ghcr.io/teas-project/imo-sglang:pt2.9.1-cuda13-py312"
     vllm:
-      value: "ghcr.io/yufan196884/imo-answerbench-env:latest"
+      value: "ghcr.io/teas-project/imo-answerbench-env:latest"
 
   # AgentCAP checkout used by imo-answerbench. *_ref can be pinned to a
   # specific commit/tag for reproducibility; "main" (tracking the default
@@ -468,9 +468,9 @@ variables_defaults:
 
   mcpatlas_image:
     sglang:
-      value: "ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312"
+      value: "ghcr.io/teas-project/imo-sglang:pt2.9.1-cuda13-py312"
     vllm:
-      value: "ghcr.io/yufan196884/imo-answerbench-env:latest"
+      value: "ghcr.io/teas-project/imo-answerbench-env:latest"
 
   # AgentCAP checkout used by mcp-atlas. Verbatim copy of imoanswerbench_*
   # today (both trace back to the same original shared block) -- not
@@ -619,12 +619,11 @@ rules:
       value: |
         find "$SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR" -name 'expert_distribution_record.jsonl' -exec cp {} $RUN_DIR/ \; 2>/dev/null || true
 
+  # Natural-length runs go through the chat endpoint, every model and both engines: that is what
+  # produced the published results, and the client-side templating on the completions path is a
+  # different serving surface with different sampling defaults. Fixed-length mode is the one
+  # exception and disables it below, because the chat endpoint there did not serialise ignore_eos.
   - match:
-      inference_engine:
-        - "vllm"
-      model:
-        not:
-          - "Qwen3-4B"
       input_length:
         not:
           - "<defined>"

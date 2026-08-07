@@ -32,8 +32,8 @@ seconds, so a change to `prefill_s` moves the published buy cost.
 Output: a sibling JSON (`cost.json` / `cost_<suffix>.json`) is written next
 to each `metrics.json` / `metrics_<suffix>.json` in the input tree.
 
-For the buy formula, defaults, and units, see ../moe/compute_cost.md
-(the GPU and CPU specs here mirror that script).
+For the buy formula, defaults, and units, see ../moe_cost_metrics/compute_cost.md. The GPU
+and CPU specs are the shared catalog's, not a copy of them.
 """
 
 from __future__ import annotations
@@ -46,100 +46,35 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Hardware specs live in moe_cost_metrics/hardware_catalog.py, not here: this producer, the
+# cost and sparsity producers and the dashboard assembler all publish them, and a second copy
+# is how a corrected figure gets silently reverted in one publisher and not the others.
+# Imported under both invocations — as a package module (tests) and as a standalone script
+# (the sync and postprocess workflows both run this file by path).
+if __package__:
+    from ..moe_cost_metrics.hardware_catalog import (
+        CPU_SPECS,
+        GPU_HOST_CPU,
+        GPU_SPECS,
+    )
+else:
+    sys.path.insert(
+        0, str(Path(__file__).resolve().parent.parent / "moe_cost_metrics")
+    )
+    from hardware_catalog import (  # noqa: E402
+        CPU_SPECS,
+        GPU_HOST_CPU,
+        GPU_SPECS,
+    )
+
 
 VASTAI_PRICING_URL = "https://vast.ai/pricing"
 DEFAULT_RENT_PRICE_SOURCE = VASTAI_PRICING_URL
 
-DEFAULT_LIFETIME_HOURS = 3 * 365 * 24
+DEFAULT_LIFETIME_HOURS = 5 * 365 * 24
+DEFAULT_UTILISATION = 0.9
 DEFAULT_ELECTRICITY_USD_PER_KWH = 0.15
 DEFAULT_SCALE_OTHER_CAPITAL = 1.2
-
-GPU_SPECS: dict[str, dict] = {
-    "a100": {
-        "price_per_unit_usd": 15000.0,
-        "price_source": "https://www.trgdatacenters.com/resource/h100-vs-a100/",
-        "tdp_w": 400,
-        "tdp_source": "https://lenovopress.lenovo.com/lp1734-thinksystem-nvidia-a100-pcie-40-gpu",
-    },
-    "h100": {
-        "price_per_unit_usd": 27000.0,
-        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h100-price/",
-        "tdp_w": 700,
-        "tdp_source": "https://lenovopress.lenovo.com/lp1732-thinksystem-nvidia-h100-pcie-gen5-gpu",
-    },
-    "h200": {
-        "price_per_unit_usd": 31000.0,
-        "price_source": "https://www.trgdatacenters.com/resource/nvidia-h200-price/",
-        "tdp_w": 700,
-        "tdp_source": "https://lenovopress.lenovo.com/lp1944-nvidia-h200-141gb-gpu",
-    },
-    "b200": {
-        "price_per_unit_usd": 40000.0,
-        "price_source": "https://epoch.ai/blog/how-much-does-it-cost-to-train-frontier-ai-models",
-        "tdp_w": 1000,
-        "tdp_source": "https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf",
-    },
-    "b300": {
-        "price_per_unit_usd": 37500.0,
-        "price_source": "https://tech-insider.org/nvidia-blackwell-gpu-pricing/",
-        "tdp_w": 1400,
-        "tdp_source": "https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-data-sheet",
-    },
-    "gb10": {
-        "price_per_unit_usd": 3999.0,
-        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
-        "tdp_w": 140,
-        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
-    },
-    "mi355x": {
-        "price_per_unit_usd": 30000.0,
-        "price_source": "https://www.fitmyllm.com/gpu/radeon-instinct-mi355x",
-        "tdp_w": 1400,
-        "tdp_source": "https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html",
-    },
-}
-
-CPU_SPECS: dict[str, dict] = {
-    "gb10-soc": {
-        "model": "Arm Cortex-X925/A725 integrated in NVIDIA GB10",
-        "price_per_unit_usd": 0.0,
-        "price_source": "https://www.nvidia.com/en-us/products/workstations/dgx-spark/",
-        "tdp_w": 0,
-        "tdp_source": "https://docs.nvidia.com/dgx/dgx-spark/hardware.html",
-    },
-    "epyc-7713p": {
-        "model": "AMD EPYC 7713P",
-        "price_per_unit_usd": 5010.0,
-        "price_source": "https://www.amd.com/en/products/processors/server/epyc/7003-series/amd-epyc-7713p.html",
-        "tdp_w": 225,
-        "tdp_source": "https://www.amd.com/en/products/processors/server/epyc/7003-series/amd-epyc-7713p.html",
-    },
-    "xeon-8468": {
-        "model": "Intel Xeon Platinum 8468",
-        "price_per_unit_usd": 7214.0,
-        "price_source": "https://www.intel.com/content/www/us/en/products/sku/231735/intel-xeon-platinum-8468-processor-105m-cache-2-10-ghz/specifications.html",
-        "tdp_w": 350,
-        "tdp_source": "https://www.intel.com/content/www/us/en/products/sku/231735/intel-xeon-platinum-8468-processor-105m-cache-2-10-ghz/specifications.html",
-    },
-    "xeon-8558": {
-        "model": "Intel Xeon Platinum 8558",
-        "price_per_unit_usd": 5208.0,
-        "price_source": "https://www.intel.com/content/www/us/en/products/sku/237255/intel-xeon-platinum-8558-processor-260m-cache-2-10-ghz/specifications.html",
-        "tdp_w": 330,
-        "tdp_source": "https://www.intel.com/content/www/us/en/products/sku/237255/intel-xeon-platinum-8558-processor-260m-cache-2-10-ghz/specifications.html",
-    },
-}
-
-GPU_HOST_CPU: dict[str, tuple[int, str]] = {
-    "a100": (2, "xeon-8468"),
-    "h100": (2, "xeon-8468"),
-    "h200": (2, "xeon-8468"),
-    "b200": (2, "xeon-8468"),
-    "b300": (2, "xeon-8558"),
-    "gb10": (1, "gb10-soc"),
-    "mi355x": (2, "epyc-7713p"),
-}
-
 
 GPU_DIR_RE = re.compile(r"^([a-z][a-z0-9]*?)x(\d+)(?:[_-].*)?$")
 
@@ -352,7 +287,8 @@ def need_rent_prices_message(needed: list[str], have: dict[str, float]) -> str:
 def build_buy_pricing(
     gpu_key: str, num_gpus: int,
     *, gpu_specs, cpu_specs, gpu_host_cpu,
-    lifetime_hours, electricity_usd_per_kwh, scale_other_capital,
+    lifetime_hours, base_lifetime_hours, utilisation,
+    electricity_usd_per_kwh, scale_other_capital,
     buy_price_quote_time=None,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
@@ -364,8 +300,9 @@ def build_buy_pricing(
     if cpu is None:
         return None
 
-    gpu_capital = gpu["price_per_unit_usd"] * num_gpus * scale_other_capital
-    cpu_capital = cpu["price_per_unit_usd"] * num_cpus * scale_other_capital
+    capital_scale = gpu.get("capital_scale", scale_other_capital)
+    gpu_capital = gpu["price_per_unit_usd"] * num_gpus * capital_scale
+    cpu_capital = cpu["price_per_unit_usd"] * num_cpus * capital_scale
     gpu_power_w = gpu["tdp_w"] * num_gpus
     cpu_power_w = cpu["tdp_w"] * num_cpus
 
@@ -377,8 +314,11 @@ def build_buy_pricing(
     cpu_per_h = cpu_amort_per_h + cpu_energy_per_h
     return {
         "lifetime_hours": lifetime_hours,
+        "base_lifetime_hours": base_lifetime_hours,
+        "utilisation": utilisation,
         "electricity_usd_per_kwh": electricity_usd_per_kwh,
         "scale_other_capital": scale_other_capital,
+        **({"capital_scale": capital_scale} if "capital_scale" in gpu else {}),
         "gpu": {
             "key": gpu_key, "num": num_gpus,
             "price_per_unit_usd": gpu["price_per_unit_usd"],
@@ -580,6 +520,9 @@ def main() -> int:
     parser.add_argument("--buy-cpu-price", action="append", default=[])
     parser.add_argument("--buy-cpu-tdp", action="append", default=[])
     parser.add_argument("--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS)
+    parser.add_argument("--utilisation", "--utilization", dest="utilisation", type=float, default=DEFAULT_UTILISATION,
+                        help=("Average hardware utilisation in (0, 1]; effective buy lifetime "
+                              f"hours are --buy-lifetime-hours * utilisation (default: {DEFAULT_UTILISATION})"))
     parser.add_argument("--buy-electricity-usd-per-kwh", type=float, default=DEFAULT_ELECTRICITY_USD_PER_KWH)
     parser.add_argument("--buy-scale-other-capital", type=float, default=DEFAULT_SCALE_OTHER_CAPITAL)
     parser.add_argument("--buy-price-quote-time", default=None,
@@ -590,6 +533,11 @@ def main() -> int:
                              "and CPU for tool-wait time; reserved-worker charges both for full e2e latency.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    if not (0.0 < args.utilisation <= 1.0):
+        print("error: --utilisation must be in (0, 1]", file=sys.stderr)
+        return 2
+    effective_lifetime_hours = args.buy_lifetime_hours * args.utilisation
 
     root: Path = args.root.resolve()
     if not root.is_dir():
@@ -773,7 +721,9 @@ def main() -> int:
         buy_pricing = build_buy_pricing(
             gpu_key, num_gpus,
             gpu_specs=gpu_specs, cpu_specs=cpu_specs, gpu_host_cpu=gpu_host_cpu,
-            lifetime_hours=args.buy_lifetime_hours,
+            lifetime_hours=effective_lifetime_hours,
+            base_lifetime_hours=args.buy_lifetime_hours,
+            utilisation=args.utilisation,
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
             buy_price_quote_time=buy_price_quote_time,
