@@ -443,9 +443,9 @@ variables_defaults:
 
   imoanswerbench_image:
     sglang:
-      value: "ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312"
+      value: "ghcr.io/teas-project/imo-sglang:pt2.9.1-cuda13-py312"
     vllm:
-      value: "ghcr.io/yufan196884/imo-answerbench-env:latest"
+      value: "ghcr.io/teas-project/imo-answerbench-env:latest"
 
   # AgentCAP checkout used by imo-answerbench. *_ref can be pinned to a
   # specific commit/tag for reproducibility; "main" (tracking the default
@@ -474,9 +474,9 @@ variables_defaults:
 
   mcpatlas_image:
     sglang:
-      value: "ghcr.io/yufan196884/aimo3-sglang:pt2.9.1-cuda13-py312"
+      value: "ghcr.io/teas-project/imo-sglang:pt2.9.1-cuda13-py312"
     vllm:
-      value: "ghcr.io/yufan196884/imo-answerbench-env:latest"
+      value: "ghcr.io/teas-project/imo-answerbench-env:latest"
 
   # AgentCAP checkout used by mcp-atlas. Verbatim copy of imoanswerbench_*
   # today (both trace back to the same original shared block) -- not
