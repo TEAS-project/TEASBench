@@ -60,6 +60,15 @@ spec:
               secretKeyRef:
                 name: gemini-api-key
                 key: key
+          # mcp-atlas GTFA judge (OpenRouter -- see the mcp-atlas extra_setup
+          # rule in configs/config.yaml). optional: so benchmarks that don't
+          # judge via OpenRouter still schedule in clusters without the secret.
+          - name: OPENROUTER_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: openrouter-api-key
+                key: key
+                optional: true
           - name: GITHUB_RESULTS_TOKEN
             valueFrom:
               secretKeyRef:

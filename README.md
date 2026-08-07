@@ -55,7 +55,8 @@ Generation needs a Python environment with `pandas` and `pyyaml`. Run the genera
 
 | Secret | Key | Needed for |
 |---|---|---|
-| `gemini-api-key` | `key` | judge for `imo-answerbench`, `mcp-atlas` |
+| `gemini-api-key` | `key` | judge for `imo-answerbench` |
+| `openrouter-api-key` | `key` | judge for `mcp-atlas` (`kubectl create secret generic openrouter-api-key --from-literal=key=...`) |
 | `mcp-atlas-github-token` | `token` | `mcp-atlas` tool servers |
 | `mcp-atlas-brave-api-key` | `key` | `mcp-atlas` tool servers |
 
@@ -466,7 +467,8 @@ which are required depend on the benchmark(s) being run. Use the following table
 |-------------------------------------------------------|----------------------------------|--------------------------------|
 | `GIT_TOKEN`                                           | Push results to repo             | everything                     |
 | `HF_TOKEN`                                            | Download models from Hugging Face | everything                     |
-| `GEMINI_API_KEY`                                      | Judge                            | `imo-answerbench`, `mcp-atlas` |
+| `GEMINI_API_KEY`                                      | Judge                            | `imo-answerbench`              |
+| `OPENROUTER_API_KEY`                                  | Judge                            | `mcp-atlas`                    |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`                | Run Modal sandboxes              | `swe-bench-lite`               |
 | `GITHUB_TOKEN`, `BRAVE_API_KEY`, `ALCHEMY_API_KEY`, … | Tool server API keys (see below) | `mcp-atlas`                    |
 

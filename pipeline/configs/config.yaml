@@ -950,6 +950,26 @@ rules:
       gpu_memory_fraction: "0.85"
       batch_size: "256"
       tool_call_parser: "openai"
+      # Without --enable-auto-tool-choice vLLM accepts --tool-call-parser but
+      # never emits structured tool_calls, so the agent loop would see raw
+      # text and score zero without erroring.
+      enable_auto_tool_choice: true
+
+# mcp-atlas talks to the engine over the OpenAI chat API (protocol: openai in
+# pipeline/configs/agents/mcp-atlas_gptoss_*.yaml), so gpt-oss's harmony
+# reasoning/tool-call format must be parsed server-side. Same rationale and
+# same parser names as the swe-bench-lite engine-only rules further down:
+# scoped to the gpt-oss model family because it is the harmony format, not
+# mcp-atlas as such, that needs the parsers. vllm needs no reasoning_parser
+# rule (it auto-enables its gpt-oss reasoning parser) -- its tool-call parser
+# is set in the (benchmark, vllm) rule above.
+  - match:
+      benchmark: ["mcp-atlas"]
+      inference_engine: ["sglang"]
+      model: ["gpt-oss-120b", "gpt-oss-20b"]
+    agentic_server_flags:
+      reasoning_parser: "gpt-oss"
+      tool_call_parser: "gpt-oss"
 
   - match:
       benchmark: ["swe-bench-lite"]
@@ -1170,20 +1190,23 @@ rules:
           echo "MCP Atlas sidecar did not become ready within 120s." >&2
           exit 1
         fi
+    # Judge config for evaluator=gtfa. On AgentCAP main,
     # GTFAEvaluatorAdapter.__init__ (agent_cap/agents/evaluators.py) discards
-    # every constructor kwarg, so the judge: block in mcp-atlas_gptoss_*.yaml
-    # is NOT what actually configures the judge for evaluator=gtfa --
-    # agent_cap.evaluators.gtfa_eval.GTFAEvaluator reads EVAL_LLM_MODEL /
-    # EVAL_LLM_BASE_URL / EVAL_LLM_API_KEY from the environment directly (see
-    # docs/agentic-pipeline-design.md). Point it at the same Gemini endpoint
-    # imo-answerbench's judge already uses, reusing the GEMINI_API_KEY
-    # container env var (from the gemini-api-key secret) rather than a
-    # second copy of it.
+    # every constructor kwarg, so agent_cap.evaluators.gtfa_eval.GTFAEvaluator
+    # reads EVAL_LLM_MODEL / EVAL_LLM_BASE_URL / EVAL_LLM_API_KEY from the
+    # environment (see docs/agentic-pipeline-design.md); from AgentCAP PR #63
+    # onwards the adapter forwards the judge: block in
+    # mcp-atlas_gptoss_*.yaml, which then takes precedence over these
+    # exports. The values below match GTFAEvaluator's own built-in defaults
+    # (OpenRouter + google/gemini-3.1-flash-lite) and are kept identical to
+    # the yaml judge: blocks so both AgentCAP versions configure the same
+    # judge. OPENROUTER_API_KEY comes from the openrouter-api-key secret on
+    # EIDF (templates/agentic.yaml) and the instance env on Vast.ai.
     extra_setup:
       value: |
-        export EVAL_LLM_MODEL="gemini-3.1-flash-lite"
-        export EVAL_LLM_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai"
-        export EVAL_LLM_API_KEY="$GEMINI_API_KEY"
+        export EVAL_LLM_MODEL="google/gemini-3.1-flash-lite"
+        export EVAL_LLM_BASE_URL="https://openrouter.ai/api/v1"
+        export EVAL_LLM_API_KEY="$OPENROUTER_API_KEY"
     teas_env_exports:
       value: |
         export TEAS_BACKEND="mcp-atlas-localmcp"

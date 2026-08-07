@@ -35,12 +35,21 @@ if [ -z "${HF_TOKEN:-}" ]; then
   exit 1
 fi
 
-# Needed by the imo-answerbench and mcp-atlas judges (both call out to the same Gemini
-# endpoint -- see pipeline/configs/config.yaml's imo-answerbench/mcp-atlas rules). Not every
-# row needs it (swe-bench-lite doesn't), but it's validated up front regardless, the same way
-# run_benchmarks.sh validates OPENAI_API_KEY up front even though only arena-hard rows use it.
+# Needed by the imo-answerbench judge (see pipeline/configs/config.yaml's imo-answerbench
+# rules). Not every row needs it (mcp-atlas judges via OpenRouter, swe-bench-lite has no LLM
+# judge), but it's validated up front regardless, the same way run_benchmarks.sh validates
+# OPENAI_API_KEY up front even though only arena-hard rows use it.
 if [ -z "${GEMINI_API_KEY:-}" ]; then
   echo "ERROR: GEMINI_API_KEY environment variable is not set" >&2
+  exit 1
+fi
+
+# Needed by the mcp-atlas GTFA judge (OpenRouter, google/gemini-3.1-flash-lite -- see the
+# mcp-atlas extra_setup rule in pipeline/configs/config.yaml). Only checked when the CSV
+# actually contains mcp-atlas rows, so runs of the other benchmarks don't need an OpenRouter
+# key provisioned.
+if echo "$BENCHMARK_CSV" | base64 -d | grep -q "mcp-atlas" && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  echo "ERROR: OPENROUTER_API_KEY environment variable is not set (required for mcp-atlas rows)" >&2
   exit 1
 fi
 
