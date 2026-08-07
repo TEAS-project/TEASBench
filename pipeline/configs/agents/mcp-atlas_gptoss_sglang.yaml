@@ -5,25 +5,27 @@
 agents:
   agent:
     name: gpt-oss
-    base_url: http://127.0.0.1:8000
+    # The openai protocol posts to <base_url>/chat/completions, so /v1 must be
+    # part of base_url here (the harmony protocol's native /generate endpoint
+    # was the opposite: rooted at the server root, no /v1).
+    base_url: http://127.0.0.1:8000/v1
     api_key: EMPTY
-    protocol: harmony
+    protocol: openai
     engine: sglang
     max_tokens: 131072
     temperature: 1.0
     top_p: 1.0
 
-# NOTE: this judge: block is NOT what actually configures the judge for
-# evaluator=gtfa. GTFAEvaluatorAdapter.__init__ (agent_cap/agents/evaluators.py)
-# discards every constructor kwarg and always builds a bare GTFAEvaluator(),
-# which reads its judge config from EVAL_LLM_MODEL / EVAL_LLM_BASE_URL /
-# EVAL_LLM_API_KEY in the environment instead (see
-# agent_cap/evaluators/gtfa_eval.py and docs/agentic-pipeline-design.md).
-# Those env vars are set by the mcp-atlas rule's extra_setup block in
-# config.yaml. This block is kept for documentation/consistency with the
-# other five agent config files, and would take effect immediately if
-# GTFAEvaluatorAdapter is ever changed to honour it.
+# NOTE: how much this judge: block matters depends on the AgentCAP version.
+# On AgentCAP main, GTFAEvaluatorAdapter.__init__
+# (agent_cap/agents/evaluators.py) discards every constructor kwarg and builds
+# a bare GTFAEvaluator(), which reads EVAL_LLM_MODEL / EVAL_LLM_BASE_URL /
+# EVAL_LLM_API_KEY from the environment (set by the mcp-atlas rule's
+# extra_setup block in config.yaml). From AgentCAP PR #63 (fix-judge-schema)
+# onwards, the adapter forwards this block, and it takes precedence over those
+# env vars. Keep this block and the extra_setup exports in agreement so both
+# AgentCAP versions configure the same judge.
 judge:
-  name: gemini-3.1-flash-lite
-  base_url: https://generativelanguage.googleapis.com/v1beta/openai
-  api_key: ${GEMINI_API_KEY}
+  name: google/gemini-3.1-flash-lite
+  base_url: https://openrouter.ai/api/v1
+  api_key: ${OPENROUTER_API_KEY}

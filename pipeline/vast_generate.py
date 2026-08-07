@@ -73,14 +73,17 @@ def _generate_script_text(engine, gpu, num_gpu, disk_gb, encoded_csv, private_im
 
             """)
 
-    # Secrets differ by family. The MoE client judges arena-hard with OpenAI; the agentic
-    # judges (imo-answerbench, mcp-atlas) use Gemini, and swe-bench-lite additionally needs
-    # Modal credentials because Modal is the sandbox substrate on Vast.ai (swe-rex supports
-    # it natively, so unlike EIDF there is no sandbox provider here).
+    # Secrets differ by family. The MoE client judges arena-hard with OpenAI; the
+    # imo-answerbench judge uses Gemini, the mcp-atlas GTFA judge uses OpenRouter, and
+    # swe-bench-lite additionally needs Modal credentials because Modal is the sandbox
+    # substrate on Vast.ai (swe-rex supports it natively, so unlike EIDF there is no
+    # sandbox provider here).
     if family == "agentic":
         secrets = "GIT_TOKEN, HF_TOKEN, GEMINI_API_KEY"
         if benchmarks and "swe-bench-lite" in benchmarks:
             secrets += ", MODAL_TOKEN_ID, MODAL_TOKEN_SECRET"
+        if benchmarks and "mcp-atlas" in benchmarks:
+            secrets += ", OPENROUTER_API_KEY"
         # No family env var is needed: the agentic image's entrypoint only ever
         # runs the agentic runner.
         family_env = ""
