@@ -117,6 +117,49 @@ class MoeComputeSparsityTests(unittest.TestCase):
         self.assertEqual(result["prefill"]["method"], "identity-bs1")
         self.assertEqual(result["decode"]["output_tokens_per_s"], 100.0)
 
+    def test_null_ttft_keeps_decode_metrics_and_nulls_only_prefill(self):
+        """A null ttft no longer skips the run: decode needs only tpot.
+
+        Prefill S-MBU nulls for want of a pass latency, but decode S-MBU/S-MFU
+        and the decode rate publish from the run's own tpot and batch profile.
+        """
+        metrics = moe_metrics(ttft=None)
+        resolved = resolve_prefill_rate(metrics, batch_regime="batch-size-default")
+
+        result = compute_for_run(
+            metrics, moe_cfg(), "NVIDIA-B200-183GB", 1, "bfloat16",
+            avg_prefill_len=60.0, avg_decode_ctx_len=210.0,
+            concurrent=True,
+            prefill_rate=resolved,
+        )
+
+        self.assertNotIn("skipped", result)
+        self.assertIsNone(result["prefill"]["ttft_s"])
+        self.assertIsNone(result["prefill"]["S_MBU"])
+        self.assertEqual(result["decode"]["output_tokens_per_s"], 1600.0)
+        self.assertGreater(result["decode"]["S_MBU"], 0.0)
+        self.assertGreater(result["decode"]["S_MFU"], 0.0)
+
+    def test_null_tpot_nulls_decode_metrics_without_skipping(self):
+        """The reverse gap: no tpot nulls every decode metric, prefill stands."""
+        metrics = moe_metrics(tpot=0, prefill_pass_latency_s=0.4)
+        resolved = resolve_prefill_rate(metrics, batch_regime="batch-size-default")
+
+        result = compute_for_run(
+            metrics, moe_cfg(), "NVIDIA-B200-183GB", 1, "bfloat16",
+            avg_prefill_len=60.0, avg_decode_ctx_len=210.0,
+            concurrent=True,
+            prefill_rate=resolved,
+        )
+
+        self.assertNotIn("skipped", result)
+        self.assertIsNone(result["decode"]["tpot_s"])
+        self.assertIsNone(result["decode"]["output_tokens_per_s"])
+        self.assertIsNone(result["decode"]["S_MBU"])
+        self.assertIsNone(result["decode"]["S_MFU"])
+        self.assertEqual(result["prefill"]["prefill_tokens_per_s"], 500.0)
+        self.assertGreater(result["prefill"]["S_MBU"], 0.0)
+
     def test_fixed_length_batch_size_one_dir_is_detected(self):
         from pathlib import Path
         from postprocessing.moe_cost_metrics.compute_sparsity_metrics import describe_run

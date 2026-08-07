@@ -316,8 +316,10 @@ def compute_for_run(
     prefill_act = ea.get("avg_expert_activation_prefill") or 0
     decode_act = ea.get("avg_expert_activation_decode") or 0
     has_activation = prefill_act > 0 or decode_act > 0
-    ttft = perf.get("ttft")
-    tpot = perf.get("tpot")
+    # Zero is a sentinel here, not a measurement: normalise falsy timings to None so
+    # each phase's guards below read one condition.
+    ttft = perf.get("ttft") or None
+    tpot = perf.get("tpot") or None
     batch_profile = metrics.get("batch_token_profile") or {}
     output_tps = perf.get("output_tokens_per_s") or 0
 
@@ -338,8 +340,8 @@ def compute_for_run(
     ):
         avg_decode_ctx_len = float(profile_prefill_len) + float(profile_decode_tokens) / 2.0
 
-    if ttft is None or tpot is None or not ttft or not tpot:
-        return {"skipped": "ttft/tpot missing"}
+    # No run-level timing gate: each phase's metrics guard on their own inputs and
+    # publish null where the input is absent. A null ttft says nothing about decode.
 
     model_name = hf_cfg._d.get("_name_or_path", "")
     cfg_d = hf_cfg._d
@@ -454,7 +456,7 @@ def compute_for_run(
     is_dense = num_moe_layers == 0
     prefill_smbu = (
         smbu(prefill_act, pass_s, kv_size_prefill_TB)
-        if (prefill_act > 0 or is_dense) and precision_evidenced else None
+        if pass_s and (prefill_act > 0 or is_dense) and precision_evidenced else None
     )
     prefill_smfu = (
         smfu(prefill_tp)
@@ -462,7 +464,9 @@ def compute_for_run(
         and precision_evidenced else None
     )
 
-    if isinstance(profile_decode_bs, (int, float)) and profile_decode_bs > 0:
+    if tpot is None:
+        decoding_tp = None
+    elif isinstance(profile_decode_bs, (int, float)) and profile_decode_bs > 0:
         decoding_tp = float(profile_decode_bs) / tpot
     elif concurrent:
         # A concurrent run without a measured decode batch has no node-level rate:
@@ -477,7 +481,7 @@ def compute_for_run(
     # that understates long-context runs. Withhold it instead.
     decode_smbu = (
         smbu(decode_act, tpot, kv_size_decode_TB)
-        if (decode_act > 0 or is_dense) and avg_decode_ctx_len > 0
+        if tpot and (decode_act > 0 or is_dense) and avg_decode_ctx_len > 0
         and precision_evidenced else None
     )
     decode_smfu = (
@@ -668,14 +672,9 @@ def main() -> int:
             skipped += 1
             reason = str(result["skipped"]).split(",")[0]
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-            # A withheld ttft/tpot invalidates any sidecar computed from the run's earlier
-            # values; remove it so the skip is effective, not shadowed by a stale file.
-            # Environmental skips (missing hardware spec, and the config/model skips above)
-            # keep the existing sidecar — a transient lookup failure must not delete it.
-            if reason == "ttft/tpot missing":
-                stale = sparsity_path_for(f)
-                if stale.exists() and not args.dry_run:
-                    stale.unlink()
+            # Remaining skips are environmental (missing hardware spec, and the config/model
+            # skips above); they keep any existing sidecar — a transient lookup failure must
+            # not delete it.
             continue
 
         payload = {
