@@ -50,6 +50,7 @@ HF_MODEL_MAP={
 # Verify model requirement with `hf download --dry-run <model name>`
 # and add some extra as buffer for the rest of the software.
 MODEL_DISK_GB_MAP={
+    "Qwen3-4B": 60,                             # model = 8.1 GB; the software stack dominates here
     "gpt-oss-20b": 60,                          # model = 27.5 GB
     "gpt-oss-120b": 160,                        # model = 130.5 GB
     "Qwen3-235B-A22B-Instruct-2507": 550,       # model = 470.2 GB
@@ -71,10 +72,15 @@ EIDF_GPU_MAP={
 # job's throwaway /dev/shm clone of the results repo might also be named after.
 PVC_ARCHIVE_DIR = "TEAS_Development_Results_Private-archive-nogit"
 
+# Exact Vast.ai gpu_name values: the search API matches these literally, so a near-miss
+# returns an empty offer list rather than an error. The Blackwell parts list under their
+# bare names -- "B200_SXM" and "B300_SXM" match nothing.
 VAST_GPU_MAP={
     "A100": "A100_SXM4",
     "H100": "H100_SXM",
     "H200": "H200_SXM",
+    "B200": "B200",
+    "B300": "B300",
 }
 
 # Human-readable GPU display names, used for the TEAS_GPU_TYPE env var read by

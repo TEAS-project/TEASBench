@@ -86,6 +86,13 @@ On EIDF and other clusters that do not grant pods role-based access control (RBA
 
 Predefined validated benchmark parameters are provided in CSV files in [`./experiments/`](./experiments/).
 
+One file is marked differently. `moe-experiments-vastai-beta.csv` holds the B200 and B300
+coordinates behind published results, reconstructed from those runs' own records. **Beta means it
+has not been re-executed through this pipeline**, unlike the other CSVs here — the rows describe
+hardware we measured on, not a matrix we have re-run end to end. Marketplace supply and price move
+constantly, and the largest node sizes are the thinnest, so each generated script opens by searching
+for matching offers: read what that returns before committing to a run.
+
 
 **MoE:**
 
