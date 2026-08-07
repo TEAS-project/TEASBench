@@ -65,6 +65,11 @@ RUN python3 -m pip install --ignore-installed --no-cache-dir \
     git clone https://github.com/SWE-agent/SWE-agent.git /opt/swe_agent && \
     python3 -m pip install --ignore-installed --no-cache-dir -e /opt/swe_agent
 
+# agent_cap drives a Jupyter kernel so we also need this and ipykernel.
+# math-verify and sympy needed for IMO-Answerbench.
+RUN python3 -m pip install --no-cache-dir \
+        jupyter_client ipykernel 'math-verify>=0.7' 'sympy>=1.12'
+
 # Patch SWE-agent's single litellm.completion call to route through
 # agent_cap.sweagent_streaming, which is what captures per-call TTFT/TPOT and the
 # visible/reasoning/cached token split. Without this the agentic metrics are empty.

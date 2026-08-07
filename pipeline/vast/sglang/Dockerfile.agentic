@@ -72,7 +72,9 @@ RUN python3 -m pip install --no-cache-dir \
         'huggingface-hub>=0.34.0,<1.0' 'tokenizers>=0.22.0,<=0.23.0'
 
 # agent_cap drives a Jupyter kernel so we also need this and ipykernel.
-RUN python3 -m pip install --no-cache-dir jupyter_client ipykernel
+# math-verify and sympy needed for IMO-Answerbench.
+RUN python3 -m pip install --no-cache-dir \
+        jupyter_client ipykernel 'math-verify>=0.7' 'sympy>=1.12'
 
 # Patch SWE-agent's single litellm.completion call to route through
 # agent_cap.sweagent_streaming, which is what captures per-call TTFT/TPOT and the
