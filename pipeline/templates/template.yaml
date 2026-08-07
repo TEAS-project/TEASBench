@@ -189,7 +189,8 @@ spec:
                 publish_files=( $PVC_RUN_OUTPUT_DIR/metrics*.json \
                                 $PVC_RUN_OUTPUT_DIR/metadata*.json \
                                 $PVC_RUN_OUTPUT_DIR/*.yaml \
-                                $PVC_RUN_OUTPUT_DIR/timings.json )
+                                $PVC_RUN_OUTPUT_DIR/timings.json \
+                                $PVC_RUN_OUTPUT_DIR/expert_distribution_record*.jsonl )
                 shopt -u nullglob
                 if [ ${#publish_files[@]} -gt 0 ]; then
                     cp "${publish_files[@]}" "$LOCAL_RUN_OUTPUT_DIR"/
