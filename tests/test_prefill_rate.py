@@ -15,7 +15,7 @@ from postprocessing.moe_cost_metrics.prefill_rate import (
 )
 
 
-def metrics(prompt=None, batch=None, ttft=None, pass_s=None):
+def metrics(prompt=None, batch=None, ttft=None, pass_s=None, nominal=None):
     performance = {}
     if ttft is not None:
         performance["ttft"] = ttft
@@ -26,6 +26,8 @@ def metrics(prompt=None, batch=None, ttft=None, pass_s=None):
         profile["prefill_tokens_per_request"] = prompt
     if batch is not None:
         profile["prefill_avg_batch_size"] = batch
+    if nominal is not None:
+        profile["prefill_tokens"] = nominal
     return {"performance": performance, "batch_token_profile": profile}
 
 
@@ -83,12 +85,37 @@ class ExactArmTests(unittest.TestCase):
 
     def test_exact_profile_publishes_nominal_over_physical_elapsed(self):
         res = resolve_prefill_rate(
-            metrics(prompt=390.0, batch=64.0, ttft=2.0, pass_s=0.5), exact_profile()
+            metrics(prompt=390.0, batch=64.0, ttft=2.0, pass_s=0.5, nominal=100_000),
+            exact_profile(),
         )
         self.assertEqual(res, {
             "value": 100_000 / 25.0, "basis": "measured", "method": "trace-exact",
             "token_basis": "nominal-attempted", "reason": None,
         })
+
+    def test_repaired_metrics_numerator_invalidates_the_profile(self):
+        # The profile's numerator is a build-time copy of the run's nominal
+        # token total; a run whose metrics were repaired afterwards must not
+        # keep publishing the frozen copy as measured.
+        res = resolve_prefill_rate(
+            metrics(prompt=390.0, batch=64.0, ttft=2.0, pass_s=0.5, nominal=90_000),
+            exact_profile(),
+        )
+        self.assertEqual(res["method"], "hybrid-rung1")
+        self.assertEqual(res["basis"], "estimated")
+
+    def test_profile_without_a_live_metrics_numerator_is_stale_evidence(self):
+        res = resolve_prefill_rate(
+            metrics(prompt=390.0, batch=64.0, ttft=2.0, pass_s=0.5), exact_profile()
+        )
+        self.assertEqual(res["method"], "hybrid-rung1")
+
+    def test_stale_profile_with_no_estimate_evidence_is_null(self):
+        res = resolve_prefill_rate(
+            metrics(batch=64.0, ttft=2.0, nominal=90_000), exact_profile()
+        )
+        self.assertEqual(res["value"], None)
+        self.assertEqual(res["reason"], "no-token-evidence")
 
     def test_unknown_profile_schema_is_ignored_not_partially_decoded(self):
         res = resolve_prefill_rate(
@@ -219,7 +246,8 @@ class RunTreeHelperTests(unittest.TestCase):
             run = Path(td) / "batch-size-default_input1024_output1024" / "20990101-0000"
             run.mkdir(parents=True)
             metrics_path = run / "metrics.json"
-            metrics_path.write_text(json.dumps(metrics(batch=16.0, pass_s=2.0)))
+            metrics_path.write_text(
+                json.dumps(metrics(batch=16.0, pass_s=2.0, nominal=100_000)))
             (run / "run.sh").write_text(LAUNCH_FIXED + "\n")
             res = resolve_for_metrics_path(
                 metrics_path, json.loads(metrics_path.read_text()))

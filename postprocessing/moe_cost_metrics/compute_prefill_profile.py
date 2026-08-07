@@ -15,8 +15,10 @@ no sidecar, never a partial one. The gates:
   - exactly one trace file and a readable client output record beside it;
   - the client record is complete (contiguous 0-based indices);
   - the recording window is provable: at most a bounded, whole-request leading
-    preamble is excluded, and the retained request ids are complete, disjoint
-    from the preamble, and exactly equal the client success cohort;
+    preamble is excluded, the retained request ids are complete, disjoint from
+    the preamble, and count-match the client success cohort — and a preamble
+    may be excluded at all only when every client attempt succeeded, since
+    with any client failure a trimmed count-match cannot prove membership;
   - every accepted step carries decodable per-request token evidence
     (integer `extend_len`, a request id, one positive elapsed time) and each
     retained request completes exactly once (`is_last_chunk`);
@@ -144,7 +146,7 @@ def profile_steps(prefills: list[tuple[int, dict]]) -> dict:
 
 
 def select_client_prefills(
-    trace_rows: list[dict], client_successes: int,
+    trace_rows: list[dict], client_successes: int, client_failures: int,
 ) -> tuple[list[tuple[int, dict]], list[tuple[int, dict]]]:
     """Split the trace's prefill steps into (excluded preamble, client cohort).
 
@@ -152,6 +154,14 @@ def select_client_prefills(
     retained request set must exactly match the client success count, with no
     excluded request reappearing. Minimal trimming is chosen so a full file
     that already matches the cohort is never cut.
+
+    The client record carries no server request ids, so a count match is the
+    only membership evidence. An untrimmed window is provable on the count
+    alone: a client-failed request whose prefill reached the server would
+    inflate the count past the success cohort. A trimmed window is provable
+    only when every client attempt succeeded — with any failure, a window
+    that count-matches after trimming cannot be told apart from one that
+    dropped a real success and kept the failed request's steps.
     """
     prefills = [
         (pos, row) for pos, row in enumerate(trace_rows)
@@ -161,7 +171,11 @@ def select_client_prefills(
         _fail("no-prefill-steps")
     empty = {"ids": set(), "completed": set(), "duplicate_completions": [],
              "incomplete": []}
-    for trim in range(0, min(MAX_LEADING_PREAMBLE_STEPS, len(prefills)) + 1):
+    max_trim = (
+        min(MAX_LEADING_PREAMBLE_STEPS, len(prefills))
+        if client_failures == 0 else 0
+    )
+    for trim in range(0, max_trim + 1):
         excluded, accepted = prefills[:trim], prefills[trim:]
         try:
             acc = profile_steps(accepted)
@@ -255,7 +269,8 @@ def build_profile(metrics_path: Path) -> Optional[dict]:
         _fail("client-record-incomplete")
 
     trace_rows = read_jsonl(trace_path)
-    excluded, accepted = select_client_prefills(trace_rows, successes)
+    excluded, accepted = select_client_prefills(
+        trace_rows, successes, attempts - successes)
     acc = profile_steps(accepted)
     exc = profile_steps(excluded) if excluded else {
         "ids": set(), "forwarded": 0, "elapsed": 0.0, "indices": []}

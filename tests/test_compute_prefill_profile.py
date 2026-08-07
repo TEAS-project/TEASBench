@@ -18,7 +18,8 @@ def req(req_id, extend_len, last=True):
     return {"req_id": req_id, "extend_len": extend_len, "is_last_chunk": last}
 
 
-def write_run(root: Path, *, dp=None, trace_rows=None, metadata=None) -> Path:
+def write_run(root: Path, *, dp=None, trace_rows=None, metadata=None,
+              client=((0, True), (1, True))) -> Path:
     run = (root / "moe" / "prov" / "eng" / "model" / "ds_2samples" / "gpux1"
            / "batch-size-default" / "20990101-0000")
     run.mkdir(parents=True)
@@ -33,7 +34,7 @@ def write_run(root: Path, *, dp=None, trace_rows=None, metadata=None) -> Path:
         }
     (run / "metadata.json").write_text(json.dumps(metadata))
     (run / "output_data.jsonl").write_text("".join(
-        json.dumps({"index": i, "success": i != 2}) + "\n" for i in range(3)
+        json.dumps({"index": i, "success": ok}) + "\n" for i, ok in client
     ))
     if trace_rows is None:
         # One warm-up probe step, then the two successful client requests:
@@ -72,7 +73,7 @@ class ComputePrefillProfileTests(unittest.TestCase):
             self.assertEqual(profile["prefill_physical_steps"], 2)
             self.assertEqual(profile["excluded_leading_steps"], 1)
             self.assertEqual(profile["cohort"], {
-                "attempts": 3, "successes": 2, "failures": 1,
+                "attempts": 2, "successes": 2, "failures": 0,
                 "trace_request_ids": 2,
                 "trace_request_ids_sha256": profile["cohort"]["trace_request_ids_sha256"],
             })
@@ -131,6 +132,44 @@ class ComputePrefillProfileTests(unittest.TestCase):
             result = run_script(root)
             self.assertIn("no-exact-client-cohort-window", result.stdout)
             self.assertFalse((run / "prefill_profile.json").exists())
+
+    def test_trimmed_window_with_a_client_failure_is_gated(self):
+        # 3 attempts, 2 successes, and a trace of three whole-request steps.
+        # Trimming the first step count-matches the success cohort, but the
+        # evidence cannot show whether the trimmed step was a warm-up probe
+        # or a real success displaced by the failed request's server-side
+        # prefill — the untrimmed count mismatch is the only provable fact.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = write_run(
+                root,
+                client=((0, True), (1, True), (2, False)),
+                trace_rows=[
+                    prefill_step(0, [req("a", 100)], 2.0),
+                    prefill_step(1, [req("f", 15)], 0.3),
+                    prefill_step(2, [req("b", 35)], 0.7),
+                ])
+            result = run_script(root)
+            self.assertIn("no-exact-client-cohort-window", result.stdout)
+            self.assertFalse((run / "prefill_profile.json").exists())
+
+    def test_untrimmed_window_with_a_client_failure_still_profiles(self):
+        # The failed request never reached the server: the full trace
+        # count-matches the success cohort with nothing excluded, which is
+        # provable on the count alone.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = write_run(
+                root,
+                client=((0, True), (1, True), (2, False)),
+                trace_rows=[
+                    prefill_step(0, [req("r1", 100)], 1.0),
+                    prefill_step(1, [req("r2", 50)], 0.25),
+                ])
+            run_script(root)
+            profile = json.loads((run / "prefill_profile.json").read_text())
+            self.assertEqual(profile["excluded_leading_steps"], 0)
+            self.assertEqual(profile["cohort"]["failures"], 1)
 
     def test_run_without_trace_keeps_an_existing_profile(self):
         with tempfile.TemporaryDirectory() as td:

@@ -165,7 +165,14 @@ def resolve_prefill_rate(
     # 2. Exact: the run's own trace supported a complete physical prefill
     #    profile. Published on the nominal-attempted numerator (the ruled
     #    basis); the forwarded-token variant stays in the profile as evidence.
-    if valid_prefill_profile(profile):
+    #    The profile's numerator is a build-time copy of the run's own nominal
+    #    token total; if the live metrics no longer carry that exact value
+    #    (a repaired run), the profile is stale evidence and resolution falls
+    #    through to the arms that read the metrics live.
+    if valid_prefill_profile(profile) and (
+        profile["prefill_nominal_attempted_tokens"]
+        == batch_profile.get("prefill_tokens")
+    ):
         return _resolved(
             profile["prefill_nominal_attempted_tokens"]
             / profile["prefill_step_elapsed_s"],
