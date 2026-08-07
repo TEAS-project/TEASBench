@@ -71,7 +71,8 @@ else:
 VASTAI_PRICING_URL = "https://vast.ai/pricing"
 DEFAULT_RENT_PRICE_SOURCE = VASTAI_PRICING_URL
 
-DEFAULT_LIFETIME_HOURS = 3 * 365 * 24
+DEFAULT_LIFETIME_HOURS = 5 * 365 * 24
+DEFAULT_UTILISATION = 0.9
 DEFAULT_ELECTRICITY_USD_PER_KWH = 0.15
 DEFAULT_SCALE_OTHER_CAPITAL = 1.2
 
@@ -286,7 +287,8 @@ def need_rent_prices_message(needed: list[str], have: dict[str, float]) -> str:
 def build_buy_pricing(
     gpu_key: str, num_gpus: int,
     *, gpu_specs, cpu_specs, gpu_host_cpu,
-    lifetime_hours, electricity_usd_per_kwh, scale_other_capital,
+    lifetime_hours, base_lifetime_hours, utilisation,
+    electricity_usd_per_kwh, scale_other_capital,
     buy_price_quote_time=None,
 ) -> Optional[dict]:
     gpu = gpu_specs.get(gpu_key)
@@ -312,6 +314,8 @@ def build_buy_pricing(
     cpu_per_h = cpu_amort_per_h + cpu_energy_per_h
     return {
         "lifetime_hours": lifetime_hours,
+        "base_lifetime_hours": base_lifetime_hours,
+        "utilisation": utilisation,
         "electricity_usd_per_kwh": electricity_usd_per_kwh,
         "scale_other_capital": scale_other_capital,
         **({"capital_scale": capital_scale} if "capital_scale" in gpu else {}),
@@ -516,6 +520,9 @@ def main() -> int:
     parser.add_argument("--buy-cpu-price", action="append", default=[])
     parser.add_argument("--buy-cpu-tdp", action="append", default=[])
     parser.add_argument("--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS)
+    parser.add_argument("--utilisation", "--utilization", dest="utilisation", type=float, default=DEFAULT_UTILISATION,
+                        help=("Average hardware utilisation in (0, 1]; effective buy lifetime "
+                              f"hours are --buy-lifetime-hours * utilisation (default: {DEFAULT_UTILISATION})"))
     parser.add_argument("--buy-electricity-usd-per-kwh", type=float, default=DEFAULT_ELECTRICITY_USD_PER_KWH)
     parser.add_argument("--buy-scale-other-capital", type=float, default=DEFAULT_SCALE_OTHER_CAPITAL)
     parser.add_argument("--buy-price-quote-time", default=None,
@@ -526,6 +533,11 @@ def main() -> int:
                              "and CPU for tool-wait time; reserved-worker charges both for full e2e latency.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    if not (0.0 < args.utilisation <= 1.0):
+        print("error: --utilisation must be in (0, 1]", file=sys.stderr)
+        return 2
+    effective_lifetime_hours = args.buy_lifetime_hours * args.utilisation
 
     root: Path = args.root.resolve()
     if not root.is_dir():
@@ -709,7 +721,9 @@ def main() -> int:
         buy_pricing = build_buy_pricing(
             gpu_key, num_gpus,
             gpu_specs=gpu_specs, cpu_specs=cpu_specs, gpu_host_cpu=gpu_host_cpu,
-            lifetime_hours=args.buy_lifetime_hours,
+            lifetime_hours=effective_lifetime_hours,
+            base_lifetime_hours=args.buy_lifetime_hours,
+            utilisation=args.utilisation,
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
             buy_price_quote_time=buy_price_quote_time,

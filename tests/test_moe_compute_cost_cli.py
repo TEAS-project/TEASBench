@@ -163,7 +163,7 @@ class MoeComputeCostCliTests(unittest.TestCase):
 
             cost = json.loads((run / "cost.json").read_text())
             buy = cost["buy"]
-            expected_rate_h = 2_500_000 / (3 * 365 * 24) + 23 * 0.15
+            expected_rate_h = 2_500_000 / (5 * 365 * 24 * 0.9) + 23 * 0.15
             self.assertEqual(buy["total_capital_usd"], 2_500_000)
             self.assertEqual(buy["total_power_w"], 23_000)
             self.assertEqual(buy["scale_other_capital"], 1.2)

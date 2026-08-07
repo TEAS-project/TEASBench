@@ -79,7 +79,8 @@ else:
 VASTAI_PRICING_URL = "https://vast.ai/pricing"
 DEFAULT_RENT_PRICE_SOURCE = VASTAI_PRICING_URL
 
-DEFAULT_LIFETIME_HOURS = 3 * 365 * 24
+DEFAULT_LIFETIME_HOURS = 5 * 365 * 24
+DEFAULT_UTILISATION = 0.9
 DEFAULT_ELECTRICITY_USD_PER_KWH = 0.15
 DEFAULT_SCALE_OTHER_CAPITAL = 1.2
 
@@ -604,13 +605,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS,
-        help=f"Server calendar lifetime hours before utilisation (default: {DEFAULT_LIFETIME_HOURS} = 3 yr)",
+        help=f"Server calendar lifetime hours before utilisation (default: {DEFAULT_LIFETIME_HOURS} = 5 yr)",
     )
     parser.add_argument(
-        "--utilisation", "--utilization", dest="utilisation", type=float, default=1.0,
+        "--utilisation", "--utilization", dest="utilisation", type=float, default=DEFAULT_UTILISATION,
         help=(
             "Average hardware utilisation in (0, 1]; effective buy lifetime "
-            "hours are --buy-lifetime-hours * utilisation (default: 1.0)"
+            f"hours are --buy-lifetime-hours * utilisation (default: {DEFAULT_UTILISATION})"
         ),
     )
     parser.add_argument(
