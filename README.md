@@ -4,19 +4,19 @@ Uniting Models, Algorithms, and System Innovators with Top-Down Evolutionary Ben
 
 🌐 **Website:** [www.teasbench.com](https://www.teasbench.com)
 
-**TEASBench** is a benchmark suite developed to measure the **cost**, **accuracy**, and **performance** of AI inference on **realistic state-of-the-art workloads** running on **diverse hardware architectures**. It is developed in the TEAS (**T**racking **E**volving **A**I and **S**ystems) project funded by **[ARIA](https://aria.org.uk/)** as part of the ["Scaling compute"](https://aria.org.uk/opportunity-spaces/nature-computes-better/scaling-compute/) programme. 
+**TEASBench** is a benchmark suite and toolkit developed to measure the **cost**, **accuracy**, and **performance** of AI inference on **realistic state-of-the-art workloads** running on **diverse hardware architectures**. It is developed in the TEAS (**T**racking **E**volving **A**I and **S**ystems) project funded by **[ARIA](https://aria.org.uk/)** as part of the ["Scaling compute"](https://aria.org.uk/opportunity-spaces/nature-computes-better/scaling-compute/) programme. 
 
 In contrast to benchmarks that use fixed (short) context lengths, TEASBench does not artifically constrain input and output sequences to fixed numbers of tokens.  This enables assessment of accuracy and means TEASBench is more capable of exposing **real-world hardware limitations**. 
 
-TEASBench is continuously evolving to track new and emergent workloads following a 6-monthly release cycle. The August 2026 release of TEASBench capture recent shifts towards **sparse Mixture-of-Experts**, **reasoning models**, and **agentic tool use**. 
+TEASBench is continuously evolving to track new and emergent workloads and hardware following a 6-monthly release cycle. The August 2026 release of TEASBench capture recent shifts towards **sparse Mixture-of-Experts**, **reasoning models**, and **agentic tool use**. 
 
 ---
 
-## 0. TEASBench Workloads, Models, and Datasets
+## TEASBench Workloads, Models, and Datasets
 
 The benchmarks in this release cover two workload classes / families that jointly characterise contemporary production traffic while stressing inference systems in distinct ways. The first consists of **basic tasks** (single-turn chat) on relatively short input and output contexts. Secondly, to track the state of the art we include a workload based on **reasoning and agentic** workflows. The long outputs, multi-turn structure, and tool-calling traces in this workload yield latency and cost profiles unlike traditional inference workloads. 
 
-The TEAS benchmarks use mostly Mixture of Experts (MoE) models as they represent the majority of state-of-the-art open-source LLMs, as well as a small dense model (`qwen3-4b`) as a low memory requirement control that enables comparison across a wide range of devices. These are served using vLLM or SGLang on a range of GPUs including NVIDIA A100, H100, H200, B200, B300, GB10, AMD MI355X (as well as custom engines for emerging hardware, see §10).
+The TEAS benchmarks use mostly Mixture of Experts (MoE) models as they represent the majority of state-of-the-art open-source LLMs, as well as a small dense model (`qwen3-4b`) as a low memory requirement control that enables comparison across a wide range of devices. These are served using vLLM or SGLang on a range of GPUs including NVIDIA A100, H100, H200, B200, B300, GB10, AMD MI355X (as well as custom engines for emerging hardware, see [§10](#support-for-emerging-hardware)).
 
 | Family/workload | Models | Benchmark Datasets |
 |---|---|---|
@@ -70,15 +70,15 @@ bash eidf/setup/setup_swebench_env.sh
   This installs `agent_cap`, `swe-rex` and `swebench` into a Python venv, clones SWE-agent and applies
   and verifies AgentCAP's streaming patch, then writes `env.sh` (environment setup) and `versions.json` (recorded into each run's metadata). 
   
-On EIDF and other clusters that do not grant pods role-based access control (RBAC), SWE-bench Lite benchmarks are launched not as an unattended K8s Job but using a bash driver script on the login node that can be run interactively or backgrounded - see §4.6 and §4.7. 
+On EIDF and other clusters that do not grant pods role-based access control (RBAC), SWE-bench Lite benchmarks are launched not as an unattended K8s Job but using a bash driver script on the login node that can be run interactively or backgrounded - see [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf) and [§4.7](#47-swe-bench-lite-on-eidf). 
 
-> On EIDF and other clusters that do not grant pods RBAC, SWE-bench experiments are run using TEASBench's `PortForwardK8sProvider` mechanism described in §4.6 and §4.7. On clusters that permit RBAC the alternative `InClusterK8sProvider` mechanism is available - see §4.5, however this has not been tested. 
+> On EIDF and other clusters that do not grant pods RBAC, SWE-bench experiments are run using TEASBench's `PortForwardK8sProvider` mechanism described in [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf) and [§4.7](#47-swe-bench-lite-on-eidf). On clusters that permit RBAC the alternative `InClusterK8sProvider` mechanism is available - see [§4.5](#45-preflight-check-for-inclusterk8sprovider-mode-not-applicable-on-eidf), however this has not been tested. 
 
 ### Vast.ai only
 
 - `vastai` CLI installed and authenticated (`vastai login`)
-- The container images built and pushed (§6.1)
-- Instance secrets set in the Vast.ai console (§6.2)
+- The container images built and pushed ([§6.1](#61-vastai-setup))
+- Instance secrets set in the Vast.ai console ([§6.2](#62-generate-and-launch))
 
 ---
 
@@ -88,7 +88,7 @@ Predefined validated benchmark parameters are provided in CSV files in [`./exper
 
 One file is marked differently. `moe-experiments-vastai-beta.csv` holds the B200 and B300
 coordinates behind published results, reconstructed from those runs' own records. **Beta means it
-has not been re-executed through this pipeline**, unlike the other CSVs here — the rows describe
+has not been re-executed through this pipeline**, unlike the other CSVs here the rows describe
 hardware we measured on, not a matrix we have re-run end to end. Marketplace supply and price move
 constantly, and the largest node sizes are the thinnest, so each generated script opens by searching
 for matching offers: read what that returns before committing to a run.
@@ -153,9 +153,9 @@ sglang-gptoss120b-swe-bench-lite-nt100-h100x2.yaml
 ./submit_job.sh sglang-gptoss120b-gsm8k-ns256-a100x1-bsd.yaml
 ```
 
-This creates the Job, copies the job yaml to a job-config-dir, and appends the name to `submitted_jobs.log`. You will need to `submit_job.sh` and set JOB\_CONFIGS\_DIR to a location that is accessible from your job so that it can copy and store (commit) the job yaml alongside the results for the sake of provenance. 
+This creates the Job, copies the job yaml to a job-config-dir, and appends the name to `submitted_jobs.log`. You will need to run `submit_job.sh` and set JOB\_CONFIGS\_DIR to a location that is accessible from your job so that it can copy and store (commit) the job yaml alongside the results for the sake of provenance. 
 
-Submit several by looping:
+You can submit several jobs by looping, i.e.:
 
 ```bash
 for f in out/*.yaml; do ./submit_job.sh "$f"; done
@@ -180,29 +180,29 @@ kubectl -n <namespace> get pods -l app=teasbench-sandbox
 
 ### 4.4 Agentic specifics
 
-**IMO AnswerBench** — nothing extra; one container.
+**IMO AnswerBench**: nothing extra; one container.
 
-**MCP Atlas** — the pod gets a second container (the tool server) on port 1984.
+**MCP Atlas**: the pod gets a second container (the tool server) on port 1984.
 Check both:
 
 ```bash
 kubectl -n <namespace> logs <pod> -c mcp-atlas-sidecar
 ```
 
-**SWE-bench Lite** — *not* an unattended Job on EIDF. See §4.8: the driver runs
+**SWE-bench Lite**: *not* an unattended Job on EIDF. See §4.8: the driver runs
 on a login node and creates the Jobs itself. The GPUs are still used through a
-Kubernetes Job, as always — only the driver process sits outside the cluster.
+Kubernetes Job, as always, only the driver process sits outside the cluster.
 
 ### 4.5 Preflight check for InClusterK8sProvider mode (not applicable on EIDF)
 
 > **Skip this on EIDF.** It tests `InClusterK8sProvider`, which needs pod RBAC
-> that EIDF does not grant. Kept for a cluster that does. On EIDF go to §4.6
-> (mechanism check) and §4.7 (running it).
+> that EIDF does not grant. Kept for a cluster that does. On EIDF go to [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf)
+> (mechanism check) and [§4.7](#47-swe-bench-lite-on-eidf) (running it).
 
 In-cluster SWE-bench depends on two facts about the cluster that are worth
 confirming *before* a GPU job queues, because both fail late and confusingly:
 
-1. **Pod IPs are routable within the namespace** — the driver talks to a sandbox
+1. **Pod IPs are routable within the namespace**, the driver talks to a sandbox
    at `http://<podIP>:9999` with no port-forward. A restrictive NetworkPolicy
    breaks this.
 2. **`kubectl` works in-cluster from the ServiceAccount token**, with no
@@ -213,9 +213,9 @@ kubectl -n <namespace> create -f eidf/preflight/teasbench-preflight.yaml
 kubectl -n <namespace> logs -f job/teasbench-preflight
 ```
 
-The preflight does exactly what `InClusterK8sProvider.acquire()` does — same
+The preflight does exactly what `InClusterK8sProvider.acquire()` does; same
 kubectl bootstrap, same Job-spec shape, same jsonpath to read the pod IP, same
-port — but against a busybox target instead of a multi-GB SWE-bench image, and
+port, but against a busybox target instead of a multi-GB SWE-bench image, and
 with **no GPU**. It schedules immediately and costs no GPU time.
 
 Expected output:
@@ -241,7 +241,7 @@ kubectl -n <namespace> auth can-i create jobs \
 
 The second impersonates the ServiceAccount from your own session, so it checks
 the RBAC without running anything. Note it needs impersonation rights, which not
-every project grants — the preflight Job needs none, since it *is* the
+every project grants, the preflight Job needs none, since it *is* the
 ServiceAccount.
 
 If the routability check fails, in-cluster mode is unusable on this cluster; use
@@ -252,7 +252,7 @@ If the routability check fails, in-cluster mode is unusable on this cluster; use
 Everything SWE-bench does on a K8s cluster without RBAC, such as EIDF, rests on `PortForwardK8sProvider`, so check it
 before committing GPU time. This runs **on a login node**, not as a Job, because
 that is where the provider itself runs. It uses your own kubectl credentials and
-needs no ServiceAccount and no RBAC manifest — which is exactly why this is the
+needs no ServiceAccount and no RBAC manifest, which is exactly why this is the
 path EIDF can support.
 
 **Fast probe** (~1 min, no GPU):
@@ -261,9 +261,9 @@ path EIDF can support.
 python3 eidf/preflight/preflight_portforward.py --namespace <namespace>
 ```
 
-It drives the **real** `PortForwardK8sProvider` — OS port allocation, the
+It drives the **real** `PortForwardK8sProvider` OS port allocation, the
 `kubectl port-forward` spawn, the readiness poll, the tunnel-babysitter thread
-and cleanup on release — plus the `kubectl cp` / `kubectl exec` path the
+and cleanup on release, plus the `kubectl cp` / `kubectl exec` path the
 SWE-bench evaluator uses. Only the sandbox container's payload is substituted
 (busybox serving an `is_alive` file instead of a multi-GB image pip-installing
 swe-rex), because what is under test is the tunnel mechanism, not swe-rex.
@@ -289,7 +289,7 @@ python3 eidf/preflight/preflight_portforward.py --namespace <namespace> --real-i
 
 `--real-image` drops the busybox substitution for a genuine
 `docker.io/swebench/sweb.eval.x86_64.*` image, additionally proving the multi-GB
-pull works and that `swe-rex` installs and runs inside the instance image — an
+pull works and that `swe-rex` installs and runs inside the instance image, an
 old conda env where a dependency clash is plausible. Pass an instance id to
 override the default (`--real-image django__django-11099`).
 
@@ -303,7 +303,7 @@ override the default (`--real-image django__django-11099`).
 The driver moving off the cluster does **not** mean Kubernetes is bypassed. The
 model runs on GPUs through a Job, exactly as every other TEASBench run does.
 Four components, three of them Kubernetes Jobs, all created with *your*
-credentials — and all of it handled for you:
+credentials, and all of it handled for you:
 
 | Component | Where | GPU | Created by |
 |---|---|---|---|
@@ -315,7 +315,7 @@ credentials — and all of it handled for you:
 The driver reaches the engine and each sandbox over `kubectl port-forward`.
 
 Why this is allowed when in-cluster mode is not: *you* may create Jobs and
-port-forward — §4.6 confirms both on EIDF. What EIDF refuses is granting those
+port-forward, [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf) confirms both on EIDF. What EIDF refuses is granting those
 rights to a **pod's ServiceAccount**. Running the driver as yourself sidesteps
 that entirely.
 
@@ -352,13 +352,13 @@ bash out/sglang-gptoss120b-swe-bench-lite-nt100-h200x1.sh
 
 The script checks prerequisites, submits the engine Job, waits for the model to
 load, opens and babysits the tunnel, runs the benchmark, pushes the results, and
-**deletes the engine Job on exit** — success, failure or Ctrl-C — so an aborted
+**deletes the engine Job on exit**; success, failure or Ctrl-C.  This means an aborted
 run cannot leave GPUs allocated. You never start an engine or submit the engine
 manifest by hand.
 
 Useful flags: `--resume`, `--no-push`, `--namespace`, `--output-root`.
 
-The driver contains **no install paths of its own** — `TEASBENCH_ROOT`,
+The driver contains **no install paths of its own**: `TEASBENCH_ROOT`,
 `AGENTCAP_DIR`, `SWEAGENT_DIR` and the interpreter all come from `env.sh`, and it
 refuses to start if that has not been sourced. A generated script is therefore
 portable between machines: relocate a checkout and re-run the setup script rather
@@ -374,7 +374,7 @@ reference to anything outside it.
 #### Smoke test first
 
 The 2-task row in `experiments/agentic-smoke-tests-eidf.csv` is the same thing at
-small scale — same driver, same engine Job, same sandboxes, same grading:
+small scale; same driver, same engine Job, same sandboxes, same grading:
 
 ```bash
 cd pipeline
@@ -386,7 +386,7 @@ bash out/vllm-gptoss120b-swe-bench-lite-nt2-a100x1.sh
 A low or zero accuracy on 2 tasks is normal and not a failure signal; what
 matters is that every stage ran and wrote its outputs.
 
-**Run §4.6 first — if the mechanism is broken, this fails for that reason after queueing for a GPU.**
+**Run [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf) first:  if the mechanism is broken, this fails for that reason after queueing for a GPU.**
 
 
 ## 5. Running MoE benchmarks on Vast.ai
@@ -471,7 +471,7 @@ which are required depend on the benchmark(s) being run. Use the following table
 | `GITHUB_TOKEN`, `BRAVE_API_KEY`, `ALCHEMY_API_KEY`, … | Tool server API keys (see below) | `mcp-atlas`                    |
 
 For `mcp-atlas`, any tool server API key in the [mcp-atlas `env.template`](https://github.com/scaleapi/mcp-atlas/blob/main/env.template)
-is picked up from a same-named environment variable — set whichever you have, using the template as a guide.
+is picked up from a same-named environment variable, set whichever you have, using the template as a guide.
 
 ### 6.2 Generate and launch
 
@@ -516,9 +516,9 @@ The following table summarises those differences:
 
 If sandbox creation fails with a `kubectl` permissions error, either apply
 `eidf/rbac/teasbench-runner-rbac.yaml`, or switch to the login-node fallback by
-pointing the run at `PortForwardK8sProvider` instead of `InClusterK8sProvider` —
+pointing the run at `PortForwardK8sProvider` instead of `InClusterK8sProvider` 
 that provider uses *your* kubectl credentials via port-forwarding rather than
-the pod's ServiceAccount. Confirm it works first with §4.6.
+the pod's ServiceAccount. Confirm it works first with [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf).
 
 ### 7.2 MCP Atlas scores lower than expected
 
@@ -532,7 +532,7 @@ credentials supplied: BRAVE_API_KEY GITHUB_TOKEN
 left empty: ALCHEMY_API_KEY EXA_API_KEY ...
 ```
 
-Also confirm the server set matches — it is pinned to the same 22 servers on
+Also confirm the server set matches, it is pinned to the same 22 servers on
 both platforms, because the server set *is* the benchmark definition.
 
 ---
