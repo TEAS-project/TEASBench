@@ -383,9 +383,9 @@ while IFS=',' read -r -a VALUES; do
         sandbox_provider_for_provenance=""
     fi
 
-    # Benchmark-specific setup, run before the server starts (e.g. cloning SWE-agent + the
-    # streaming patch for swe-bench-lite; the EVAL_LLM_* judge env vars for mcp-atlas). Empty
-    # for imo-answerbench.
+    # Benchmark-specific setup, run before the server starts (e.g. verifying SWE-agent + the
+    # streaming patch for swe-bench-lite). Empty for imo-answerbench and mcp-atlas (the
+    # mcp-atlas judge is configured by the judge: block in its agents yaml, not env vars).
     extra_setup=$(echo "$extra_setup_b64" | base64 -d)
     if [[ -n "$extra_setup" ]]; then
         echo "Running extra setup for $benchmark..."

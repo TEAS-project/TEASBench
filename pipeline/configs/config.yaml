@@ -1190,23 +1190,9 @@ rules:
           echo "MCP Atlas sidecar did not become ready within 120s." >&2
           exit 1
         fi
-    # Judge config for evaluator=gtfa. On AgentCAP main,
-    # GTFAEvaluatorAdapter.__init__ (agent_cap/agents/evaluators.py) discards
-    # every constructor kwarg, so agent_cap.evaluators.gtfa_eval.GTFAEvaluator
-    # reads EVAL_LLM_MODEL / EVAL_LLM_BASE_URL / EVAL_LLM_API_KEY from the
-    # environment (see docs/agentic-pipeline-design.md); from AgentCAP PR #63
-    # onwards the adapter forwards the judge: block in
-    # mcp-atlas_gptoss_*.yaml, which then takes precedence over these
-    # exports. The values below match GTFAEvaluator's own built-in defaults
-    # (OpenRouter + google/gemini-3.1-flash-lite) and are kept identical to
-    # the yaml judge: blocks so both AgentCAP versions configure the same
-    # judge. OPENROUTER_API_KEY comes from the openrouter-api-key secret on
-    # EIDF (templates/agentic.yaml) and the instance env on Vast.ai.
-    extra_setup:
-      value: |
-        export EVAL_LLM_MODEL="google/gemini-3.1-flash-lite"
-        export EVAL_LLM_BASE_URL="https://openrouter.ai/api/v1"
-        export EVAL_LLM_API_KEY="$OPENROUTER_API_KEY"
+    # The previous extra_setup for the GTFA judge (MCP-Atlas) is now
+    # configured in mcp-atlas_gptoss_*.yaml as of AgentCAP PR #63 which
+    # allows these values to pass through GTFAEvaluatorAdapter.
     teas_env_exports:
       value: |
         export TEAS_BACKEND="mcp-atlas-localmcp"

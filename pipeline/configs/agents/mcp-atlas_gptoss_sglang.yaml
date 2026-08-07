@@ -16,15 +16,7 @@ agents:
     temperature: 1.0
     top_p: 1.0
 
-# NOTE: how much this judge: block matters depends on the AgentCAP version.
-# On AgentCAP main, GTFAEvaluatorAdapter.__init__
-# (agent_cap/agents/evaluators.py) discards every constructor kwarg and builds
-# a bare GTFAEvaluator(), which reads EVAL_LLM_MODEL / EVAL_LLM_BASE_URL /
-# EVAL_LLM_API_KEY from the environment (set by the mcp-atlas rule's
-# extra_setup block in config.yaml). From AgentCAP PR #63 (fix-judge-schema)
-# onwards, the adapter forwards this block, and it takes precedence over those
-# env vars. Keep this block and the extra_setup exports in agreement so both
-# AgentCAP versions configure the same judge.
+# Post AgentCAP PR #63, these are passed through the GTFAEvalutorAdapter.
 judge:
   name: google/gemini-3.1-flash-lite
   base_url: https://openrouter.ai/api/v1

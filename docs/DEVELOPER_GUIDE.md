@@ -568,11 +568,13 @@ completes but agentic metrics are empty. Both platforms assert the
 `AGENTCAP_STREAMING_PATCH_APPLIED` marker; keep the Vast.ai image build and the
 `extra_setup` verification in step.
 
-**`GTFAEvaluatorAdapter` ignores its kwargs.** The MCP Atlas judge reads
-`EVAL_LLM_MODEL` / `EVAL_LLM_BASE_URL` / `EVAL_LLM_API_KEY` from the environment
-and discards constructor arguments, so the `judge:` block in the mcp-atlas agent
-YAML is inert. Real wiring goes through env exports. This is an AgentCAP wart
-worth fixing upstream.
+**`GTFAEvaluatorAdapter` judge wiring.** Since AgentCAP PR #63 (merged
+2026-08-07), the adapter forwards the `judge:` block in the mcp-atlas agent
+YAML into `GTFAEvaluator`, so that block is the real wiring (`${...}` values
+are expanded from the client environment — `OPENROUTER_API_KEY` must be set).
+Before #63 the adapter discarded constructor arguments and the judge fell back
+to `EVAL_LLM_MODEL` / `EVAL_LLM_BASE_URL` / `EVAL_LLM_API_KEY` env vars, then
+to built-in defaults identical to the YAML block's values.
 
 **`served_model_name` vs litellm.** SWE-bench passes a litellm model string that
 must match what the engine serves. Reused from the IMO config and not verified
