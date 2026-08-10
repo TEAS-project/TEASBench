@@ -1,0 +1,64 @@
+# EIDF -- the Edinburgh International Data Facility, https://eidf.ed.ac.uk
+#
+# A "site" is one concrete place experiments run. This file holds everything
+# about EIDF that is not true of Kubernetes in general, so that nothing else in
+# the pipeline has to name EIDF at all.
+#
+# Selected by an experiment row's `platform` column: platform: eidf loads this
+# file. That column keeps naming the *site*, because it is also the label the
+# results are published under (TEAS_Results_Private/{moe,agentic}/eidf/..., next
+# to amd, cerebras, dgx-spark, tenstorrent, vastai) and what
+# postprocessing/aggregate_results.py keys its hardware and ordering maps off.
+# The *mechanism* is `orchestrator` below, and that is what config.yaml rules
+# and utils.py predicates branch on.
+#
+# To add a second Kubernetes cluster: copy this file, change the values, and use
+# its name in the platform column. No code changes.
+
+site: eidf
+
+# How work is launched here. "k8s" => generated Kubernetes Job YAML submitted
+# with kubectl (templates/template.yaml, agentic.yaml, agentic-engine.yaml);
+# "vastai" => generated bash launch scripts (see sites/vastai.yaml).
+orchestrator: k8s
+
+namespace: eidf230ns
+
+# Kueue queue label applied to every Job. Set to null on a cluster that does not
+# run Kueue -- the templates then omit the label rather than emitting an empty
+# one.
+queue: eidf230ns-user-queue
+
+# Where submit_job.sh keeps generated job YAML on the login node.
+job_configs_dir: /eidfs/eidf230/shared/gpu-service/job-configs
+
+# EIDF policy: a pod's ServiceAccount is not granted RBAC for jobs/pods, so a
+# benchmark whose driver must create Kubernetes objects mid-run (swe-bench-lite,
+# for its per-task sandbox and eval Jobs) cannot run as an unattended Job here
+# and is driven from a login node instead. See utils.needs_login_node_driver and
+# docs/DEVELOPER_GUIDE.md 5. Set true on a cluster that does grant it, and the
+# in-cluster provider becomes usable.
+grants_pod_rbac: false
+
+# Root under which models are staged on the cluster PVC. Combined with
+# HF_MODEL_MAP this yields a local on-disk path some engines/benchmarks load a
+# model from instead of downloading it via HF_HOME, e.g.
+# gpt-oss-120b -> /llm-cache-pvc/models/unsloth/gpt-oss-120b
+models_root: /llm-cache-pvc/models
+
+# PersistentVolumeClaim names mounted by the job templates.
+pvcs:
+  inputs: inputs-pvc
+  develop: develop-pvc
+  shared: eidf230shared
+  results: results-pvc
+
+# nvidia.com/gpu.product node-label values, used as the Job nodeSelector. These
+# are the GPU products EIDF offers; a cluster with different hardware lists its
+# own. Also includes the MIG profiles EIDF exposes, for reference:
+#   NVIDIA-A100-SXM4-40GB, NVIDIA-A100-SXM4-40GB-MIG-3g.20gb,
+#   NVIDIA-A100-SXM4-40GB-MIG-1g.5gb
+gpu_products:
+  A100: NVIDIA-A100-SXM4-80GB
+  H100: NVIDIA-H100-80GB-HBM3
+  H200: NVIDIA-H200

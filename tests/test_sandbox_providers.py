@@ -1,4 +1,4 @@
-"""Tests for teasbench.sandbox.k8s - no cluster, no kubectl binary, no
+"""Tests for k8s_pod_providers - no cluster, no kubectl binary, no
 network. `subprocess.run`/`subprocess.Popen` and `urllib.request.urlopen`
 are monkeypatched with in-process fakes that never touch a real process
 or socket beyond the OS-local free-port lookup used by
@@ -13,9 +13,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "pipeline" / "k8s" / "lib"))
 
-from teasbench.sandbox.k8s import (
+# From the module, not the package: SandboxEndpoint and the private
+# _sandbox_job_spec are implementation detail that __init__ deliberately does
+# not re-export (only the two provider classes are public API).
+from k8s_pod_providers.providers import (
     InClusterK8sProvider,
     PortForwardK8sProvider,
     SandboxEndpoint,

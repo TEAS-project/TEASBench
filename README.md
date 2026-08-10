@@ -65,15 +65,15 @@ Generation needs a Python environment with `pandas` and `pyyaml`. Run the genera
 SWE-bench Lite needs a Python environment on the login node and several environment variables set. One script builds it, once:
 
 ```bash
-bash eidf/setup/setup_swebench_env.sh
+bash pipeline/k8s/setup/setup_swebench_env.sh
 ```
 
   This installs `agent_cap`, `swe-rex` and `swebench` into a Python venv, clones SWE-agent and applies
   and verifies AgentCAP's streaming patch, then writes `env.sh` (environment setup) and `versions.json` (recorded into each run's metadata). 
   
-On EIDF and other clusters that do not grant pods role-based access control (RBAC), SWE-bench Lite benchmarks are launched not as an unattended K8s Job but using a bash driver script on the login node that can be run interactively or backgrounded - see [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf) and [§4.7](#47-swe-bench-lite-on-eidf). 
+On EIDF and other clusters that do not grant pods role-based access control (RBAC), SWE-bench Lite benchmarks are launched not as an unattended K8s Job but using a bash driver script on the login node that can be run interactively or backgrounded - see [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac) and [§4.7](#47-swe-bench-lite-on-a-k8s-cluster). 
 
-> On EIDF and other clusters that do not grant pods RBAC, SWE-bench experiments are run using TEASBench's `PortForwardK8sProvider` mechanism described in [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf) and [§4.7](#47-swe-bench-lite-on-eidf). On clusters that permit RBAC the alternative `InClusterK8sProvider` mechanism is available - see [§4.5](#45-preflight-check-for-inclusterk8sprovider-mode-not-applicable-on-eidf), however this has not been tested. 
+> On EIDF and other clusters that do not grant pods RBAC, SWE-bench experiments are run using TEASBench's `PortForwardK8sProvider` mechanism described in [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac) and [§4.7](#47-swe-bench-lite-on-a-k8s-cluster). On clusters that permit RBAC the alternative `InClusterK8sProvider` mechanism is available - see [§4.5](#45-preflight-check-for-inclusterk8sprovider-mode-clusters-that-grant-pod-rbac), however this has not been tested. 
 
 ### Vast.ai only
 
@@ -140,6 +140,16 @@ Options:
 * `--target_dir` specifies where to output job yaml files generated (default `./`)
 * `--results_repo` specifies a repository to which to commit results (default
 `TEAS_Development_Results_Private`).
+* `--site` selects which cluster to generate for (default `eidf`) — see below.
+
+**Targeting a different cluster.** Everything specific to one cluster — namespace,
+Kueue queue, PVC names, GPU node labels, model staging root, whether pods are
+granted RBAC — lives in a site profile at
+[`pipeline/configs/sites/<site>.yaml`](./pipeline/configs/sites/). Nothing else in
+the pipeline names a cluster. To run on another K8s cluster, copy
+[`eidf.yaml`](./pipeline/configs/sites/eidf.yaml), edit the values, and pass
+`--site <name>`; no code changes are needed. The site name is also the directory
+results are published under, so keep it distinct per cluster.
 
 Generate creates one YAML per row, named after the run:
 
@@ -170,7 +180,7 @@ kubectl -n <namespace> get pods -w
 kubectl -n <namespace> logs -f <pod>
 ```
 
-Helpers in [`eidf/scripts/`](../eidf/scripts/): `k8_pod_log.sh`,
+Helpers in [`pipeline/k8s/helpers/`](../pipeline/k8s/helpers/): `k8_pod_log.sh`,
 `k8_job_desc.sh`, `k8_pod_bash_login.sh`.
 
 For SWE-bench Lite you will also see transient sandbox pods appear and vanish:
@@ -190,15 +200,17 @@ Check both:
 kubectl -n <namespace> logs <pod> -c mcp-atlas-sidecar
 ```
 
-**SWE-bench Lite**: *not* an unattended Job on EIDF. See [§4.7](#47-swe-bench-lite-on-eidf): the driver runs
+**SWE-bench Lite**: *not* an unattended Job on a cluster without pod RBAC (EIDF
+among them). See [§4.7](#47-swe-bench-lite-on-a-k8s-cluster): the driver runs
 on a login node and creates the Jobs itself. The GPUs are still used through a
 Kubernetes Job, as always, only the driver process sits outside the cluster.
 
-### 4.5 Preflight check for InClusterK8sProvider mode (not applicable on EIDF)
+### 4.5 Preflight check for InClusterK8sProvider mode (clusters that grant pod RBAC)
 
-> **Skip this on EIDF.** It tests `InClusterK8sProvider`, which needs pod RBAC
-> that EIDF does not grant. Kept for a cluster that does. On EIDF go to [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf)
-> (mechanism check) and [§4.7](#47-swe-bench-lite-on-eidf) (running it).
+> **Only for clusters that grant pods RBAC.** It tests `InClusterK8sProvider`,
+> which needs that. EIDF does not grant it, so skip this section there and go to
+> [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac)
+> (mechanism check) and [§4.7](#47-swe-bench-lite-on-a-k8s-cluster) (running it).
 
 In-cluster SWE-bench depends on two facts about the cluster that are worth
 confirming *before* a GPU job queues, because both fail late and confusingly:
@@ -210,7 +222,7 @@ confirming *before* a GPU job queues, because both fail late and confusingly:
    kubeconfig, and the RBAC grants the verbs the provider uses.
 
 ```bash
-kubectl -n <namespace> create -f eidf/preflight/teasbench-preflight.yaml
+kubectl -n <namespace> create -f pipeline/k8s/preflight/teasbench-preflight.yaml
 kubectl -n <namespace> logs -f job/teasbench-preflight
 ```
 
@@ -246,20 +258,20 @@ every project grants, the preflight Job needs none, since it *is* the
 ServiceAccount.
 
 If the routability check fails, in-cluster mode is unusable on this cluster; use
-`PortForwardK8sProvider` [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf), which needs neither assumption.
+`PortForwardK8sProvider` [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac), which needs neither assumption.
 
-### 4.6 Preflight check for PortForwardK8sProvider mode (e.g. EIDF)
+### 4.6 Preflight check for PortForwardK8sProvider mode (clusters without pod RBAC)
 
-Everything SWE-bench does on a K8s cluster without RBAC, such as EIDF, rests on `PortForwardK8sProvider`, so check it
+Everything SWE-bench does on a K8s cluster without pod RBAC (EIDF among them) rests on `PortForwardK8sProvider`, so check it
 before committing GPU time. This runs **on a login node**, not as a Job, because
 that is where the provider itself runs. It uses your own kubectl credentials and
 needs no ServiceAccount and no RBAC manifest, which is exactly why this is the
-path EIDF can support.
+path such a cluster can support.
 
 **Fast probe** (~1 min, no GPU):
 
 ```bash
-python3 eidf/preflight/preflight_portforward.py --namespace <namespace>
+python3 pipeline/k8s/preflight/preflight_portforward.py --namespace <namespace>
 ```
 
 It drives the **real** `PortForwardK8sProvider` OS port allocation, the
@@ -285,7 +297,7 @@ provider never needs it, because it talks to pod IPs directly.
 **Full-fidelity probe** (minutes, still no GPU):
 
 ```bash
-python3 eidf/preflight/preflight_portforward.py --namespace <namespace> --real-image
+python3 pipeline/k8s/preflight/preflight_portforward.py --namespace <namespace> --real-image
 ```
 
 `--real-image` drops the busybox substitution for a genuine
@@ -294,10 +306,11 @@ pull works and that `swe-rex` installs and runs inside the instance image, an
 old conda env where a dependency clash is plausible. Pass an instance id to
 override the default (`--real-image django__django-11099`).
 
-### 4.7 SWE-bench Lite on EIDF
+### 4.7 SWE-bench Lite on a K8s cluster
 
-**EIDF does not grant pods RBAC**, so SWE-bench here always uses
-`PortForwardK8sProvider`, with the **driver** running on a login node.
+On a cluster that **does not grant pods RBAC** — EIDF among them — SWE-bench
+always uses `PortForwardK8sProvider`, with the **driver** running on a login
+node. This is the validated path; the in-cluster alternative is [§4.5](#45-preflight-check-for-inclusterk8sprovider-mode-clusters-that-grant-pod-rbac).
 
 #### Where everything actually runs
 
@@ -316,7 +329,7 @@ credentials, and all of it handled for you:
 The driver reaches the engine and each sandbox over `kubectl port-forward`.
 
 Why this is allowed when in-cluster mode is not: *you* may create Jobs and
-port-forward, [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf) confirms both on EIDF. What EIDF refuses is granting those
+port-forward, and [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac) confirms both. What such a cluster refuses is granting those
 rights to a **pod's ServiceAccount**. Running the driver as yourself sidesteps
 that entirely.
 
@@ -326,7 +339,7 @@ unattended Jobs, because neither touches the Kubernetes API.
 #### Running it
 
 The pipeline handles all of it, including the engine. Generation emits **two**
-files for a SWE-bench row on EIDF instead of one:
+files for a SWE-bench row on such a cluster instead of one:
 
 ```bash
 cd pipeline
@@ -387,7 +400,7 @@ bash out/vllm-gptoss120b-swe-bench-lite-nt2-a100x1.sh
 A low or zero accuracy on 2 tasks is normal and not a failure signal; what
 matters is that every stage ran and wrote its outputs.
 
-**Run [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf) first:  if the mechanism is broken, this fails for that reason after queueing for a GPU.**
+**Run [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac) first:  if the mechanism is broken, this fails for that reason after queueing for a GPU.**
 
 
 ## 5. Running MoE benchmarks on Vast.ai
@@ -413,8 +426,9 @@ The Vast.ai pipeline uses the CLI to search for offers and launch instances; fro
 
 ### 5.3 Generate launch scripts
 
-The scripts to launch Vast.ai instances are created in a similar fashion to the EIDF YAMLs. The addition of the
-`--vast` flag tells the generator to produce scripts for Vast.ai. For example, the following command generates
+The scripts to launch Vast.ai instances are created in a similar fashion to the K8s Job YAMLs. `--site vastai`
+selects the Vast.ai site profile, whose orchestrator makes the generator produce launch scripts rather than Job
+YAMLs. For example, the following command generates
 Vast.ai scripts in the `out/` directory for the MoE experiments described in `moe-experiments-vastai.csv`:
 
 ```bash
@@ -422,7 +436,7 @@ cd pipeline
 python3 generate.py \
     --csv_file=../experiments/moe-experiments-vastai.csv \
     --target_dir=./out \
-    --vast
+    --site vastai
 ```
 
 This produces one script per (engine, GPU, num_gpu) triplet, e.g.
@@ -478,15 +492,15 @@ is picked up from a same-named environment variable, set whichever you have, usi
 ### 6.2 Generate and launch
 
 Running an agentic benchmark suite is otherwise identical to the MoE benchmark process.
-Provide a CSV file identical to those used for EIDF runs and use the `generate.py` script
-with the `--vast` flag to generate bash scripts:
+Provide a CSV file identical to those used for K8s runs and use the `generate.py` script
+with `--site vastai` to generate bash scripts:
 
 ```bash
 cd pipeline
 python3 generate.py \
     --csv_file=../experiments/swe-bench-lite-vastai.csv \
     --target_dir=./out \
-    --vast
+    --site vastai
 ```
 
 Then, run one of the generated bash scripts:
@@ -499,12 +513,12 @@ This will use the Vast.ai CLI to find and list appropriate offers and prompt you
 The appropriate benchmark container will run on the instance you select, pushing benchmark results
 to GitHub as they complete.
 
-### 6.3 What differs from the EIDF
+### 6.3 What differs from a K8s cluster
 
-Due to the way agents run, there are some differences in how they are executed on Vast.ai instances vs the EIDF.
+Due to the way agents run, there are some differences in how they are executed on Vast.ai instances vs a K8s cluster.
 The following table summarises those differences:
 
-|                       | EIDF              | Vast.ai                            |
+|                       | K8s cluster       | Vast.ai                            |
 |-----------------------|-------------------|------------------------------------|
 | MCP Atlas tool server | sidecar container | background process, same container |
 | SWE-bench sandboxes   | Kubernetes pods   | Modal                              |
@@ -517,10 +531,10 @@ The following table summarises those differences:
 ### 7.1 SWE-bench Lite permissions (if using InClusterK8sProvider) 
 
 If sandbox creation fails with a `kubectl` permissions error, either apply
-`eidf/rbac/teasbench-runner-rbac.yaml`, or switch to the login-node fallback by
+`pipeline/k8s/rbac/teasbench-runner-rbac.yaml`, or switch to the login-node fallback by
 pointing the run at `PortForwardK8sProvider` instead of `InClusterK8sProvider` 
 that provider uses *your* kubectl credentials via port-forwarding rather than
-the pod's ServiceAccount. Confirm it works first with [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-eg-eidf).
+the pod's ServiceAccount. Confirm it works first with [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac).
 
 ### 7.2 MCP Atlas scores lower than expected
 
@@ -584,8 +598,10 @@ Vast.ai) `MODEL_DISK_GB_MAP` in `pipeline/utils.py`.
 
 **Add a GPU or other device** 
 
-Add to `EIDF_GPU_MAP` and/or `VAST_GPU_MAP`, plus
-`TEAS_GPU_NAME_MAP`. For Vast.ai, take the string from `vastai search offers`.
+Add it to `gpu_products` in the relevant site profile
+(`pipeline/configs/sites/<site>.yaml`), plus `TEAS_GPU_NAME_MAP` in
+`pipeline/utils.py`. For a K8s site the value is the `nvidia.com/gpu.product`
+node label; for Vast.ai, take the string from `vastai search offers`.
 
 **Change inference engine, client, environment, or other parameters for one case** 
 

@@ -1,0 +1,29 @@
+# Vast.ai -- rented GPU instances, https://vast.ai
+#
+# See sites/eidf.yaml for what a site profile is and how it is selected. Vast.ai
+# is not a Kubernetes cluster, so the k8s-only keys (namespace, queue, pvcs,
+# job_configs_dir, models_root) are absent rather than null: a row that reaches
+# k8s-only code with this profile loaded is a bug, and a missing key surfaces it
+# instead of quietly rendering an empty namespace.
+
+site: vastai
+
+# One rented instance per (family, engine, gpu, num_gpu) group, driven by a
+# generated bash launch script rather than a Job manifest. See vast_generate.py.
+orchestrator: vastai
+
+# Nothing rents a pod here, so pod RBAC is not a concept. False keeps
+# needs_login_node_driver total over every site without a special case: on
+# Vast.ai the driver already runs inside the rented instance alongside the
+# engine, and vast_generate.py never consults this.
+grants_pod_rbac: false
+
+# Exact Vast.ai gpu_name values: the search API matches these literally, so a
+# near-miss returns an empty offer list rather than an error. The Blackwell
+# parts list under their bare names -- "B200_SXM" and "B300_SXM" match nothing.
+gpu_products:
+  A100: A100_SXM4
+  H100: H100_SXM
+  H200: H200_SXM
+  B200: B200
+  B300: B300

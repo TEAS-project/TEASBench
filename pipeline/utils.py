@@ -1,14 +1,17 @@
 #!/bin/python3
 
+"""Maps and predicates shared by the pipeline generator.
+
+Everything here is site-independent. Anything that varies per site -- namespace,
+Kueue queue, PVC names, GPU node-label values, model staging root, whether pods
+get RBAC -- lives in a site profile under configs/sites/ and is reached through
+load_site() below.
 """
-Supported GPU products on EIDF:
-    nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-80GB'
-    nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-40GB'
-    nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-40GB-MIG-3g.20gb'
-    nvidia.com/gpu.product: 'NVIDIA-A100-SXM4-40GB-MIG-1g.5gb'
-    nvidia.com/gpu.product: 'NVIDIA-H100-80GB-HBM3'
-    nvidia.com/gpu.product: 'NVIDIA-H200'
-"""
+
+import functools
+import os
+
+import yaml
 
 MODEL_SHORT_NAME_MAP={
     "gpt-oss-20b": "gptoss20b",
@@ -60,28 +63,11 @@ MODEL_DISK_GB_MAP={
 }
 
 
-EIDF_GPU_MAP={
-    "A100":"NVIDIA-A100-SXM4-80GB",
-    "H100":"NVIDIA-H100-80GB-HBM3",
-    "H200":"NVIDIA-H200"
-}
-
 # Directory name under $TEAS_OUTPUT_DIR on the PVC where jobs archive their full run
 # output. Deliberately distinct from the results_repo (git) name: the PVC copy is a
 # plain archive, never a git working tree, so it must not collide with a directory a
 # job's throwaway /dev/shm clone of the results repo might also be named after.
 PVC_ARCHIVE_DIR = "TEAS_Development_Results_Private-archive-nogit"
-
-# Exact Vast.ai gpu_name values: the search API matches these literally, so a near-miss
-# returns an empty offer list rather than an error. The Blackwell parts list under their
-# bare names -- "B200_SXM" and "B300_SXM" match nothing.
-VAST_GPU_MAP={
-    "A100": "A100_SXM4",
-    "H100": "H100_SXM",
-    "H200": "H200_SXM",
-    "B200": "B200",
-    "B300": "B300",
-}
 
 # Human-readable GPU display names, used for the TEAS_GPU_TYPE env var read by
 # agent_cap.agents.teas_output (see pipeline/templates/agentic.yaml).
@@ -91,14 +77,58 @@ TEAS_GPU_NAME_MAP={
     "H200": "NVIDIA H200",
 }
 
-# Platforms the pipeline can target.
-PLATFORMS = {"eidf", "vastai"}
+# Site profiles live one per file in configs/sites/. A row's `platform` column
+# names the profile it runs under, so `platform` keeps meaning the *site* -- the
+# label results are published under -- while the *mechanism* comes from that
+# profile's `orchestrator`. See configs/sites/eidf.yaml for the full rationale.
+SITES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "configs", "sites")
 
-# Root under which models are staged on the cluster PVC. Combined with
-# HF_MODEL_MAP this yields a local on-disk path some engines/benchmarks can
-# load a model from instead of downloading it via HF_HOME, e.g.
-# gpt-oss-120b -> /llm-cache-pvc/models/unsloth/gpt-oss-120b
-MODELS_ROOT = "/llm-cache-pvc/models"
+# Orchestrators a site profile may declare: how work is launched, as opposed to
+# where it runs. Deliberately separate from the set of sites, since any number
+# of sites can share one orchestrator -- that separation is the whole point.
+ORCHESTRATORS = {"k8s", "vastai"}
+
+
+def available_sites():
+    """Site names with a profile in configs/sites/ (the valid `platform` values)."""
+    if not os.path.isdir(SITES_DIR):
+        return set()
+    return {f[:-5] for f in os.listdir(SITES_DIR) if f.endswith(".yaml")}
+
+
+@functools.lru_cache(maxsize=None)
+def load_site(name):
+    """Read and validate configs/sites/<name>.yaml.
+
+    Cached: generate.py resolves the site once per CSV row, and a sweep is
+    hundreds of rows against the same one or two profiles.
+    """
+    path = os.path.join(SITES_DIR, f"{name}.yaml")
+    if not os.path.isfile(path):
+        raise ValueError(
+            f"unknown platform {name!r}: no site profile at {path}. "
+            f"Known sites: {sorted(available_sites())}. Add one by copying an "
+            f"existing profile in pipeline/configs/sites/."
+        )
+    with open(path) as f:
+        site = yaml.safe_load(f) or {}
+
+    orchestrator = site.get("orchestrator")
+    if orchestrator not in ORCHESTRATORS:
+        raise ValueError(
+            f"site profile {path} declares orchestrator {orchestrator!r}; "
+            f"expected one of {sorted(ORCHESTRATORS)}."
+        )
+    # A k8s site without these renders a Job with an empty namespace or an
+    # unmountable volume -- both fail late and confusingly, so fail here instead.
+    if orchestrator == "k8s":
+        for key in ("namespace", "models_root", "pvcs", "gpu_products"):
+            if not site.get(key):
+                raise ValueError(
+                    f"site profile {path} has orchestrator 'k8s' but no {key!r}."
+                )
+    return site
 
 # Benchmarks that run as a single all-in-one agentic command (agent_cap.agents
 # manages its own inference server / sandbox / evaluator) rather than the MoE
@@ -109,7 +139,7 @@ AGENTIC_BENCHMARKS = {"imo-answerbench", "mcp-atlas", "swe-bench-lite"}
 # The MCP Atlas server set. This *is* the mcp-atlas benchmark definition --
 # AgentCAP's docs are explicit that dropping any server changes the results --
 # so both platforms must enable exactly this list or their numbers stop being
-# comparable. EIDF passes it to the sidecar container and Vast.ai writes it into
+# comparable. The K8s path passes it to the sidecar container and Vast.ai writes it into
 # the generated .env; tests/test_mcp_env.py asserts the two stay in step.
 MCP_ENABLED_SERVERS = (
     "arxiv,brave-search,calculator,cli-mcp-server,"
@@ -154,49 +184,70 @@ def benchmark_family(p: dict):
     return family
 
 
+def site_of(p: dict):
+    """The site profile for an experiment row, named by its `platform` column.
+
+    Defaults to eidf for CSVs that predate the column, matching generate.py.
+    """
+    return load_site(p.get("platform", "eidf"))
+
+
+def orchestrator_of(p: dict):
+    """How this row is launched: "k8s" or "vastai". See ORCHESTRATORS."""
+    return site_of(p)["orchestrator"]
+
+
 def needs_login_node_driver(p: dict):
     """True when this row cannot run as an unattended in-cluster Job.
 
-    EIDF does not grant pods RBAC, so a benchmark whose driver must create
-    Kubernetes objects mid-run (currently only swe-bench-lite, for its per-task
-    sandbox and eval Jobs) has to be driven from a login node using the user's
-    own credentials. The engine still runs on GPUs as an ordinary Job; only the
-    driver process moves. See docs/DEVELOPER_GUIDE.md 5.
+    On a cluster whose site profile sets grants_pod_rbac: false, a pod cannot
+    create Kubernetes objects through its ServiceAccount. A benchmark whose
+    driver must create them mid-run (currently only swe-bench-lite, for its
+    per-task sandbox and eval Jobs) therefore has to be driven from a login node
+    using the user's own credentials. The engine still runs on GPUs as an
+    ordinary Job; only the driver process moves. See docs/DEVELOPER_GUIDE.md 5.
 
     imo-answerbench and mcp-atlas never touch the Kubernetes API, so they stay
-    unattended Jobs on every platform.
+    unattended Jobs everywhere. Vast.ai profiles report grants_pod_rbac: false
+    too, but never reach this predicate -- vast_generate.py is a separate path.
     """
-    return (p.get("platform", "eidf") == "eidf"
+    site = site_of(p)
+    return (site["orchestrator"] == "k8s"
+            and not site.get("grants_pod_rbac", False)
             and p.get("benchmark") == "swe-bench-lite")
 
 
-def swe_bench_lite_k8s(p: dict):
-    """True for swe-bench-lite on EIDF specifically, for now -- scoped to
-    "== eidf" rather than "!= vastai" until a second k8s platform actually
-    exists, so this can't accidentally claim to cover one that hasn't been
-    validated. Revisit this check when that happens.
+def swe_bench_lite_on_k8s(p: dict):
+    """True for swe-bench-lite launched as Kubernetes Jobs, on any cluster.
 
-    Deliberately NOT the same condition as needs_login_node_driver, even
-    though the two happen to agree everywhere today: this one is about which
-    engine build/launch-flags to use (see swebench_eidf_engine_image /
-    swebench_eidf_engine_server_command in configs/config.yaml, and _agentic()) --
-    a property of the benchmark, not of where the driver process runs.
-    needs_login_node_driver is a topology question (RBAC availability) that
-    will diverge from this one the day EIDF gets RBAC or a second k8s
-    platform is added; conflating them would silently drop the validated
-    swe-bench-lite engine recipe for such a row.
+    Deliberately NOT the same condition as needs_login_node_driver, even though
+    the two agree on every site defined today: this one is about which engine
+    build/launch-flags to use (see swebench_k8s_engine_image /
+    swebench_k8s_engine_server_command in configs/config.yaml, and _agentic()) --
+    a property of the benchmark and the orchestrator, not of where the driver
+    process runs. needs_login_node_driver is a topology question (does this
+    cluster grant pods RBAC), and the two diverge on a cluster that does:
+    conflating them would silently drop the validated swe-bench-lite engine
+    recipe for such a row.
 
-    False for Vast.ai: that platform never reaches this code path at all
+    False for Vast.ai: that orchestrator never reaches this code path at all
     (pipeline/vast/resolve_commands.py calls Template.build_command directly
     with cmd_type "agentic_server", not through _agentic()), but the name
     still says so explicitly in case that ever changes.
     """
     return (p.get("benchmark") == "swe-bench-lite"
-            and p.get("platform", "eidf") == "eidf")
+            and orchestrator_of(p) == "k8s")
 
 
-def local_model_path(model: str):
-    return f"{MODELS_ROOT}/{HF_MODEL_MAP[model]}"
+def local_model_path(model: str, site: dict):
+    """On-disk path this site stages `model` at, under its models_root.
+
+    Empty for a site that stages nothing: Vast.ai rents a bare instance and
+    downloads from HF at run time, so it has no models_root and nothing on
+    that path consumes model_path (only hf_model_path reaches a CLI flag).
+    """
+    root = site.get("models_root")
+    return f"{root}/{HF_MODEL_MAP[model]}" if root else ""
 
 
 def get_run_name(p: dict):

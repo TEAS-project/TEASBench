@@ -6,7 +6,7 @@
 #   2. kubectl works in-cluster from the ServiceAccount token, with no
 #      kubeconfig, and the RBAC grants the verbs the provider needs.
 #
-# This Job does exactly what teasbench.sandbox.k8s.InClusterK8sProvider.acquire()
+# This Job does exactly what k8s_pod_providers.InClusterK8sProvider.acquire()
 # does -- same kubectl bootstrap, same Job spec shape, same jsonpath to read the
 # pod IP, same port -- but with a busybox target instead of a multi-GB swebench
 # image, and NO GPU. It therefore schedules immediately and costs no GPU time,
@@ -14,8 +14,8 @@
 #
 # Run it BEFORE queueing a real SWE-bench Lite job:
 #
-#   kubectl apply -f eidf/rbac/teasbench-runner-rbac.yaml   # once, if not already
-#   kubectl -n eidf230ns create -f eidf/preflight/teasbench-preflight.yaml
+#   kubectl apply -f pipeline/k8s/rbac/teasbench-runner-rbac.yaml   # once, if not already
+#   kubectl -n eidf230ns create -f pipeline/k8s/preflight/teasbench-preflight.yaml
 #   kubectl -n eidf230ns logs -f job/teasbench-preflight
 #
 # Exit code 0 and "ALL CHECKS PASSED" means in-cluster mode is good to go.
@@ -93,13 +93,13 @@ spec:
                   pass "kubectl authenticates and can list pods"
               else
                   fail "kubectl cannot list pods from the SA token."
-                  echo "        Apply eidf/rbac/teasbench-runner-rbac.yaml, or use PortForwardK8sProvider."
+                  echo "        Apply pipeline/k8s/rbac/teasbench-runner-rbac.yaml, or use PortForwardK8sProvider."
                   exit 1
               fi
 
               echo
               echo "[2] RBAC verbs the provider needs"
-              # Mirrors eidf/rbac/teasbench-runner-rbac.yaml.
+              # Mirrors pipeline/k8s/rbac/teasbench-runner-rbac.yaml.
               for v in "create jobs" "get jobs" "list jobs" "delete jobs" \
                        "get pods" "list pods" "create pods/exec"; do
                   set -- $v

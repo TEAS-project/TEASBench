@@ -12,7 +12,7 @@ metadata:
   generateName: @name_k8s@-engine-
   labels:
     app: @name_k8s@-engine
-    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+    kueue.x-k8s.io/queue-name: @k8s_queue@
 spec:
   completions: 1
   backoffLimit: 0
@@ -75,7 +75,7 @@ spec:
       volumes:
         - name: inputs
           persistentVolumeClaim:
-            claimName: inputs-pvc
+            claimName: @pvc_inputs@
         - name: dshm
           emptyDir:
             medium: Memory

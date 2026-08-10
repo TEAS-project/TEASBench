@@ -512,15 +512,15 @@ variables_defaults:
     vllm: "0.21.0"
 
   ###############################################
-  # SWE-BENCH-LITE EIDF ENGINE-ONLY JOB (bare image)
+  # SWE-BENCH-LITE K8S ENGINE-ONLY JOB (bare image)
   ###############################################
-  swebench_eidf_engine_image:
+  swebench_k8s_engine_image:
     sglang:
       value: "lmsysorg/sglang:v0.5.12.post1"
     vllm:
       value: "vllm/vllm-openai:v0.21.0"
 
-  swebench_eidf_engine_server_command:
+  swebench_k8s_engine_server_command:
     sglang:
       base_command: "python3 -m sglang.launch_server"
       flags:
@@ -870,7 +870,7 @@ rules:
 # benchmark rather than one rule listing all three, so each benchmark's value
 # can be corrected independently once its own runs are validated.
 # swe-bench-lite here means Vast.ai specifically (the all-in-one shape), which
-# is why those two rules match on platform. EIDF swe-bench-lite sets no
+# is why those two rules match on platform. K8s swe-bench-lite sets no
 # kv_cache_dtype at all -- its engine-only rules further down follow
 # AgentCAP's k8s/launch_llm_server.sh, which passes no --kv-cache-dtype.
   - match:
@@ -899,14 +899,14 @@ rules:
 
   - match:
       benchmark: ["swe-bench-lite"]
-      platform: ["vastai"]
+      orchestrator: ["vastai"]
       gpu: ["A100"]
     agentic_server_flags:
       kv_cache_dtype: "auto"
 
   - match:
       benchmark: ["swe-bench-lite"]
-      platform: ["vastai"]
+      orchestrator: ["vastai"]
       gpu: ["H100", "H200"]
     agentic_server_flags:
       kv_cache_dtype: "fp8_e4m3"
@@ -921,7 +921,7 @@ rules:
 # engine split below is about the values and the vllm-only flags, not about
 # keeping one engine's flag out of the other's command -- build_command drops
 # an override the resolved engine has no definition for.
-# EIDF swe-bench-lite is absent by design: its engine-only path gets these
+# K8s swe-bench-lite is absent by design: its engine-only path gets these
 # from the individually-validated per-(model, gpu, num_gpu) rules further down.
   - match:
       benchmark: ["imo-answerbench"]
@@ -973,14 +973,14 @@ rules:
 
   - match:
       benchmark: ["swe-bench-lite"]
-      platform: ["vastai"]
+      orchestrator: ["vastai"]
       inference_engine: ["sglang"]
     agentic_server_flags:
       gpu_memory_fraction: "0.85"
 
   - match:
       benchmark: ["swe-bench-lite"]
-      platform: ["vastai"]
+      orchestrator: ["vastai"]
       inference_engine: ["vllm"]
     agentic_server_flags:
       gpu_memory_fraction: "0.85"
@@ -992,19 +992,19 @@ rules:
 # agents_config is engine-specific (endpoint protocol/engine differ), so it
 # is set per (benchmark, inference_engine); everything else is shared across
 # both engines and set once below.
-  # agents_config path prefix is platform-specific: EIDF clones TEASBench
+  # agents_config path prefix is platform-specific: a K8s Job clones TEASBench
   # fresh into /dev/shm at job runtime, while Vast.ai bakes pipeline/configs
   # into the image at /opt/teasbench (see pipeline/vast/{sglang,vllm}/Dockerfile*)
   # -- so each (benchmark, engine) pair needs one rule per platform. platform
   # defaults to "eidf" for CSVs that predate the column (see utils.py), which
-  # covers every existing EIDF experiments CSV.
+  # covers every existing K8s experiments CSV.
   - match:
       benchmark:
         - "imo-answerbench"
       inference_engine:
         - "sglang"
-      platform:
-        - "eidf"
+      orchestrator:
+        - "k8s"
     agentic_client_flags:
       agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/imo-answerbench_gptoss_sglang.yaml"
 
@@ -1013,8 +1013,8 @@ rules:
         - "imo-answerbench"
       inference_engine:
         - "vllm"
-      platform:
-        - "eidf"
+      orchestrator:
+        - "k8s"
     agentic_client_flags:
       agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/imo-answerbench_gptoss_vllm.yaml"
 
@@ -1023,7 +1023,7 @@ rules:
         - "imo-answerbench"
       inference_engine:
         - "sglang"
-      platform:
+      orchestrator:
         - "vastai"
     agentic_client_flags:
       agents_config: "/opt/teasbench/pipeline/configs/agents/imo-answerbench_gptoss_sglang.yaml"
@@ -1033,7 +1033,7 @@ rules:
         - "imo-answerbench"
       inference_engine:
         - "vllm"
-      platform:
+      orchestrator:
         - "vastai"
     agentic_client_flags:
       agents_config: "/opt/teasbench/pipeline/configs/agents/imo-answerbench_gptoss_vllm.yaml"
@@ -1054,8 +1054,8 @@ rules:
         - "mcp-atlas"
       inference_engine:
         - "sglang"
-      platform:
-        - "eidf"
+      orchestrator:
+        - "k8s"
     agentic_client_flags:
       agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/mcp-atlas_gptoss_sglang.yaml"
 
@@ -1064,8 +1064,8 @@ rules:
         - "mcp-atlas"
       inference_engine:
         - "vllm"
-      platform:
-        - "eidf"
+      orchestrator:
+        - "k8s"
     agentic_client_flags:
       agents_config: "/dev/shm/TEASBench/pipeline/configs/agents/mcp-atlas_gptoss_vllm.yaml"
 
@@ -1074,7 +1074,7 @@ rules:
         - "mcp-atlas"
       inference_engine:
         - "sglang"
-      platform:
+      orchestrator:
         - "vastai"
     agentic_client_flags:
       agents_config: "/opt/teasbench/pipeline/configs/agents/mcp-atlas_gptoss_sglang.yaml"
@@ -1084,7 +1084,7 @@ rules:
         - "mcp-atlas"
       inference_engine:
         - "vllm"
-      platform:
+      orchestrator:
         - "vastai"
     agentic_client_flags:
       agents_config: "/opt/teasbench/pipeline/configs/agents/mcp-atlas_gptoss_vllm.yaml"
@@ -1199,14 +1199,14 @@ rules:
     # Vast.ai only (see pipeline/vast/resolve_commands.py): no sidecar
     # container exists there, so start the same MCP Atlas server
     # (AgentCAP-teasbench/mcp-server/start.sh) as a background process
-    # instead. EIDF ignores this variable entirely (it renders sidecar_containers
+    # instead. The K8s path ignores this variable entirely (it renders sidecar_containers
     # into the pod spec instead); resolve_commands.py is the only reader of
     # tool_server_setup, and it never reads sidecar_containers.
     tool_server_setup:
       value: |
         # start.sh needs an .env and exits 1 without one; write_mcp_env.sh turns
         # the Vast.ai instance secrets into that file. ENABLED_SERVERS is pinned
-        # to the same 22-server list the EIDF sidecar uses (see
+        # to the same 22-server list the K8s sidecar uses (see
         # utils.MCP_ENABLED_SERVERS, and the parity test in
         # tests/test_mcp_env.py) -- the server set *is* the benchmark, so the two
         # platforms drifting apart would silently make their numbers
@@ -1253,12 +1253,12 @@ rules:
         - "swe-bench-lite"
       inference_engine:
         - "sglang"
-      platform:
-        - "eidf"
+      orchestrator:
+        - "k8s"
     agentic_client_flags:
       # No agents config file on this path. The driver reaches the engine over a
       # port-forward on an OS-assigned local port, so the endpoint cannot be
-      # baked into a file; it is passed as --base-url instead (see the eidf
+      # baked into a file; it is passed as --base-url instead (see the K8s
       # swe-bench rule below). Leaving a --config here would be actively
       # dangerous: agent_cap.agents only applies the --base-url/--model quick
       # flags when --config has not already defined the 'agent' role, so the
@@ -1271,12 +1271,12 @@ rules:
         - "swe-bench-lite"
       inference_engine:
         - "vllm"
-      platform:
-        - "eidf"
+      orchestrator:
+        - "k8s"
     agentic_client_flags:
       # No agents config file on this path. The driver reaches the engine over a
       # port-forward on an OS-assigned local port, so the endpoint cannot be
-      # baked into a file; it is passed as --base-url instead (see the eidf
+      # baked into a file; it is passed as --base-url instead (see the K8s
       # swe-bench rule below). Leaving a --config here would be actively
       # dangerous: agent_cap.agents only applies the --base-url/--model quick
       # flags when --config has not already defined the 'agent' role, so the
@@ -1289,7 +1289,7 @@ rules:
         - "swe-bench-lite"
       inference_engine:
         - "sglang"
-      platform:
+      orchestrator:
         - "vastai"
     agentic_client_flags:
       agents_config: "/opt/teasbench/pipeline/configs/agents/swe-bench-lite_gptoss_sglang.yaml"
@@ -1299,7 +1299,7 @@ rules:
         - "swe-bench-lite"
       inference_engine:
         - "vllm"
-      platform:
+      orchestrator:
         - "vastai"
     agentic_client_flags:
       agents_config: "/opt/teasbench/pipeline/configs/agents/swe-bench-lite_gptoss_vllm.yaml"
@@ -1330,24 +1330,25 @@ rules:
       # matches that validated recipe instead of asserting a value that's
       # silently never consulted.
 
-# --- swe-bench-lite: EIDF (k8s sandbox provider) ---------------------------
+# --- swe-bench-lite: K8s (in-cluster or port-forward sandbox provider) -----
 # platform defaults to "eidf" for CSVs that predate the 'platform' column
 # (utils.build_params / generate.py p.setdefault), which covers every
 # existing swe-bench-lite-eidf.csv / smoke_tests_agentic.csv row.
   - match:
       benchmark:
         - "swe-bench-lite"
-      platform:
-        - "eidf"
+      orchestrator:
+        - "k8s"
     agentic_client_flags:
       evaluator: "swebench-k8s"
       sweagent_deployment: "k8s"
-      # EIDF does not grant pods RBAC, so the in-cluster provider is unusable
-      # here: the driver runs on a login node with the user's own credentials
-      # and reaches each sandbox over `kubectl port-forward`. See
-      # utils.needs_login_node_driver and docs/DEVELOPER_GUIDE.md 5.
-      sandbox_provider: "teasbench.sandbox.k8s:PortForwardK8sProvider"
-      exec_provider: "teasbench.sandbox.k8s:PortForwardK8sProvider"
+      # A cluster that does not grant pods RBAC (EIDF among them) cannot use
+      # the in-cluster provider: the driver runs on a login node with the
+      # user's own credentials and reaches each sandbox over `kubectl
+      # port-forward`. See utils.needs_login_node_driver and
+      # docs/DEVELOPER_GUIDE.md 5.
+      sandbox_provider: "k8s_pod_providers:PortForwardK8sProvider"
+      exec_provider: "k8s_pod_providers:PortForwardK8sProvider"
       # The driver runs on a login node, not in a pod, so every path the
       # platform-independent rule above set to an in-pod location (/dev/shm/...)
       # has to become something the driver defines. These are shell variables
@@ -1365,14 +1366,14 @@ rules:
       base_url: "$LLM_URL"
       api_key: "dummy"
       # Must match agentic_server_flags.served_model_name (this is the
-      # EIDF engine-only path); litellm needs the openai/ prefix to route to
+      # K8s engine-only path); litellm needs the openai/ prefix to route to
       # an OpenAI-compatible endpoint.
       model: "openai/gpt-oss"
     # Needed so InClusterK8sProvider (imported from TEASBench, on
-    # PYTHONPATH=/dev/shm/TEASBench) can create/watch/delete the per-task
-    # swe-rex sandbox Jobs and exec into the eval containers. Requires
-    # eidf/rbac/teasbench-runner-rbac.yaml to have been applied once in the
-    # namespace -- see pipeline/README.md.
+    # PYTHONPATH=/dev/shm/TEASBench/pipeline/k8s/lib) can create/watch/delete the
+    # per-task swe-rex sandbox Jobs and exec into the eval containers. Requires
+    # pipeline/k8s/rbac/teasbench-runner-rbac.yaml to have been applied once in
+    # the namespace -- see pipeline/README.md.
     service_account:
       value: "serviceAccountName: teasbench-runner"
     extra_setup:
@@ -1388,7 +1389,10 @@ rules:
         SA_DIR=/var/run/secrets/kubernetes.io/serviceaccount
         kubectl config set-cluster in-cluster --server=https://kubernetes.default.svc --certificate-authority="$SA_DIR/ca.crt"
         kubectl config set-credentials in-cluster --token="$(cat $SA_DIR/token)"
-        kubectl config set-context in-cluster --cluster=in-cluster --user=in-cluster --namespace="${TEASBENCH_K8S_NAMESPACE:-eidf230ns}"
+        # No default: the namespace comes from the site profile via the Job's
+        # env (templates/agentic.yaml). Failing here beats silently building a
+        # kubectl context for someone else's cluster.
+        kubectl config set-context in-cluster --cluster=in-cluster --user=in-cluster --namespace="${TEASBENCH_K8S_NAMESPACE:?not set by the job template}"
         kubectl config use-context in-cluster
         kubectl get pods > /dev/null
 
@@ -1408,7 +1412,7 @@ rules:
       value: |
         export TEAS_BACKEND="swebench-k8s"
 
-# --- swe-bench-lite: EIDF engine-only Job, harmony parsers -----------------
+# --- swe-bench-lite: K8s engine-only Job, harmony parsers -----------------
 # gpt-oss's harmony tool-call/reasoning format is what needs these parsers,
 # not the engine or swe-bench-lite as such -- so both rules are scoped to the
 # model family, and a hypothetical non-gpt-oss model run through this same
@@ -1438,7 +1442,7 @@ rules:
       enable_auto_tool_choice: true
       enable_prompt_tokens_details: true
 
-# --- swe-bench-lite: EIDF engine-only Job launch flags ---------------------
+# --- swe-bench-lite: K8s engine-only Job launch flags ---------------------
 # Memory fraction is deliberately NOT tuned per GPU: both engines take the one
 # value AgentCAP's own k8s/launch_llm_server.sh uses on every GPU type, so a
 # run started by this pipeline and one started by that script serve the model
@@ -1458,7 +1462,7 @@ rules:
 # defaults rather than silently inheriting settings tuned for another size.
   - match:
       benchmark: ["swe-bench-lite"]
-      platform: ["eidf"]
+      orchestrator: ["k8s"]
       inference_engine: ["sglang"]
       model: ["gpt-oss-120b"]
     agentic_server_flags:
@@ -1466,7 +1470,7 @@ rules:
 
   - match:
       benchmark: ["swe-bench-lite"]
-      platform: ["eidf"]
+      orchestrator: ["k8s"]
       inference_engine: ["vllm"]
       model: ["gpt-oss-120b"]
     agentic_server_flags:
@@ -1490,18 +1494,18 @@ rules:
   - match:
       benchmark:
         - "swe-bench-lite"
-      platform:
+      orchestrator:
         - "vastai"
     agentic_client_flags:
       evaluator: "swebench"
       sweagent_deployment: "modal"
       # AgentCAP is baked into the Vast.ai image at /opt/AgentCAP (unlike
-      # EIDF, which clones fresh into /dev/shm/AgentCAP at job start -- see
+      # K8s, which clones fresh into /dev/shm/AgentCAP at job start -- see
       # pipeline/vast/{sglang,vllm}/Dockerfile.agentic), so the path into its
       # checkout differs from the platform-independent rule's default above.
       task_indices: "/opt/AgentCAP/benchmarks/swe_bench_lite_curated_100.json"
       # SWE-agent is cloned, installed and streaming-patched at image build
-      # time (Dockerfile.agentic), not cloned per run as on EIDF. Vast.ai bills
+      # time (Dockerfile.agentic), not cloned per run as on K8s. Vast.ai bills
       # per GPU-hour, so a git clone plus `pip install -e` of SWE-agent,
       # swebench and modal at the start of every run is rented time burned on
       # setup. This must stay in step with the image.

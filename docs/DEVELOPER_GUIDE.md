@@ -14,16 +14,16 @@ the long form and supersedes it where they overlap.
 
 TEASBench originally ran one kind of experiment: a **MoE** sweep — start an
 inference server, run a client against it, record metrics. One self-contained
-Kubernetes Job per CSV row on EIDF, later also one rented instance per group on
+Kubernetes Job per CSV row on a K8s cluster, later also one rented instance per group on
 Vast.ai.
 
 AgentCAP separately grew the ability to run **agentic** benchmarks — SWE-bench
 Lite, MCP Atlas, IMO AnswerBench — including a working but bespoke Kubernetes
-execution path for SWE-bench Lite on EIDF.
+execution path for SWE-bench Lite on Kubernetes.
 
 The goal of this work was to move the *operational execution* of agentic
 benchmarks into TEASBench's existing pipeline, so that all four combinations of
-{MoE, agentic} × {EIDF, Vast.ai} are steered the same way, from the same CSVs,
+{MoE, agentic} × {K8s, Vast.ai} are steered the same way, from the same CSVs,
 through the same rule engine — while leaving benchmark *semantics* in AgentCAP.
 
 ---
@@ -56,8 +56,8 @@ about *how* those endpoints come to exist is TEASBench's business.
 The seam is provider resolution by dotted path:
 
 ```
---sandbox-provider teasbench.sandbox.k8s:InClusterK8sProvider
---exec-provider    teasbench.sandbox.k8s:InClusterK8sProvider
+--sandbox-provider k8s_pod_providers:InClusterK8sProvider
+--exec-provider    k8s_pod_providers:InClusterK8sProvider
 ```
 
 `agent_cap.agents.sandbox_providers.get_sandbox_provider()` resolves a name in
@@ -78,8 +78,20 @@ is most of understanding the codebase.
 |---|---|---|
 | **family** | `moe`, `agentic` | leading `family` CSV column |
 | **benchmark** | gsm8k / arena-hard / longbench_v1 (MoE)<br/>imo-answerbench / mcp-atlas / swe-bench-lite (agentic) | `dataset` or `benchmark` column |
-| **platform** | `eidf`, `vastai` | `platform` column (default `eidf`) / `--vast` |
+| **platform** (site) | `eidf`, `vastai` | `--site`, else the `platform` column, else `eidf` |
+| **orchestrator** | `k8s`, `vastai` | derived — declared by the site profile |
 | **engine** | `sglang`, `vllm` | `inference_engine` column |
+
+**Site vs orchestrator.** `platform` names a *site* — one concrete place runs
+happen — and is also the label results are published under
+(`TEAS_Results_Private/{moe,agentic}/eidf/...`, alongside `amd`, `cerebras`,
+`dgx-spark`, `tenstorrent`, `vastai`), which is why it stays `eidf` rather than
+becoming `k8s`. Each site has a profile in `pipeline/configs/sites/<name>.yaml`
+holding everything cluster-specific: namespace, Kueue queue, PVC names, GPU
+node-label values, model staging root, and whether pods are granted RBAC. That
+profile declares the *orchestrator* — how work is launched — and `config.yaml`
+rules and `utils.py` predicates branch on that, never on the site. Adding a
+second Kubernetes cluster is therefore a new profile and no code change.
 
 `family` is **required and never inferred**. It selects the job template, the
 image, the in-container runner and the results tree — too consequential to
@@ -119,7 +131,7 @@ This is the design decision that makes one config serve two platforms. The
 pipeline never says "pod sidecar"; it says "tool server endpoint", and each
 platform implements it.
 
-| Capability | EIDF | Vast.ai |
+| Capability | K8s cluster | Vast.ai |
 |---|---|---|
 | LLM endpoint | in-pod `localhost:8000` | in-container `localhost:8000` |
 | Tool server (MCP Atlas) | sidecar **container** in the pod | background **process** in the one container |
@@ -137,7 +149,7 @@ small: it fills one specific hole rather than abstracting everything.
 
 ## 5. Execution model
 
-### EIDF — one self-contained Job per row
+### K8s cluster — one self-contained Job per row
 
 ```mermaid
 sequenceDiagram
@@ -166,7 +178,7 @@ Fire-and-forget: no login-node driver, no tunnels, no babysitting.
 ```mermaid
 sequenceDiagram
     participant U as You (laptop)
-    participant G as generate.py --vast
+    participant G as generate.py --site vastai
     participant V as Vast.ai
     participant I as Instance
     participant R as Results repo
@@ -185,9 +197,10 @@ sequenceDiagram
     I->>V: self-destruct via API
 ```
 
-### EIDF + SWE-bench Lite — the exception to the Job model
+### K8s without pod RBAC + SWE-bench Lite — the exception to the Job model
 
-**EIDF does not grant pods RBAC.** A pod cannot create Jobs or read pods via its
+**Some clusters do not grant pods RBAC** -- EIDF among them, and it is the cluster
+this path was validated on. A pod cannot create Jobs or read pods via its
 ServiceAccount, so `InClusterK8sProvider` is unusable there and SWE-bench Lite
 uses `PortForwardK8sProvider`, driven from a **login node**.
 
@@ -197,10 +210,10 @@ Jobs.** What moves off the cluster is only the *driver process*.
 
 ```mermaid
 flowchart TB
-    subgraph LN["EIDF login node (VM, no GPU)"]
+    subgraph LN["login node (VM, no GPU)"]
         D["python -m agent_cap.agents<br/><b>the driver</b><br/>holds YOUR kubectl credentials"]
     end
-    subgraph CL["EIDF Kubernetes cluster"]
+    subgraph CL["Kubernetes cluster"]
         E["<b>engine Job — GPU</b><br/>sglang / vllm serving the model"]
         S["<b>sandbox Jobs — no GPU</b><br/>swe-rex in the instance image<br/>one per task, created at run time"]
         V["<b>eval Jobs — no GPU</b><br/>official TestSpec grading"]
@@ -214,7 +227,7 @@ flowchart TB
 
 **Why this works without RBAC.** Submitting a Job is something *you* are allowed
 to do — the port-forward preflight confirms `create jobs` and
-`create pods/portforward` are granted to your account on EIDF. What is refused is
+`create pods/portforward` are granted to your account. What is refused is
 granting those rights to a *pod's ServiceAccount*. Moving the driver to the login
 node swaps the pod's identity for yours, and the whole thing becomes permissible.
 
@@ -231,7 +244,7 @@ still run as ordinary generated Jobs, unattended, exactly like MoE.
 `k8s/launch_llm_server.sh` and `k8s/port_forward_llm.sh` should not be ported
 because the in-cluster driver made them unnecessary. Under the confirmed
 no-RBAC reality that is only true for IMO AnswerBench and MCP Atlas. For
-SWE-bench on EIDF their *function* — a server-only Job plus a tunnel to it — is
+SWE-bench on such a cluster their *function* — a server-only Job plus a tunnel to it — is
 required. That function now lives in the pipeline: a row needing a login-node
 driver (`utils.needs_login_node_driver`) renders **two** artifacts instead of
 one, via `Template.get_artifacts()`:
@@ -249,7 +262,7 @@ deletes it on every exit path — an aborted run cannot strand GPUs.
 ### The shared rule engine
 
 Both platforms build their commands from the **same** `pipeline/configs/config.yaml`
-through the **same** `template.py` rule engine. On EIDF `template.py` renders a
+through the **same** `template.py` rule engine. On a K8s cluster `template.py` renders a
 Job YAML; on Vast.ai `vast/resolve_commands.py` calls the same rule engine
 inside the container and prints base64 command blocks. Nothing about a
 benchmark is specified twice.
@@ -259,9 +272,9 @@ flowchart LR
     CSV[experiments/*.csv] --> GEN[generate.py]
     CFG[configs/config.yaml] --> TPL[template.py<br/>rule engine]
     GEN --> TPL
-    TPL -->|eidf, moe| Y1[templates/template.yaml]
-    TPL -->|eidf, agentic| Y2[templates/agentic.yaml]
-    GEN -->|--vast| VG[vast_generate.py]
+    TPL -->|k8s, moe| Y1[templates/template.yaml]
+    TPL -->|k8s, agentic| Y2[templates/agentic.yaml]
+    GEN -->|orchestrator: vastai| VG[vast_generate.py]
     VG --> SH[vast_*.sh]
     SH -.runs in container.-> RC[vast/resolve_commands.py]
     CFG --> RC
@@ -274,7 +287,7 @@ flowchart LR
 values ORed. Matching rules are applied in ascending specificity, so a general
 rule sets a default and a more specific one overrides it. `platform` and
 `benchmark` are ordinary match dimensions — which is what lets a single config
-express "SWE-bench on EIDF uses the k8s provider; on Vast.ai it uses Modal".
+express "SWE-bench on a K8s cluster uses the k8s provider; on Vast.ai it uses Modal".
 
 ---
 
@@ -290,7 +303,7 @@ flowchart TB
     end
     subgraph OUT["Final implementation"]
         P["pipeline/ (generalised)"]
-        T["teasbench/sandbox/k8s.py"]
+        T["pipeline/k8s/lib/k8s_pod_providers/providers.py"]
         V["pipeline/vast/ (+ agentic)"]
     end
     AC -->|"provider seam,<br/>k8s logic (rewritten)"| T
@@ -308,7 +321,7 @@ flowchart TB
 | Taken | How |
 |---|---|
 | `SandboxProvider` interface | Kept in AgentCAP; extended with dotted-path resolution |
-| `_K8sSidecar` / `K8sSandboxProvider` logic | **Rewritten** into `teasbench/sandbox/k8s.py` as two providers |
+| `_K8sSidecar` / `K8sSandboxProvider` logic | **Rewritten** into `pipeline/k8s/lib/k8s_pod_providers/providers.py` as two providers |
 | `K8sExecContainer` | Rewritten as `K8sExecHandle` behind a new `ExecProvider` seam |
 | `patch_sweagent_streaming.py` | **Left in AgentCAP** — benchmark instrumentation, not deployment |
 | Task-index JSONs (`benchmarks/*.json`) | **Left in AgentCAP** — benchmark definition |
@@ -410,14 +423,14 @@ the Kubernetes API from wherever it runs.
 - **Port-forward**: the ported AgentCAP approach, driven from a login node with
   your own kubectl credentials.
 
-Both are implemented in `teasbench/sandbox/k8s.py`. The deciding fact — whether
+Both are implemented in `pipeline/k8s/lib/k8s_pod_providers/providers.py`. The deciding fact — whether
 EIDF grants pods RBAC for `jobs` and `pods` — could not be verified from a
 laptop, so building both was the hedge.
 
 **Settled 2026-07-28: EIDF does not grant pods RBAC.** On EIDF the answer is
 therefore always `PortForwardK8sProvider`, driven from a login node (see §5).
 `InClusterK8sProvider` remains for a cluster that does grant it; the hedge paid
-off, since the alternative would have been a rewrite at this point. `eidf/rbac/teasbench-runner-rbac.yaml`
+off, since the alternative would have been a rewrite at this point. `pipeline/k8s/rbac/teasbench-runner-rbac.yaml`
 is the manifest to apply; if the project declines it, switch to
 `PortForwardK8sProvider`.
 
@@ -463,7 +476,7 @@ mechanisms (§4) — retrofitting that later would have been expensive.
 
 The agentic image adds SWE-agent, swebench, swe-rex, modal, uv and Node 20 on
 top of an engine base image whose torch/transformers pins are notoriously
-brittle — the EIDF agentic path needs a whole torch/torchvision repair script
+brittle — the K8s agentic path needs a whole torch/torchvision repair script
 for exactly this reason. Sharing one image would put that dependency risk on MoE
 sweeps that need none of it. Two builds cost less than one broken MoE sweep.
 
@@ -490,15 +503,18 @@ sweeps that need none of it. Two builds cost less than one broken MoE sweep.
   (system `python3` lacks pandas)
 - `git` (the generator embeds the TEASBench commit for provenance, so it must
   run inside the repo)
-- `kubectl` configured for the namespace — EIDF only
+- `kubectl` configured for the namespace — K8s only
 - `vastai` CLI, authenticated — Vast.ai only
 
-### EIDF cluster
+### K8s cluster
 
-- Kueue queue `<namespace>-user-queue`
-- PVCs: `inputs-pvc`, `develop-pvc`, `eidf230shared`
+Names below are the EIDF profile's (`configs/sites/eidf.yaml`); another cluster
+supplies its own.
+
+- A Kueue queue (`queue:`), or `null` on a cluster that does not run Kueue
+- PVCs (`pvcs:`): `inputs-pvc`, `develop-pvc`, `eidf230shared`
 - Secrets: results-repo token, plus per-benchmark judge/tool secrets
-- **In-cluster SWE-bench only:** the RBAC in `eidf/rbac/teasbench-runner-rbac.yaml`
+- **In-cluster SWE-bench only:** the RBAC in `pipeline/k8s/rbac/teasbench-runner-rbac.yaml`
   (ServiceAccount + Role + RoleBinding for `batch/jobs`, `pods`, `pods/log`,
   `pods/exec`)
 
@@ -521,14 +537,14 @@ AgentCAP, MoE-CAP, `swe-rex`, `swebench`, `modal`, SWE-agent (streaming-patched)
 
 These are load-bearing. If one is false, something breaks.
 
-1. **Pod IPs are routable within the EIDF namespace.** The in-cluster provider
+1. **Pod IPs are routable within the namespace.** The in-cluster provider
    talks to `http://<podIP>:9999` directly. Fails on a cluster with a restrictive
    NetworkPolicy.
 2. **`kubectl` works in-cluster from the ServiceAccount token** with no kubeconfig.
 
 > Assumptions 1 and 2 are the two that gate in-cluster SWE-bench, and both are
 > checkable in about a minute with no GPU:
-> `kubectl -n <ns> create -f eidf/preflight/teasbench-preflight.yaml`.
+> `kubectl -n <ns> create -f pipeline/k8s/preflight/teasbench-preflight.yaml`.
 > The preflight replays `InClusterK8sProvider.acquire()` against a busybox
 > target. See USER_GUIDE §4.6.
 3. **Modal is reachable and authenticated** from a Vast.ai instance.
@@ -539,7 +555,7 @@ These are load-bearing. If one is false, something breaks.
    don't collide destructively (each run pulls before pushing).
 6. **The MCP Atlas server set defines the benchmark** — enabling a different set
    makes numbers incomparable, hence the pinned list and parity test.
-7. **`/dev/shm` is large enough** for checkouts and run dirs (EIDF mounts a
+7. **`/dev/shm` is large enough** for checkouts and run dirs (the job templates mount a
    16Gi in-memory emptyDir).
 
 ---
@@ -550,7 +566,7 @@ These are load-bearing. If one is false, something breaks.
 branches on `deployment in ("modal", "k8s")` to pick `docker.io/swebench/...`
 naming with a `_1776_` substitution. That is *registry* naming, not Kubernetes
 semantics — which is why `modal` shares the branch. Removing `"k8s"` naively
-produces unpullable image names for every EIDF run. See the removal doc.
+produces unpullable image names for every K8s run. See the removal doc.
 
 **MCP Atlas credentials degrade silently.** Servers with blank API keys still
 start and fail only at *tool-call* time, so a missing credential produces a lower
@@ -583,10 +599,11 @@ against a live engine.
 **CSV format is now breaking.** Any experiments CSV without a leading `family`
 column fails with a clear error — including CSVs on other branches.
 
-**Blackwell GPUs are unmapped.** `VAST_GPU_MAP` covers A100/H100/H200. The
-archived reference agentic runs are on B200/B300. Take the exact Vast.ai
-`gpu_name` strings from `vastai search offers` — a wrong one silently matches no
-offers.
+**Blackwell GPUs are only half-mapped.** `gpu_products` in
+`configs/sites/vastai.yaml` covers B200/B300 alongside A100/H100/H200, but
+`MODEL_DISK_GB_MAP` and `TEAS_GPU_NAME_MAP` in `utils.py` do not. The archived
+reference agentic runs are on B200/B300. Take the exact Vast.ai `gpu_name`
+strings from `vastai search offers` — a wrong one silently matches no offers.
 
 ---
 
@@ -601,7 +618,7 @@ offers.
 | `test_generate_pipeline.py` | MoE generation unchanged; agentic path conventions round-trip through the aggregator's parser |
 | `test_vast_generate.py` | Family split, per-benchmark script naming, secret sets, image separation, `family` required |
 | `test_sandbox_providers.py` | Both k8s providers, fully mocked — no cluster, no kubectl, no network |
-| `test_mcp_env.py` | EIDF and Vast.ai enable the identical 22 MCP servers; `.env` generation, provenance without values, mode 600 |
+| `test_mcp_env.py` | K8s and Vast.ai enable the identical 22 MCP servers; `.env` generation, provenance without values, mode 600 |
 
 **The load-bearing invariant is that MoE generation is byte-for-byte unchanged.**
 Verify by reconstructing the pre-change generator from git and diffing its output:

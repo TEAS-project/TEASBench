@@ -3,7 +3,7 @@ kind: Job
 metadata:
   generateName: @name_k8s@-
   labels:
-    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
+    kueue.x-k8s.io/queue-name: @k8s_queue@
 spec:
   completions: 1
   backoffLimit: 0
@@ -39,8 +39,21 @@ spec:
             value: /mnt/input/pip_cache
           - name: PYTORCH_NVML_BASED_MEMORY_STATS
             value: "0"
+          # Import root for k8s_pod_providers (the in-pod checkout is cloned to
+          # /dev/shm/TEASBench by extra_setup). Only pipeline/k8s/lib goes on the
+          # path: it holds nothing but that package, so no directory in this repo
+          # can shadow a real module in the image's site-packages.
           - name: PYTHONPATH
-            value: /dev/shm/TEASBench
+            value: /dev/shm/TEASBench/pipeline/k8s/lib
+          # Cluster identity, from the site profile this was generated for.
+          # Read by k8s_pod_providers when it creates the per-task sandbox and
+          # eval Jobs, and by the in-cluster kubectl context in extra_setup.
+          # Set here rather than left to the providers' own defaults, which
+          # would otherwise silently target the wrong cluster.
+          - name: TEASBENCH_K8S_NAMESPACE
+            value: @k8s_namespace@
+          - name: TEASBENCH_K8S_QUEUE
+            value: @k8s_queue@
 
           # Runner metadata / behaviour
           - name: INFERENCE_ENGINE
@@ -329,13 +342,13 @@ spec:
       volumes:
         - name: inputs
           persistentVolumeClaim:
-            claimName: inputs-pvc
+            claimName: @pvc_inputs@
         - name: develop
           persistentVolumeClaim:
-            claimName: develop-pvc
+            claimName: @pvc_develop@
         - name: shared
           persistentVolumeClaim:
-            claimName: eidf230shared
+            claimName: @pvc_shared@
         # Tiny shared volume carrying only the shutdown sentinel between the
         # main container and any sidecar (see the EXIT trap above).
         - name: sidecar-signal

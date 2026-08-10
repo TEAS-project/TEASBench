@@ -6,10 +6,10 @@ project namespace). Unlike the in-cluster preflight, this path uses *your own*
 kubectl credentials and needs no ServiceAccount and no RBAC manifest, which is
 exactly why it is the fallback when in-cluster mode is unavailable.
 
-    python3 eidf/preflight/preflight_portforward.py
-    python3 eidf/preflight/preflight_portforward.py --namespace eidf230ns
+    python3 pipeline/k8s/preflight/preflight_portforward.py
+    python3 pipeline/k8s/preflight/preflight_portforward.py --namespace eidf230ns
 
-What it exercises: the REAL teasbench.sandbox.k8s.PortForwardK8sProvider --
+What it exercises: the REAL k8s_pod_providers.PortForwardK8sProvider --
 its OS port allocation, `kubectl port-forward` spawn, restart-on-death during
 startup, readiness poll, tunnel-babysitter thread, and cleanup on release.
 
@@ -33,8 +33,9 @@ import time
 import urllib.request
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO))
+# pipeline/k8s/lib is the import root for k8s_pod_providers -- the same single
+# directory the driver puts on PYTHONPATH, so this exercises the real path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 FAILED = 0
 CHECK_IMAGE = os.environ.get("TEASBENCH_PREFLIGHT_IMAGE", "busybox:1.36")
@@ -131,7 +132,7 @@ def patch_sandbox_payload(k8s):
 
 def check_sandbox(ns, queue, instance_id=None):
     print("\n[3] PortForwardK8sProvider.acquire() / release()")
-    from teasbench.sandbox import k8s
+    from k8s_pod_providers import providers as k8s
 
     if instance_id:
         # Full fidelity: the real per-instance image, the real swe-rex install,
@@ -215,7 +216,7 @@ def check_exec(ns, queue, instance_id=None):
     exec_image = swebench_image(instance_id) if instance_id else EXEC_IMAGE
     print(f"      image: {exec_image}"
           + ("" if instance_id else "  (needs bash + tar, as the real instance images have)"))
-    from teasbench.sandbox import k8s
+    from k8s_pod_providers import providers as k8s
 
     # No substitution needed: the real exec spec just runs `sleep`.
     provider = k8s.PortForwardK8sProvider(namespace=ns, queue=queue)
@@ -290,7 +291,7 @@ def main():
     if FAILED == 0:
         print("ALL CHECKS PASSED -- PortForwardK8sProvider works on this cluster.")
         print("Use it by pointing --sandbox-provider / --exec-provider at")
-        print("  teasbench.sandbox.k8s:PortForwardK8sProvider")
+        print("  k8s_pod_providers:PortForwardK8sProvider")
         print("and driving the run from this node (see docs/USER_GUIDE.md 7.3).")
     else:
         print("SOME CHECKS FAILED -- see FAIL lines above.")

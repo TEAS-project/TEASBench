@@ -1,4 +1,4 @@
-# RBAC for teasbench.sandbox.k8s.InClusterK8sProvider.
+# RBAC for k8s_pod_providers.InClusterK8sProvider.
 #
 # InClusterK8sProvider runs `kubectl` from inside a TEASBench Job pod to
 # create/watch/delete per-task sandbox and exec Jobs, and to `kubectl cp`/
@@ -9,7 +9,7 @@
 # (a self-service EIDF project member often does not have this).
 #
 # If your EIDF project does not permit applying this file, skip it and use
-# `sandbox_mode: port-forward` (teasbench.sandbox.k8s.PortForwardK8sProvider)
+# `sandbox_mode: port-forward` (k8s_pod_providers.PortForwardK8sProvider)
 # instead, driving the run from a login node where your own kubectl
 # credentials already have the necessary rights.
 #

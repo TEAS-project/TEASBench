@@ -14,7 +14,8 @@ sys.path.insert(0, str(PIPELINE_DIR))
 import yaml
 
 from template import Template
-from utils import AGENTIC_BENCHMARKS, HF_MODEL_MAP, TEAS_GPU_NAME_MAP, benchmark_family, local_model_path
+from utils import (AGENTIC_BENCHMARKS, HF_MODEL_MAP, TEAS_GPU_NAME_MAP,
+                   benchmark_family, load_site, local_model_path)
 
 def resolve_env_exports(template, config, matching_rules, parameters):
     """Translate any extra_container_env rules from the config into
@@ -113,12 +114,12 @@ def resolve_agentic(template, config, args):
       8. @extra_setup@ -- benchmark-specific setup run after the AgentCAP
          checkout (e.g. SWE-agent + the streaming patch), base64-encoded
       9. the tool-server startup block, base64-encoded: Vast.ai's
-         capability-equivalent of the EIDF template's sidecar_containers is
+         capability-equivalent of the K8s template's sidecar_containers is
          config.yaml's tool_server_setup (e.g. "bash
          /opt/AgentCAP/mcp-server/start.sh &"); its readiness-poll half is
          pure bash with no k8s-specific content, so it is NOT duplicated --
          this line is tool_server_setup concatenated with the SAME
-         sidecar_wait value the EIDF template also renders. Empty (blank
+         sidecar_wait value the K8s template also renders. Empty (blank
          line, base64 of "") for benchmarks that need no tool server
          (imo-answerbench, swe-bench-lite).
       10. @teas_env_exports@ -- the benchmark-specific TEAS_BACKEND export,
@@ -149,6 +150,8 @@ def resolve_agentic(template, config, args):
     if args.num_tasks is None:
         sys.exit("ERROR: --num-tasks is required when --benchmark is set")
 
+    site = load_site(args.platform)
+
     parameters = {
         "inference_engine": args.inference_engine,
         "model": args.model,
@@ -161,7 +164,12 @@ def resolve_agentic(template, config, args):
         "num_tasks": args.num_tasks,
         "concurrency": args.concurrency if args.concurrency is not None else 4,
         "platform": args.platform,
-        "model_path": local_model_path(args.model),
+        # config.yaml rules match on the *mechanism*, not the site, so the
+        # orchestrator its site profile declares has to be in the parameter
+        # dict too -- otherwise every orchestrator-scoped rule silently misses
+        # here and the container resolves a command with the k8s defaults.
+        "orchestrator": site["orchestrator"],
+        "model_path": local_model_path(args.model, site),
     }
 
     matching_rules = template.get_matching_rules(config.get("rules", []), parameters)
@@ -171,7 +179,7 @@ def resolve_agentic(template, config, args):
     # -- see config.yaml's AGENTIC FAMILY section), not one shared
     # 'agentic_server' -- this script only ever runs on Vast.ai
     # (--platform defaults to "vastai" and nothing else sets it), so unlike
-    # _agentic() there's no swebench_eidf_engine_* branch to consider here.
+    # _agentic() there's no swebench_k8s_engine_* branch to consider here.
     group = {
         "imo-answerbench": "imoanswerbench",
         "mcp-atlas": "mcpatlas",
@@ -209,11 +217,11 @@ def resolve_agentic(template, config, args):
 def main():
     """
     run_benchmarks.sh (MoE) and run_agentic_benchmarks.sh (agentic) both call
-    this script in order to use the same template.py code used in the EIDF
+    this script in order to use the same template.py code used in the K8s
     pipeline to build their server/client commands. This means both Vast.ai
     scripts stay driven by the one pipeline/configs/config.yaml included in
     the image, instead of duplicating its rules and falling out of sync with
-    the EIDF pipeline (see the "Further work" note this replaced in
+    the K8s pipeline (see the "Further work" note this replaced in
     pipeline/vast/README.md, and docs/agentic-pipeline-design.md §4).
 
     It also translates from the short-form model names used in the CSV files
