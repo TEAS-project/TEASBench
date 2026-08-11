@@ -246,13 +246,15 @@ spec:
             ##################
             echo "Collecting results..."
 
-            RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@results_repo@/@output_repo_dir@/$timestamp
-            mkdir -p $RUN_OUTPUT_DIR
+            # Archive EVERYTHING to the PVC first, before any git operation, so the data
+            # survives regardless of what happens with the results repo.
+            PVC_RUN_OUTPUT_DIR=$TEAS_OUTPUT_DIR/@pvc_archive_dir@/@output_repo_dir@/$timestamp
+            mkdir -p $PVC_RUN_OUTPUT_DIR
 
             # AgentCAP's TEAS writer (and the raw per-task outputs) land in
             # $OUTPUT_ROOT ($RUN_DIR/agentic); the results-repo layout is flat
             # (see TEAS_Results_Private/agentic/**), so copy their contents
-            # directly into RUN_OUTPUT_DIR rather than preserving the
+            # directly into PVC_RUN_OUTPUT_DIR rather than preserving the
             # agentic/ subdirectory. nullglob means a pattern with no match
             # (e.g. metadata_*.json for imo-answerbench, which never calls
             # write_teas_outputs -- see docs/agentic-pipeline-design.md)
@@ -266,20 +268,20 @@ spec:
             )
             shopt -u nullglob
             if [ ${#RESULT_FILES[@]} -gt 0 ]; then
-                cp "${RESULT_FILES[@]}" $RUN_OUTPUT_DIR/
+                cp "${RESULT_FILES[@]}" $PVC_RUN_OUTPUT_DIR/
             fi
             if [ -f /mnt/shared/job-configs/${k8s_job_name}.yaml ]; then
-                cp /mnt/shared/job-configs/${k8s_job_name}.yaml $RUN_OUTPUT_DIR/
+                cp /mnt/shared/job-configs/${k8s_job_name}.yaml $PVC_RUN_OUTPUT_DIR/
                 rm /mnt/shared/job-configs/${k8s_job_name}.yaml
             fi
 
-            exec &>> $RUN_OUTPUT_DIR/stdout_stderr.log
-            cd $RUN_OUTPUT_DIR
-            echo "Files copied to pvc at $RUN_OUTPUT_DIR"
+            exec &>> $PVC_RUN_OUTPUT_DIR/stdout_stderr.log
+            cd $PVC_RUN_OUTPUT_DIR
+            echo "Files copied to pvc at $PVC_RUN_OUTPUT_DIR"
 
             job_end_time=$(date +%s)
             job_duration=$((job_end_time - job_start_time))
-            jq -n --arg job_duration $job_duration '{job: $job_duration}' >> $RUN_OUTPUT_DIR/timings.json
+            jq -n --arg job_duration $job_duration '{job: $job_duration}' >> $PVC_RUN_OUTPUT_DIR/timings.json
 
             #####################################################
             # Provenance: commits, timings, and the run metadata #
@@ -296,26 +298,76 @@ spec:
               --argjson num_tasks "@num_tasks@" \
               --argjson concurrency "@concurrency@" \
               --arg sandbox_provider "@sandbox_provider@" \
-              --slurpfile timings $RUN_OUTPUT_DIR/timings.json \
+              --slurpfile timings $PVC_RUN_OUTPUT_DIR/timings.json \
               '{teasbench_commit: $teasbench_commit, agentcap_commit: $agentcap_commit, benchmark: $benchmark, model: $model, model_local_path: $model_local_path, num_tasks: $num_tasks, concurrency: $concurrency, sandbox_provider: (if $sandbox_provider == "" then null else $sandbox_provider end), timings: ($timings | add)}' \
-              > $RUN_OUTPUT_DIR/provenance.json
+              > $PVC_RUN_OUTPUT_DIR/provenance.json
 
-            #########################
-            # Push to results repo  #
-            #########################
+            #############################################
+            # Publish curated subset to results repo    #
+            #############################################
+            # The PVC directory above is a pure archive shared by every job on this PVC and is
+            # never a git working tree. All git work happens in a throwaway clone in /dev/shm so
+            # that a fresh checkout can never collide with another job's untracked archive files,
+            # and concurrent pushes are handled by retrying with a rebase rather than by locking.
             GITHUB_RESULTS_TOKEN="${GITHUB_RESULTS_TOKEN%$'\n'}"
-            git pull "https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git" || true
-            git config user.email "autopush@eidf"
-            git config user.name "Pipeline Autopush"
+            REPO_URL="https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git"
+            CLONE=/dev/shm/@results_repo@
+            PUBLISH_SUBDIR="@output_repo_dir@/$timestamp"
 
-            shopt -s nullglob
-            ADD_FILES=(metrics*.json metadata*.json detailed-results_*.jsonl output-data*.jsonl results.jsonl timings.json provenance.json *.yaml *.log)
-            shopt -u nullglob
-            if [ ${#ADD_FILES[@]} -gt 0 ]; then
-                git add "${ADD_FILES[@]}"
+            rm -rf "$CLONE"
+            if ! { git clone --quiet --branch main --single-branch --depth 1 --no-checkout "$REPO_URL" "$CLONE" \
+                   && git -C "$CLONE" sparse-checkout init --cone \
+                   && git -C "$CLONE" checkout --quiet main \
+                   && git -C "$CLONE" sparse-checkout add "$PUBLISH_SUBDIR"; }; then
+                echo "RESULTS PUBLISH FAILED: could not clone results repo; data is in $PVC_RUN_OUTPUT_DIR"
+            else
+                git -C "$CLONE" config user.email "autopush@eidf"
+                git -C "$CLONE" config user.name "Pipeline Autopush"
+
+                LOCAL_RUN_OUTPUT_DIR="$CLONE/$PUBLISH_SUBDIR"
+                mkdir -p "$LOCAL_RUN_OUTPUT_DIR"
+
+                # Copy ONLY the files we publish, and copy them from the PVC archive: provenance.json
+                # and the enriched timings.json only exist there, and the job yaml exists only there --
+                # none of that is in $RUN_DIR.
+                shopt -s nullglob
+                publish_files=( $PVC_RUN_OUTPUT_DIR/metrics*.json \
+                                $PVC_RUN_OUTPUT_DIR/metadata*.json \
+                                $PVC_RUN_OUTPUT_DIR/detailed-results_*.jsonl \
+                                $PVC_RUN_OUTPUT_DIR/output-data*.jsonl \
+                                $PVC_RUN_OUTPUT_DIR/results.jsonl \
+                                $PVC_RUN_OUTPUT_DIR/*.yaml \
+                                $PVC_RUN_OUTPUT_DIR/*.log \
+                                $PVC_RUN_OUTPUT_DIR/timings.json \
+                                $PVC_RUN_OUTPUT_DIR/provenance.json )
+                shopt -u nullglob
+                if [ ${#publish_files[@]} -gt 0 ]; then
+                    cp "${publish_files[@]}" "$LOCAL_RUN_OUTPUT_DIR"/
+                fi
+
+                # The clone's run dir contains only the files copied above, so -A stages exactly
+                # the intended subset and cannot abort the way a non-matching pathspec does.
+                git -C "$CLONE" add -A -- "$PUBLISH_SUBDIR"
+
+                if git -C "$CLONE" diff --cached --quiet; then
+                    echo "RESULTS PUBLISH FAILED: nothing staged for $PUBLISH_SUBDIR; data is in $PVC_RUN_OUTPUT_DIR"
+                else
+                    git -C "$CLONE" commit -q -m "auto: @name_k8s@"
+                    PUSHED=0
+                    for attempt in 1 2 3 4 5 6; do
+                        if git -C "$CLONE" push -q "$REPO_URL" HEAD:main; then PUSHED=1; break; fi
+                        echo "push attempt $attempt rejected; rebasing onto origin/main"
+                        git -C "$CLONE" pull --rebase -q "$REPO_URL" main || break
+                        sleep $(( (RANDOM % 20) + 5 ))
+                    done
+                    if [ $PUSHED -eq 1 ]; then
+                        echo "RESULTS PUBLISHED to $PUBLISH_SUBDIR"
+                    else
+                        echo "RESULTS PUBLISH FAILED after retries; data is in $PVC_RUN_OUTPUT_DIR"
+                    fi
+                fi
+                rm -rf "$CLONE"
             fi
-            git commit -m "auto: @name_k8s@"
-            git push "https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git"
 
             echo "Finalising container"
             exit $CLIENT_SUCCESS

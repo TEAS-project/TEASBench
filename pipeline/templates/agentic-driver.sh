@@ -297,7 +297,10 @@ if [ $PUSH -eq 1 ]; then
     else
         REPO_URL="https://github.com/TEAS-project/@results_repo@.git"
     fi
-    if git clone --quiet "$REPO_URL" "$REPO_CLONE" 2>/dev/null; then
+    if { git clone --quiet --branch main --single-branch --depth 1 --no-checkout "$REPO_URL" "$REPO_CLONE" \
+         && git -C "$REPO_CLONE" sparse-checkout init --cone \
+         && git -C "$REPO_CLONE" checkout --quiet main \
+         && git -C "$REPO_CLONE" sparse-checkout add "$RESULTS_SUBDIR"; } 2>/dev/null; then
         DEST="$REPO_CLONE/$RESULTS_SUBDIR"
         mkdir -p "$DEST"
         shopt -s nullglob

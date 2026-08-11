@@ -173,7 +173,10 @@ spec:
             PUBLISH_SUBDIR="@output_repo_dir@/$timestamp"
 
             rm -rf "$CLONE"
-            if ! git clone --quiet "$REPO_URL" "$CLONE"; then
+            if ! { git clone --quiet --branch main --single-branch --depth 1 --no-checkout "$REPO_URL" "$CLONE" \
+                   && git -C "$CLONE" sparse-checkout init --cone \
+                   && git -C "$CLONE" checkout --quiet main \
+                   && git -C "$CLONE" sparse-checkout add "$PUBLISH_SUBDIR"; }; then
                 echo "RESULTS PUBLISH FAILED: could not clone results repo; data is in $PVC_RUN_OUTPUT_DIR"
             else
                 git -C "$CLONE" config user.email "autopush@eidf"
