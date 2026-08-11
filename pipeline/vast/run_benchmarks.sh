@@ -58,7 +58,14 @@ RESULTS_REPO="TEAS_Development_Results_Private"
 RESULTS_REPO_USER="TEAS-project"
 RESULTS_REPO_URL="https://oauth2:$GIT_TOKEN@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
 echo "Cloning results repo $RESULTS_REPO"
-git clone "$RESULTS_REPO_URL"
+# Shallow, single-branch, no-checkout up front, then a cone-mode sparse-checkout that
+# push_results (below) grows by one directory per row it publishes. --filter=blob:none
+# makes it a partial clone so blobs for the repo's whole accumulated history of prior
+# runs are never downloaded -- sparse-checkout alone only stops them being written to
+# the working tree, not fetched.
+git clone --quiet --branch main --single-branch --depth 1 --filter=blob:none --no-checkout "$RESULTS_REPO_URL" "$RESULTS_REPO"
+git -C "$RESULTS_REPO" sparse-checkout init --cone
+git -C "$RESULTS_REPO" checkout --quiet main
 
 # Function to run a single benchmark. Takes the run directory, the dataset name,
 # and the row's client command (base64-encoded, as printed by resolve_commands.py).
@@ -129,8 +136,9 @@ push_results() {
     echo "Job took $job_duration seconds"
     jq -n --arg job_duration "$job_duration" '{job: $job_duration}'  >> "$output_dir/timings.json"
 
-    # Pull to refresh before committing and pushing in case there have been any pushes from elsewhere since the last pull.
-    git pull "$RESULTS_REPO_URL" main
+    # Bring this row's subdirectory into the sparse-checkout scope -- a brand-new
+    # directory not yet in scope silently fails to stage with a plain `git add`.
+    git sparse-checkout add "$run_subdir"
 
     # Commit and push data to results repository
     git add -f "$output_dir/metrics*.json" \
@@ -141,7 +149,18 @@ push_results() {
                "$output_dir/client.log" \
                "$output_dir/server.log"
     git commit -m "auto: ${r[inference_engine]}-${model_name}-${r[dataset]}-${r[num_samples]}-${r[gpu]}x${r[num_gpu]}-bs${r[batch_size]}"
-    git push "https://oauth2:${GIT_TOKEN}@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
+    # Push first and only reconcile if another instance got there first: fetching up
+    # front costs a round trip per CSV row even when nothing has changed. Every row
+    # writes its own timestamped directory, so a rejected push is never a real
+    # conflict and the rebase is a trivial replay of an add-only commit.
+    local pushed=0
+    for attempt in 1 2 3 4 5 6; do
+        if git push -q "$RESULTS_REPO_URL" HEAD:main; then pushed=1; break; fi
+        echo "push attempt $attempt rejected; rebasing onto origin/main"
+        git pull --rebase -q "$RESULTS_REPO_URL" main || break
+        sleep $(( (RANDOM % 20) + 5 ))
+    done
+    [ $pushed -eq 1 ]
 }
 
 # Get MoE-CAP commit hash for reproducibility.
