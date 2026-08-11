@@ -1,4 +1,4 @@
-"""Tests for the MCP Atlas tool-server wiring shared by EIDF and Vast.ai.
+"""Tests for the MCP Atlas tool-server wiring shared by K8s and Vast.ai.
 
 The mcp-atlas *server set* is the benchmark definition -- AgentCAP's docs state
 that dropping any server changes results -- so the two platforms enabling
@@ -33,8 +33,8 @@ def _config():
 
 
 class EnabledServersParityTests(unittest.TestCase):
-    def test_eidf_sidecar_enables_exactly_the_shared_server_set(self):
-        """EIDF passes the list to the sidecar container as an env var."""
+    def test_k8s_sidecar_enables_exactly_the_shared_server_set(self):
+        """The K8s path passes the list to the sidecar container as an env var."""
         blocks = [
             rule["sidecar_containers"]["value"]
             for rule in _config().get("rules", [])
@@ -45,7 +45,7 @@ class EnabledServersParityTests(unittest.TestCase):
         found = [b for b in blocks if MCP_ENABLED_SERVERS in b]
         self.assertTrue(
             found,
-            "EIDF sidecar_containers does not enable utils.MCP_ENABLED_SERVERS; "
+            "K8s sidecar_containers does not enable utils.MCP_ENABLED_SERVERS; "
             "the two platforms have drifted apart.")
 
     def test_vastai_tool_server_setup_enables_the_same_set(self):

@@ -8,7 +8,7 @@
 # Deliberately SEPARATE from the MoE Dockerfile alongside it rather than a
 # BENCHMARK_FAMILY switch inside one image. The agentic family needs SWE-agent,
 # swebench, swe-rex and modal on top of a base image (lmsysorg/sglang) whose
-# torch/transformers pins are notoriously brittle -- the EIDF agentic path needs
+# torch/transformers pins are notoriously brittle -- the K8s agentic path needs
 # a whole torch/torchvision repair script for exactly this reason. Sharing one
 # image would put that dependency risk on the MoE runs, which do not need any of
 # it. Two images cost a second build; one broken MoE sweep costs more.
@@ -59,7 +59,7 @@ RUN chmod +x /root/.local/bin/uv /root/.local/bin/uvx
 # Agentic runtime deps. Only swe-bench-lite rows exercise SWE-agent/swebench/
 # modal, but installing at build time keeps startup cost off the rented GPU clock.
 # On Vast.ai the SWE-bench sandbox substrate is Modal, which swe-rex supports
-# natively -- so unlike EIDF there is no sandbox provider and no kubectl here.
+# natively -- so unlike K8s there is no sandbox provider and no kubectl here.
 RUN python3 -m pip install --no-cache-dir \
         'swe-rex>=1.4.0' 'swebench>=2.0' modal boto3 && \
     git clone https://github.com/SWE-agent/SWE-agent.git /opt/swe_agent && \
@@ -105,7 +105,7 @@ COPY vast/run_agentic_benchmarks.sh /root/run_agentic_benchmarks.sh
 COPY vast/sglang/entrypoint-agentic.sh /root/entrypoint.sh
 RUN chmod +x /root/run_agentic_benchmarks.sh /root/entrypoint.sh
 
-# Command resolution infrastructure, shared with the EIDF pipeline: the same
+# Command resolution infrastructure, shared with the K8s pipeline: the same
 # template.py rule engine and the same configs/config.yaml, so a benchmark is
 # never specified twice.
 COPY template.py utils.py /opt/teasbench/pipeline/

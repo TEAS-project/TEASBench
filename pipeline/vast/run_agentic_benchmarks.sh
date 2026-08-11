@@ -158,7 +158,7 @@ push_results() {
     # AgentCAP's TEAS writer lands its outputs in $OUTPUT_ROOT ($run_dir/agentic); the
     # results-repo layout is flat (see TEAS_Results_Private/agentic/**), so copy their contents
     # directly into output_dir rather than preserving the agentic/ subdirectory -- same file
-    # set pipeline/templates/agentic.yaml (the EIDF template) collects. nullglob means a pattern
+    # set pipeline/templates/agentic.yaml (the K8s template) collects. nullglob means a pattern
     # with no match (e.g. metadata_*.json for imo-answerbench, which never calls
     # write_teas_outputs) simply disappears instead of leaving a literal unmatched glob.
     shopt -s nullglob
@@ -180,7 +180,7 @@ push_results() {
 
     # Provenance: commits, timings, and the run metadata needed to interpret the numbers --
     # sandbox placement is part of the measured scenario (see
-    # docs/agentic-pipeline-design.md's measurement caveat), same as the EIDF template records.
+    # docs/agentic-pipeline-design.md's measurement caveat), same as the K8s template records.
     jq -n \
       --arg teasbench_commit "${TEASBENCH_COMMIT:-unknown}" \
       --arg agentcap_commit "$AGENTCAP_COMMIT" \
@@ -400,7 +400,7 @@ while IFS=',' read -r -a VALUES; do
     eval "$server_command &> \"$RUN_DIR/server.log\" &"
     SERVER_PID=$!
 
-    # Wait until the /v1/models endpoint returns HTTP 200 (matches the EIDF template's own
+    # Wait until the /v1/models endpoint returns HTTP 200 (matches the K8s template's own
     # server-readiness check for the agentic server; MoE's run_benchmarks.sh polls /health
     # instead, which the MoE-CAP server implementations expose but vllm/sglang's own OpenAI
     # front-ends don't).
@@ -437,7 +437,7 @@ while IFS=',' read -r -a VALUES; do
         mkdir -p "$OUTPUT_ROOT"
 
         # TEAS_* env vars, read by agent_cap.agents.teas_output at run end (metadata_*.json /
-        # metrics_*.json hardware+model fields) -- same set the EIDF template exports.
+        # metrics_*.json hardware+model fields) -- same set the K8s template exports.
         export TEAS_ENGINE="${row[inference_engine]}"
         export TEAS_ENGINE_VERSION="$AGENTIC_ENGINE_VERSION"
         export TEAS_GPU_TYPE="$TEAS_GPU_NAME"

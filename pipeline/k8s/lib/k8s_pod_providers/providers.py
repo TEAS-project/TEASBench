@@ -1,21 +1,26 @@
-"""K8s sandbox + exec-container providers for SWE-bench-style benchmarks
-on EIDF.
+"""K8s sandbox + exec-container providers for SWE-bench-style benchmarks.
 
 This is the deployment-scenario side of the AgentCAP<->TEAS interface.
 AgentCAP consumes only endpoints - a `SandboxEndpoint` {host, port,
 auth_token} speaking the swe-rex protocol, and an exec-container handle
 (upload file / run command) - and loads the provider classes below by
-dotted path (`teasbench.sandbox.k8s:InClusterK8sProvider` etc). AgentCAP
+dotted path (`k8s_pod_providers:InClusterK8sProvider` etc). AgentCAP
 duck-types this interface, so nothing in this module imports agent_cap.
+
+Nothing here is specific to one cluster: everything a site varies is read
+from the environment (see the variable list below), which the pipeline
+sets from the site profile in `pipeline/configs/sites/`.
 
 Two providers, same capability, different connection strategy:
 
 - InClusterK8sProvider (the default): the caller runs *inside* the
   cluster (e.g. a Job pod), so sandbox pod IPs are directly routable.
   No port-forward, no OS port allocation, no tunnel-babysitter thread.
-- PortForwardK8sProvider (fallback): the caller runs from an EIDF login
-  node, outside the cluster, so it reaches the sandbox pod through
-  `kubectl port-forward` on an OS-assigned local port instead. This is a
+  Needs the cluster to grant pods RBAC for jobs/pods.
+- PortForwardK8sProvider (fallback): the caller runs from a login node
+  outside the cluster, so it reaches the sandbox pod through
+  `kubectl port-forward` on an OS-assigned local port instead. This is
+  what a cluster that refuses pod RBAC needs (EIDF, today). It is a
   faithful port of AgentCAP's original `_K8sSidecar` / K8sSandboxProvider
   (agent_cap/agents/sandbox_providers.py), including the comments
   documenting the production failures that shaped it.
@@ -244,7 +249,7 @@ class _BaseK8sProvider:
 
 
 class InClusterK8sProvider(_BaseK8sProvider):
-    """Default EIDF sandbox provider. Runs from *inside* the cluster (e.g.
+    """Default sandbox provider. Runs from *inside* the cluster (e.g.
     a TEASBench Job pod), where sandbox pod IPs are directly routable -
     so, unlike PortForwardK8sProvider, this needs no port-forward, no OS
     port allocation, no `start_new_session`, and no tunnel-babysitter
@@ -455,7 +460,7 @@ class _PortForwardSandbox:
 
 
 class PortForwardK8sProvider(_BaseK8sProvider):
-    """Fallback sandbox provider for driving a run from an EIDF login node
+    """Fallback sandbox provider for driving a run from a login node
     (outside the cluster), where sandbox pod IPs are not directly
     routable. Faithful port of AgentCAP's `_K8sSidecar` +
     `K8sSandboxProvider` (agent_cap/agents/sandbox_providers.py): OS-

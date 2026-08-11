@@ -32,11 +32,11 @@ ENGINE_MANIFEST="$HERE/@engine_manifest@"
 
 # Install locations come from the environment, never from this file: it is
 # generated on whatever machine ran generate.py, which is not necessarily the
-# machine that runs it. eidf/setup/setup_swebench_env.sh writes env.sh with all
+# machine that runs it. pipeline/k8s/setup/setup_swebench_env.sh writes env.sh with all
 # of them; source it first.
 if [ -z "${TEASBENCH_ENV_PREFIX:-}" ]; then
     echo "ERROR: TEASBench environment not loaded." >&2
-    echo "  Run once:  bash eidf/setup/setup_swebench_env.sh" >&2
+    echo "  Run once:  bash pipeline/k8s/setup/setup_swebench_env.sh" >&2
     echo "  Then:      source \$TEASBENCH_ENV_PREFIX/env.sh   (default ~/teasbench-env/env.sh)" >&2
     exit 1
 fi
@@ -44,7 +44,9 @@ for v in TEASBENCH_ROOT AGENTCAP_DIR SWEAGENT_DIR; do
     [ -n "${!v:-}" ] || { echo "ERROR: $v not set; re-run the setup script." >&2; exit 1; }
 done
 VERSIONS_FILE="${TEASBENCH_VERSIONS_FILE:-$TEASBENCH_ENV_PREFIX/versions.json}"
-NAMESPACE="${TEASBENCH_K8S_NAMESPACE:-eidf230ns}"
+# Default baked in from the site profile this was generated for
+# (pipeline/configs/sites/*.yaml); env var or --namespace still wins.
+NAMESPACE="${TEASBENCH_K8S_NAMESPACE:-@k8s_namespace@}"
 RUN_NAME="@name_k8s@"
 LOCAL_PORT="${LOCAL_PORT:-0}"          # 0 = pick a free port, avoiding collisions
 ENGINE_TIMEOUT="${ENGINE_TIMEOUT:-3600}"
@@ -130,17 +132,17 @@ chk "can create pods/portforward"     "[ \"\$(kubectl -n '$NAMESPACE' auth can-i
 chk "agent_cap importable"            "python3 -c 'import agent_cap'"
 chk "swe-rex importable"              "python3 -c 'import swerex'"
 chk "swebench importable"             "python3 -c 'import swebench'"
-chk "provider importable"             "PYTHONPATH='$TEASBENCH_ROOT' python -c 'from teasbench.sandbox.k8s import PortForwardK8sProvider'"
+chk "provider importable"             "PYTHONPATH='$TEASBENCH_ROOT/pipeline/k8s/lib' python -c 'from k8s_pod_providers import PortForwardK8sProvider'"
 chk "engine manifest present"         "[ -f '$ENGINE_MANIFEST' ]" "Regenerate with pipeline/generate.py."
 chk "AgentCAP checkout ($AGENTCAP_DIR)" "[ -f '$AGENTCAP_DIR/benchmarks/swe_bench_lite_curated_100.json' ]" \
-    "Re-run eidf/setup/setup_swebench_env.sh."
+    "Re-run pipeline/k8s/setup/setup_swebench_env.sh."
 chk "versions file ($VERSIONS_FILE)"  "[ -f '$VERSIONS_FILE' ]" \
-    "Re-run eidf/setup/setup_swebench_env.sh; run metadata would otherwise omit dependency versions."
+    "Re-run pipeline/k8s/setup/setup_swebench_env.sh; run metadata would otherwise omit dependency versions."
 
 # A missing streaming patch yields a complete run with empty metrics -- an
 # expensive silent failure, so it is a hard precondition.
 chk "SWE-agent streaming-patched"     "grep -q AGENTCAP_STREAMING_PATCH_APPLIED '$SWEAGENT_DIR/sweagent/agent/models.py'" \
-    "Re-run eidf/setup/setup_swebench_env.sh (it applies and verifies the patch)."
+    "Re-run pipeline/k8s/setup/setup_swebench_env.sh (it applies and verifies the patch)."
 
 [ $fail -eq 0 ] || { echo; echo "Prerequisites failed -- nothing started."; exit 1; }
 
@@ -218,7 +220,7 @@ echo "  engine ready"
 
 echo
 echo "[3] Running the benchmark"
-export PYTHONPATH="$TEASBENCH_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$TEASBENCH_ROOT/pipeline/k8s/lib${PYTHONPATH:+:$PYTHONPATH}"
 export TEASBENCH_K8S_NAMESPACE="$NAMESPACE"
 # Referenced by the generated client command (see the eidf swe-bench rule in
 # pipeline/configs/config.yaml); AGENTCAP_DIR and SWEAGENT_DIR come from env.sh.
@@ -278,7 +280,7 @@ RESULTS_SUBDIR="@output_repo_dir@/$TIMESTAMP"
 if [ $PUSH -eq 1 ]; then
     # GIT_TOKEN is never stored on disk here; it is read fresh from the k8s
     # secret each run (name comes from env.sh, written by
-    # eidf/setup/setup_swebench_env.sh) and only ever held in this process's
+    # pipeline/k8s/setup/setup_swebench_env.sh) and only ever held in this process's
     # environment. An already-exported GIT_TOKEN (e.g. set by hand) wins.
     if [ -z "${GIT_TOKEN:-}" ] && [ -n "${GIT_TOKEN_K8S_SECRET:-}" ]; then
         GIT_TOKEN=$(kubectl -n "$NAMESPACE" get secret "$GIT_TOKEN_K8S_SECRET" \

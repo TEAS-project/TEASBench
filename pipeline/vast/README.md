@@ -4,7 +4,7 @@
 
 This directory contains the resources needed to run the pipeline through Vast.ai.
 
-We will provide containers derived from the same vLLM and SGLang images used on the EIDF, with a runscript and MoE-CAP baked in. Environment variables passed through the Vast.ai interface parameterise the benchmarks to be run and provide necessary secrets. The pipeline script will then run through the set of benchmarks, run them one-by-one and push the results to GitHub.
+We will provide containers derived from the same vLLM and SGLang images used on K8s clusters, with a runscript and MoE-CAP baked in. Environment variables passed through the Vast.ai interface parameterise the benchmarks to be run and provide necessary secrets. The pipeline script will then run through the set of benchmarks, run them one-by-one and push the results to GitHub.
 
 A script [run_vllm_gpt_oss_smoke.sh](vllm/run_vllm_gpt_oss_smoke.sh) can be found in the vllm directory. This runs through three datasets for the gpt-oss-20b benchmark. There is also [encode-csv-keyed-errors.sh](vllm/encode-csv-keyed-errors.sh); this is a test script which shows the contents of a CSV file being turned into a variable which can be passed through Vast.ai's interface into the container, then used to loop through the benchmark parameters on each line, error checking along the way. These two scripts now need to be combined.
 
@@ -12,7 +12,7 @@ Alternatively, allow an inclusive CSV within the container but only run those be
 
 ## Planned workflow
 
-1. Run the pipeline `generate.py` script locally, likely with a new `--vast` option to tell it to generate commands for Vast.ai and not the EIDF.
+1. Run the pipeline `generate.py` script locally with `--site vastai` to tell it to generate commands for Vast.ai and not a K8s cluster.
 2. This generates a bash script or scripts containing the required commands to reserve the requested resource on Vast.ai. Likely multiple scripts, separated by hardware and inference engine (since we need to ask Vast.ai to reserve given instances running given images). They will include the tokenised CSV file and the ability to retrieve and pass through as environment variables any secrets.
 3. Run the bash script to submit a 'job' to Vast.ai. Needs to be some decision-making about how to determine whether to reserve a given hardware option (given price in particular).
 4. The container will go through the entrypoint script, running all the benchmarks for this GPU/inference engine combination, pushing to GitHub as it goes.
@@ -27,7 +27,7 @@ tree, which is too consequential to leave implicit. A row with a missing or unre
 family is an error.
 
 ```bash
-python3 generate.py --csv_file=../experiments/swe-bench-lite-vastai.csv --vast
+python3 generate.py --csv_file=../experiments/swe-bench-lite-vastai.csv --site vastai
 ```
 
 That writes `vast_agentic_<benchmark>_<engine>_<gpu>x<n>.sh`, pointing at the agentic
@@ -38,22 +38,22 @@ image (`ghcr.io/teas-project/<engine>-agentic`), whose entrypoint runs
 The two families ship as **separate images** (`Dockerfile` vs `Dockerfile.agentic`) rather
 than one image with a runtime switch. The agentic image adds SWE-agent, swebench, swe-rex
 and modal on top of an engine base image whose torch/transformers pins are brittle - the
-EIDF agentic path needs a whole torch/torchvision repair script for exactly this reason.
+K8s agentic path needs a whole torch/torchvision repair script for exactly this reason.
 Sharing one image would put that dependency risk on MoE sweeps that need none of it.
 
 Both families resolve their commands through `resolve_commands.py`, which drives
-`template.py`'s rule engine against the *same* `configs/config.yaml` the EIDF pipeline
+`template.py`'s rule engine against the *same* `configs/config.yaml` the K8s pipeline
 uses. Nothing about a benchmark is specified twice.
 
-### How this differs from EIDF, and why
+### How this differs from K8s, and why
 
 The pipeline abstracts by *capability*, not by Kubernetes mechanism, which is what lets
 one config serve both platforms:
 
-| Capability | EIDF | Vast.ai |
+| Capability | K8s cluster | Vast.ai |
 |---|---|---|
 | Tool server (mcp-atlas) | sidecar container in the pod | background process in the one container |
-| SWE-bench sandboxes | k8s provider (`teasbench.sandbox.k8s:InClusterK8sProvider`) | **Modal** — native to swe-rex, so no provider at all |
+| SWE-bench sandboxes | k8s provider (`k8s_pod_providers:InClusterK8sProvider`) | **Modal** — native to swe-rex, so no provider at all |
 | SWE-bench grading | exec containers via the k8s provider | `SWEBENCH_HARNESS_MODAL=1` → harness `--modal true` |
 
 Kubernetes is the only substrate needing a sandbox provider; `modal` and `docker` are
@@ -88,23 +88,24 @@ comparing a run against the archived reference numbers.
 
 `ENABLED_SERVERS` is pinned to `utils.MCP_ENABLED_SERVERS` and deliberately
 ignores any value in the environment: the server set *is* the benchmark
-definition. `tests/test_mcp_env.py` asserts EIDF's sidecar and Vast.ai's `.env`
+definition. `tests/test_mcp_env.py` asserts the K8s sidecar and Vast.ai's `.env`
 enable the identical 22 servers.
 
 ### Known gap: Blackwell GPUs
 
-`VAST_GPU_MAP` in `pipeline/utils.py` currently maps A100/H100/H200 only. The archived
-reference agentic runs are on B200 and B300, so reproducing them needs entries for those
-— along with `MODEL_DISK_GB_MAP` and `TEAS_GPU_NAME_MAP`. The Vast.ai `gpu_name` strings
+`gpu_products` in `pipeline/configs/sites/vastai.yaml` maps A100/H100/H200 plus B200 and
+B300, which the archived reference agentic runs use. Reproducing those also needs entries
+in `MODEL_DISK_GB_MAP` and `TEAS_GPU_NAME_MAP` (`pipeline/utils.py`), which still cover
+A100/H100/H200 only. The Vast.ai `gpu_name` strings
 must be taken from `vastai search offers` rather than guessed: an incorrect name yields
 a search that silently matches no offers. The checked-in `*-vastai.csv` files therefore
 use H100/H200.
 
 ## Further work
 
-Currently, the entrypoint scripts living inside the container are decoupled from the EIDF pipeline, in particular the config.yaml options. This means any changes made to one pipeline (EIDF/VAST) need to be manually ported to the other. It's also rather ad hoc at the moment; doing something more programmatic would be much preferred.
+Currently, the entrypoint scripts living inside the container are decoupled from the K8s pipeline, in particular the config.yaml options. This means any changes made to one pipeline (K8s/Vast.ai) need to be manually ported to the other. It's also rather ad hoc at the moment; doing something more programmatic would be much preferred.
 
-This isn't ideal. Longer term, it may be a good idea to turn container entrypoint scripts into templates to be modified much in the same way as the EIDF YAMLs with the correct option sets for different benchmarks.
+This isn't ideal. Longer term, it may be a good idea to turn container entrypoint scripts into templates to be modified much in the same way as the K8s Job YAMLs with the correct option sets for different benchmarks.
 
 (The agentic path above already closes part of this gap: `resolve_commands.py` reuses
 `template.py` and `config.yaml` rather than duplicating them. The remaining ad-hockery is

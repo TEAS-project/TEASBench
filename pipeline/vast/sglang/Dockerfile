@@ -3,7 +3,7 @@
 # docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t ghcr.io/teas-project/sglang-bench:latest -f pipeline/vast/sglang/Dockerfile pipeline/
 # (or podman)
 
-# Base the image on SGLang v0.5.9 as on the EIDF.
+# Base the image on SGLang v0.5.9 as on K8s.
 FROM docker.io/lmsysorg/sglang:v0.5.9
 
 ENV DEBIAN_FRONTEND=noninteractive

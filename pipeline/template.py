@@ -4,7 +4,7 @@ import yaml
 import os
 import re
 import subprocess
-from utils import needs_login_node_driver, swe_bench_lite_k8s, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
+from utils import needs_login_node_driver, swe_bench_lite_on_k8s, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, site_of, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
 
 DEFINED_SENTINEL = "<defined>"
 
@@ -176,7 +176,7 @@ class Template:
         is identical across engines). The four agentic server cmd_types --
         'imoanswerbench_server', 'mcpatlas_server', 'swebenchlite_vastai_server'
         (all-in-one: client+server, same pod, AgentCAP image) and
-        'swebench_eidf_engine_server' (EIDF only: bare-image engine-only Job, no
+        'swebench_k8s_engine_server' (K8s only: bare-image engine-only Job, no
         AgentCAP image, no in-pod client at all) -- all draw on the same flag
         vocabulary as the MoE 'server' command, since a variable's concrete CLI
         flag is a property of sglang/vllm rather than of the benchmark or the
@@ -195,7 +195,7 @@ class Template:
             cmd_cfg = config["variables_defaults"]["server_command"][engine]
             rule_key = "server_flags"
         elif cmd_type in ("imoanswerbench_server", "mcpatlas_server",
-                          "swebenchlite_vastai_server", "swebench_eidf_engine_server"):
+                          "swebenchlite_vastai_server", "swebench_k8s_engine_server"):
             flags_def = self._server_flags_def(config, engine, "agentic")
             cmd_cfg = config["variables_defaults"][f"{cmd_type}_command"][engine]
             rule_key = "agentic_server_flags"
@@ -278,8 +278,8 @@ class Template:
         """
         # Which explicit variable group (see config.yaml's AGENTIC FAMILY
         # section) supplies this row's server image/flags/command: swe-bench-lite
-        # on any k8s cluster that grants pod RBAC (EIDF today via
-        # PortForwardK8sProvider, see swe_bench_lite_k8s) uses swebench_eidf_engine_*
+        # on any k8s cluster that grants pod RBAC (EIDF uses port-forward via
+        # PortForwardK8sProvider, see swe_bench_lite_on_k8s) uses swebench_k8s_engine_*
         # -- a bare base image with the engine already installed, no AgentCAP
         # client stack at all, since that Job never runs agent_cap.agents
         # in-pod. Every other row uses one
@@ -290,11 +290,11 @@ class Template:
         # pipeline/vast/resolve_commands.py calls build_command directly with
         # its own mirrored dispatch -- so the swebenchlite_vastai_* branch here
         # only matters if _agentic() is ever invoked directly against a
-        # platform=vastai row (e.g. generate.py run instead of generate.py --vast).
-        swe_bench_lite_engine = swe_bench_lite_k8s(parameters)
+        # platform=vastai row (e.g. generate.py run without --site vastai).
+        swe_bench_lite_engine = swe_bench_lite_on_k8s(parameters)
         benchmark = parameters.get("benchmark")
         if swe_bench_lite_engine:
-            group = "swebench_eidf_engine"
+            group = "swebench_k8s_engine"
         elif benchmark == "imo-answerbench":
             group = "imoanswerbench"
         elif benchmark == "mcp-atlas":
@@ -399,6 +399,12 @@ class Template:
 
         teasbench_commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
 
+        # Site values: everything about the target cluster that the job
+        # manifests would otherwise hardcode. Sourced from configs/sites/
+        # <platform>.yaml, so adding a cluster is a new profile, not a template
+        # edit. See utils.load_site.
+        site = site_of(parameters)
+
         # Substitutions common to every family
         replacements={
             "@name_k8s@": k8s_friendlify(get_run_name(parameters)),
@@ -408,7 +414,12 @@ class Template:
             "@results_repo@": results_repo,
             "@pvc_archive_dir@": PVC_ARCHIVE_DIR,
             "@output_repo_dir@": results_repo_dir(parameters),
-            "@teasbench_commit@": teasbench_commit
+            "@teasbench_commit@": teasbench_commit,
+            "@k8s_namespace@": str(site.get("namespace", "")),
+            "@k8s_queue@": str(site.get("queue", "")),
+            "@pvc_inputs@": str(site.get("pvcs", {}).get("inputs", "")),
+            "@pvc_develop@": str(site.get("pvcs", {}).get("develop", "")),
+            "@pvc_shared@": str(site.get("pvcs", {}).get("shared", "")),
         }
 
         if benchmark_family(parameters) == "agentic":
@@ -417,10 +428,6 @@ class Template:
             template_path, family_replacements = self._moe(config, parameters, matching_rules)
         replacements.update(family_replacements)
 
-        # The driver runs from a checkout on the login node and imports the
-        # provider from it, so it needs the repo root as an absolute path.
-        replacements["@teasbench_root@"] = os.path.abspath(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         if extra:
             replacements.update(extra)
         if template_override:

@@ -3,7 +3,7 @@ kind: Job
 metadata:
   generateName: @name_k8s@-
   labels:
-    kueue.x-k8s.io/queue-name:  eidf230ns-user-queue
+    kueue.x-k8s.io/queue-name:  @k8s_queue@
 spec:
   completions: 1
   backoffLimit: 0
@@ -244,13 +244,13 @@ spec:
       volumes:
         - name: inputs
           persistentVolumeClaim:
-            claimName: inputs-pvc
+            claimName: @pvc_inputs@
         - name: develop
           persistentVolumeClaim:
-            claimName: develop-pvc
+            claimName: @pvc_develop@
         - name: shared
           persistentVolumeClaim:
-            claimName: eidf230shared
+            claimName: @pvc_shared@
         - name: dshm
           emptyDir:
             medium: Memory

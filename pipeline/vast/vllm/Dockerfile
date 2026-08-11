@@ -3,7 +3,7 @@
 # docker build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t ghcr.io/teas-project/vllm-bench:latest -f pipeline/vast/vllm/Dockerfile pipeline/
 # (or podman)
 
-# Base the image on vLLM v0.16.0, as on the EIDF.
+# Base the image on vLLM v0.16.0, as on K8s.
 FROM docker.io/vllm/vllm-openai:v0.16.0
 
 ENV DEBIAN_FRONTEND=noninteractive

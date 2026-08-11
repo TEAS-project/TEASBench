@@ -39,14 +39,19 @@ path** `"package.module:ClassName"` that gets imported and instantiated. This
 pipeline's k8s Job template selects TEASBench's own implementation with:
 
 ```
---sandbox-provider teasbench.sandbox.k8s:InClusterK8sProvider
---exec-provider    teasbench.sandbox.k8s:InClusterK8sProvider
+--sandbox-provider k8s_pod_providers:InClusterK8sProvider
+--exec-provider    k8s_pod_providers:InClusterK8sProvider
 ```
 
-Making `teasbench.sandbox.k8s` importable is nothing more than putting
-TEASBench's own checkout on `PYTHONPATH` (`PYTHONPATH=/dev/shm/TEASBench`, set
-because the job clones TEASBench there anyway to pick up
-`configs/agents/*.yaml`). TEASBench is not pip-installed and carries no
+Making `k8s_pod_providers` importable is nothing more than putting one
+directory of TEASBench's own checkout on `PYTHONPATH`
+(`PYTHONPATH=/dev/shm/TEASBench/pipeline/k8s/lib`, since the job clones
+TEASBench there anyway to pick up `configs/agents/*.yaml`). That `lib/` level
+exists so the path entry contains *only* the provider package: pointing it at
+`pipeline/k8s/` instead would put `setup`, `preflight`, `rbac` and `helpers` on
+`sys.path` as PEP 420 namespace packages, ahead of `site-packages`, where they
+could shadow a real module of the same name in agent_cap, swe-agent or swe-rex.
+TEASBench is not pip-installed and carries no
 `pyproject.toml` -- this dotted-path trick is the entire packaging story, by
 design.
 
@@ -58,7 +63,7 @@ mechanical complexity, in this order:
 | | IMO AnswerBench | MCP Atlas | SWE-bench Lite |
 |---|---|---|---|
 | AgentCAP strategy | `single` | `single --tool-backend mcp` | `sweagent` |
-| AgentCAP evaluator | `imo` | `gtfa` | `swebench-k8s` (EIDF) |
+| AgentCAP evaluator | `imo` | `gtfa` | `swebench-k8s` (K8s) |
 | tool server needed | no | yes, one fixed instance (port 1984) | no |
 | dynamic containers | no | no | yes, ~100 distinct per-task images |
 
@@ -83,7 +88,7 @@ The same three benchmarks also run on two platforms, which differ in how they
 provide the two capabilities that vary at all: a tool server, and dynamic
 sandboxes.
 
-| | EIDF (k8s) | Vast.ai |
+| | K8s cluster | Vast.ai |
 |---|---|---|
 | unit of work | one k8s Job per experiment, generated YAML | one rented instance per (engine, gpu, num_gpu) group, running a CSV loop |
 | tool server (MCP Atlas) | a **sidecar container in the same pod** | a **background process in the same container** |
@@ -97,7 +102,7 @@ The design rule that keeps this from turning into a combinatorial mess:
 
 The concept this codebase reasons about is "the tool-server endpoint" and "the
 sandbox substrate" -- not "a pod sidecar" or "a kubectl subprocess". A pod
-sidecar is merely EIDF's way of providing the tool-server capability; a
+sidecar is merely Kubernetes's way of providing the tool-server capability; a
 background process is merely Vast.ai's way of providing the *same* capability.
 Code (and rules, and templates) should ask "does this benchmark need a tool
 server?" and "does this platform provide one as a sidecar or as a background
@@ -139,14 +144,14 @@ That round-trip time (RTT) is not a side channel -- it lands directly inside
 the per-task end-to-end latency AgentCAP records, exactly like any other
 inference latency. Two runs with identical model, engine, hardware and task
 set can therefore report different latency numbers purely because one placed
-its sandboxes in-cluster (EIDF, `InClusterK8sProvider`, pod-IP-routable, low
+its sandboxes in-cluster (`InClusterK8sProvider`, pod-IP-routable, low
 RTT) and the other reached them through a port-forward tunnel from a login
 node, or through Modal's own network path.
 
 Practically, this means **sandbox placement is part of the measured
 scenario**, not an implementation detail that can be abstracted away after the
 fact. This pipeline's job template writes the sandbox/exec provider choice
-(and, on EIDF, whether it went through `InClusterK8sProvider` or the
+(and, on a K8s cluster, whether it went through `InClusterK8sProvider` or the
 `PortForwardK8sProvider` fallback) into `provenance.json` alongside the
 TEASBench/AgentCAP commit hashes and per-phase timings, precisely so that
 later analysis can tell these runs apart instead of quietly averaging over a
