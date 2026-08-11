@@ -309,13 +309,16 @@ spec:
             # never a git working tree. All git work happens in a throwaway clone in /dev/shm so
             # that a fresh checkout can never collide with another job's untracked archive files,
             # and concurrent pushes are handled by retrying with a rebase rather than by locking.
+            # --filter=blob:none makes it a partial clone so blobs for the repo's whole
+            # accumulated history of prior runs are never downloaded -- sparse-checkout alone
+            # only stops them being written to the working tree, not fetched.
             GITHUB_RESULTS_TOKEN="${GITHUB_RESULTS_TOKEN%$'\n'}"
             REPO_URL="https://oauth2:${GITHUB_RESULTS_TOKEN}@github.com/TEAS-project/@results_repo@.git"
             CLONE=/dev/shm/@results_repo@
             PUBLISH_SUBDIR="@output_repo_dir@/$timestamp"
 
             rm -rf "$CLONE"
-            if ! { git clone --quiet --branch main --single-branch --depth 1 --no-checkout "$REPO_URL" "$CLONE" \
+            if ! { git clone --quiet --branch main --single-branch --depth 1 --filter=blob:none --no-checkout "$REPO_URL" "$CLONE" \
                    && git -C "$CLONE" sparse-checkout init --cone \
                    && git -C "$CLONE" checkout --quiet main \
                    && git -C "$CLONE" sparse-checkout add "$PUBLISH_SUBDIR"; }; then
