@@ -26,9 +26,11 @@ Exit code 0 and "ALL CHECKS PASSED" means the fallback works on this cluster.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -130,7 +132,125 @@ def patch_sandbox_payload(k8s):
     return real
 
 
-def check_sandbox(ns, queue, instance_id=None):
+def check_babysitter_recovery(ep, journal_path):
+    """Kill `kubectl port-forward` out from under the babysitter and check
+    that TWO separate things recover, reported separately so a failure
+    says which half broke:
+
+      1. the tunnel itself, back up on the SAME local port -- SWE-agent is
+         handed that port once at launch (--env.deployment.port) and has
+         no way to learn a new one, which is why _keep_pf_alive respawns
+         onto the same local_port instead of reallocating;
+      2. a `pf_drop`/phase="running" row in the journal for this drop --
+         swebench_run_audit's retry classifier only retries a task on that
+         exact row, so a tunnel that quietly heals with nothing journalled
+         is still a failure from the driver's point of view: a task that
+         hit this same failure for real, but didn't survive it, would
+         never get flagged for retry.
+
+    Killing the `kubectl port-forward` process is the closest fault we can
+    inject from outside the cluster. It is not quite the production
+    failure that motivated the babysitter rewrite (an apiserver-side SPDY
+    stream reset that leaves `kubectl` running but silently stops
+    forwarding -- see the _PortForwardSandbox docstring in providers.py):
+    that failure mode can't be induced without cluster-side access. A hard
+    kill at least exercises the same recovery path (_keep_pf_alive sees
+    the process gone, restarts it on the same port, journals both sides),
+    which used to be entirely unexercised outside of production.
+    """
+    print("\n[3b] fault injection: killing kubectl port-forward mid-task")
+    sandbox = ep.handle
+    proc = sandbox.pf_proc
+    if proc is None:
+        bad("no pf_proc on the sandbox handle",
+            "cannot exercise the babysitter without a live tunnel process to kill.")
+        return
+    old_pid = proc.pid
+    local_port = sandbox.local_port
+    proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass  # already gone, or refusing to reap -- either way we move on
+    print(f"      killed kubectl port-forward pid {old_pid} (local port {local_port})")
+
+    # Worst case, from _keep_pf_alive in providers.py:
+    #   probe_interval (default 15s)  -- we may have killed it just as the
+    #     babysitter started its sleep, so up to a full interval passes
+    #     before it even looks again;
+    # + _pod_alive() kubectl round trip (a `get pods`, a few seconds);
+    # + first restart backoff (starts at 1s);
+    # + time for the freshly spawned kubectl port-forward to establish
+    #   before /is_alive answers again (a few more seconds).
+    # That sums to well under a minute on a healthy cluster. 90s leaves
+    # generous headroom for a slow apiserver without masking a real hang.
+    timeout_s = 90
+    poll_every = 3
+    print(f"      waiting up to {timeout_s}s for the babysitter to notice and "
+          f"respawn the tunnel on the SAME local port ({local_port})...")
+    t_kill = time.time()
+    deadline = t_kill + timeout_s
+    recovered = False
+    last_status_at = t_kill
+    while time.time() < deadline:
+        try:
+            req = urllib.request.Request(
+                f"{ep.host}:{local_port}/is_alive",
+                headers={"X-API-Key": ep.auth_token})
+            urllib.request.urlopen(req, timeout=5).read()
+            recovered = True
+            break
+        except Exception:
+            now = time.time()
+            if now - last_status_at >= 15:
+                print(f"      ...still down after {now - t_kill:.0f}s, still waiting")
+                last_status_at = now
+            time.sleep(poll_every)
+    elapsed = time.time() - t_kill
+
+    if recovered:
+        ok(f"tunnel recovered on the same local port ({local_port}) after {elapsed:.0f}s")
+    else:
+        bad(f"tunnel did not recover within {timeout_s}s",
+            "kubectl port-forward is not being respawned by the babysitter after a "
+            "kill; a long SWE-bench task would die permanently on any tunnel drop, "
+            "not just degrade.")
+
+    # Second assertion: the journal row, independent of whether the tunnel
+    # itself came back. TEASBENCH_PF_EVENTS was pointed at journal_path
+    # before acquire() (the provider reads the var fresh at call time), so
+    # every event this sandbox's babysitter wrote landed there.
+    journal_ok = False
+    read_error = ""
+    try:
+        with open(journal_path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if (row.get("label") == sandbox.label
+                        and row.get("event") == "pf_drop"
+                        and row.get("phase") == "running"):
+                    journal_ok = True
+                    break
+    except OSError as exc:
+        read_error = f"could not read journal file {journal_path}: {exc}"
+
+    if journal_ok:
+        ok("babysitter journalled a pf_drop/running row for this drop")
+    else:
+        bad("no pf_drop/running row in the journal for this drop",
+            read_error or
+            "swebench_run_audit's retry classifier keys on exactly this row; "
+            "without it a task that survives this failure today would not be "
+            "flagged for retry if the same drop killed it for real next time.")
+
+
+def check_sandbox(ns, queue, instance_id=None, fault_injection=True):
     print("\n[3] PortForwardK8sProvider.acquire() / release()")
     from k8s_pod_providers import providers as k8s
 
@@ -149,6 +269,19 @@ def check_sandbox(ns, queue, instance_id=None):
         patch_sandbox_payload(k8s)
         print(f"      mode: fast probe ({CHECK_IMAGE}); use --real-image for full fidelity")
     provider = k8s.PortForwardK8sProvider(namespace=ns, queue=queue)
+
+    # _journal() (providers.py) reads TEASBENCH_PF_EVENTS fresh on every call,
+    # not once at import time, so pointing it at a scratch file here -- before
+    # acquire() ever starts a tunnel -- is enough to capture every event this
+    # sandbox's babysitter writes, including the pf_drop row the fault
+    # injection below expects. Restored/unset in the finally block so it
+    # doesn't leak into check_exec() (section 4), which must see journalling
+    # off exactly like a caller that never set the var.
+    journal_fd, journal_path = tempfile.mkstemp(
+        prefix="teasbench-preflight-pf-events-", suffix=".jsonl")
+    os.close(journal_fd)
+    prior_pf_events = os.environ.get("TEASBENCH_PF_EVENTS")
+    os.environ["TEASBENCH_PF_EVENTS"] = journal_path
 
     ep = None
     try:
@@ -184,18 +317,16 @@ def check_sandbox(ns, queue, instance_id=None):
         except Exception as exc:
             bad(f"could not reach the sandbox through the tunnel: {exc}")
 
-        # The babysitter thread is what keeps a long SWE-bench task alive; a
-        # tunnel that dies quietly mid-task is the failure it exists to prevent.
-        print("      checking the tunnel stays up (10s)...")
-        time.sleep(10)
-        try:
-            req = urllib.request.Request(f"{ep.host}:{ep.port}/is_alive",
-                                         headers={"X-API-Key": ep.auth_token})
-            urllib.request.urlopen(req, timeout=10).read()
-            ok("tunnel still alive after 10s (babysitter working)")
-        except Exception as exc:
-            bad(f"tunnel died within 10s: {exc}",
-                "kubectl port-forward is dropping; long tasks would fail mid-run.")
+        if fault_injection:
+            # A passive wait only proves the tunnel didn't spontaneously die
+            # in N seconds; it says nothing about whether the babysitter
+            # (just rewritten: HTTP /is_alive probing, pod-existence checks,
+            # bounded backoff, the drop journal) actually recovers one that
+            # does. This is the only place any of that gets exercised against
+            # a real cluster, so make it earn its keep.
+            check_babysitter_recovery(ep, journal_path)
+        else:
+            print("      skipping fault injection (--no-fault-injection)")
     finally:
         if ep is not None:
             job = getattr(ep.handle, "job_name", None)
@@ -209,6 +340,14 @@ def check_sandbox(ns, queue, instance_id=None):
                 else:
                     bad(f"sandbox job {job} still present after release()",
                         "Orphaned jobs waste namespace quota; delete it by hand.")
+        if prior_pf_events is None:
+            os.environ.pop("TEASBENCH_PF_EVENTS", None)
+        else:
+            os.environ["TEASBENCH_PF_EVENTS"] = prior_pf_events
+        try:
+            os.unlink(journal_path)
+        except OSError:
+            pass
 
 
 def check_exec(ns, queue, instance_id=None):
@@ -264,6 +403,11 @@ def main():
                     help="Kueue queue name (default <namespace>-user-queue)")
     ap.add_argument("--skip-exec", action="store_true",
                     help="Skip the exec-container check (section 4)")
+    ap.add_argument("--no-fault-injection", action="store_true",
+                    help="Skip killing kubectl port-forward mid-check (section 3b). "
+                         "Fault injection runs by default -- it's the only place the "
+                         "babysitter's recovery path gets exercised against a real "
+                         "cluster -- but it adds up to ~90s to a preflight run.")
     ap.add_argument("--real-image", nargs="?", const="astropy__astropy-12907",
                     metavar="INSTANCE_ID", default=None,
                     help="Use a real SWE-bench instance image instead of the fast "
@@ -283,7 +427,7 @@ def main():
         print("\nAborting: kubectl is not usable, nothing else can be checked.")
         return 1
     check_verbs(ns)
-    check_sandbox(ns, queue, args.real_image)
+    check_sandbox(ns, queue, args.real_image, fault_injection=not args.no_fault_injection)
     if not args.skip_exec:
         check_exec(ns, queue, args.real_image)
 

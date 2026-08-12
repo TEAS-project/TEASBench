@@ -51,14 +51,25 @@ RUN_NAME="@name_k8s@"
 LOCAL_PORT="${LOCAL_PORT:-0}"          # 0 = pick a free port, avoiding collisions
 ENGINE_TIMEOUT="${ENGINE_TIMEOUT:-3600}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/teasbench-runs}"
-RESUME=""
 PUSH=1
+# Driver-level retry knobs (CONTRACT.md "Environment variables"): env only,
+# not CLI flags, since they tune section [3]'s internal retry loop rather
+# than anything a one-off invocation needs to override per-run.
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-2}"
+RETRY_TIMEOUTS="${RETRY_TIMEOUTS:-1}"
 
+# No --resume flag here (there used to be one: it set $RESUME and nothing
+# ever read it -- `grep -n RESUME` found only the assignment and the parse
+# case). TIMESTAMP below is recomputed on every invocation, so every run
+# gets a virgin RUN_DIR; an externally-passed --resume would have had
+# nothing to resume into. What "resume" actually means now lives entirely
+# inside section [3]: the retry loop reruns @agentic_client_command@ with
+# AgentCAP's own --resume across attempts of ONE invocation, driven by
+# swebench_run_audit rather than by a flag on this script.
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --namespace)   NAMESPACE="$2"; shift 2 ;;
         --output-root) OUTPUT_ROOT="$2"; shift 2 ;;
-        --resume)      RESUME="--resume"; shift ;;
         --no-push)     PUSH=0; shift ;;
         -h|--help)     sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -96,13 +107,36 @@ echo "=============================================================="
 ENGINE_JOB=""
 PF_PID=""
 LOGS_PID=""
+BABYSITTER_PID=""
+# Where the babysitter (section [2], below) records the *current* pid of
+# each process it restarts. It has to use files, not the PF_PID/LOGS_PID
+# shell variables directly: the babysitter runs in a `( ... ) &` subshell,
+# and a subshell's own PF_PID=$!/LOGS_PID=$! assignments are invisible to
+# this parent shell. Before this fix, a restarted tunnel's real PID never
+# reached cleanup() below, which then killed a stale (often already-dead)
+# PID and left the real, detached `setsid kubectl port-forward` running
+# past the end of the run -- precisely the stale-forward hazard
+# `_free_local_port()` in providers.py exists to work around on the
+# sandbox side.
+ENGINE_PF_PID_FILE="$RUN_DIR/.engine-pf.pid"
+ENGINE_LOGS_PID_FILE="$RUN_DIR/.engine-logs.pid"
 
 cleanup() {
     local rc=$?
     echo
     echo "[cleanup] tearing down"
-    [ -n "$LOGS_PID" ] && kill "$LOGS_PID" 2>/dev/null && echo "  engine log stream stopped"
-    [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null && echo "  port-forward stopped"
+    # Kill the babysitter first: otherwise it can wake from its probe sleep
+    # between the kills below and respawn the very processes we just killed.
+    [ -n "$BABYSITTER_PID" ] && kill "$BABYSITTER_PID" 2>/dev/null
+
+    local logs_pid="$LOGS_PID"
+    [ -f "$ENGINE_LOGS_PID_FILE" ] && logs_pid="$(cat "$ENGINE_LOGS_PID_FILE" 2>/dev/null)"
+    [ -n "$logs_pid" ] && kill "$logs_pid" 2>/dev/null && echo "  engine log stream stopped"
+
+    local pf_pid="$PF_PID"
+    [ -f "$ENGINE_PF_PID_FILE" ] && pf_pid="$(cat "$ENGINE_PF_PID_FILE" 2>/dev/null)"
+    [ -n "$pf_pid" ] && kill "$pf_pid" 2>/dev/null && echo "  port-forward stopped"
+
     if [ -n "$ENGINE_JOB" ]; then
         # The engine holds GPUs; deleting it is the single most important thing
         # this script does on the way out.
@@ -169,11 +203,40 @@ done
 [ -n "$ENGINE_POD" ] || { echo "ERROR: engine pod not Running within ${ENGINE_TIMEOUT}s" >&2; exit 1; }
 echo "  pod: $ENGINE_POD"
 
+# Engine-tunnel journal events, tagged with the reserved label "__engine__"
+# (CONTRACT.md "Drop journal format") so a post-mortem can tell an
+# engine-tunnel problem from a sandbox-tunnel problem. The label never
+# collides with a real task_id (SWE-bench instance ids look like
+# "django__django-14787"), and swebench_run_audit's retry classifier only
+# ever looks up labels that match a task_id, so "__engine__" rows are
+# invisible to it and only ever show up in the report's journal tally. Like
+# providers.py's own _journal(), this never raises: a full disk here must
+# not be allowed to take down an otherwise-healthy run.
+_journal_engine() {
+    local event="$1" reason="${2:-}"
+    {
+        printf '{"ts": %s, "label": "__engine__", "event": "%s", "phase": "running"' \
+            "$(date +%s)" "$event"
+        [ -n "$reason" ] && printf ', "reason": "%s"' "$reason"
+        [ -n "$PF_PID" ] && printf ', "pid": %s' "$PF_PID"
+        printf '}\n'
+    } >> "$RUN_DIR/portforward-events.jsonl" 2>/dev/null
+}
+
 # The server's own stdout/stderr (weight loading, warnings, crashes) is
-# otherwise invisible while we sit in the readiness poll below.
+# otherwise invisible while we sit in the readiness poll below. The stream
+# died silently once in the evidence run (04:03:24, while the run continued
+# to 04:30 -- 374 requests' worth of engine.log lost) with the local kubectl
+# logs process itself still running; LOGS_PID is now watched and restarted
+# by the babysitter below, the same way PF_PID is.
 echo "  streaming engine logs -> $RUN_DIR/engine.log"
-kubectl -n "$NAMESPACE" logs -f "$ENGINE_POD" &> "$RUN_DIR/engine.log" &
-LOGS_PID=$!
+: > "$RUN_DIR/engine.log"
+_spawn_engine_logs() {
+    kubectl -n "$NAMESPACE" logs -f "$ENGINE_POD" >> "$RUN_DIR/engine.log" 2>&1 &
+    LOGS_PID=$!
+    echo "$LOGS_PID" > "$ENGINE_LOGS_PID_FILE"
+}
+_spawn_engine_logs
 
 # OS-assigned local port: a fixed one collides with a stale forward from a
 # previous crashed run, which would silently target the wrong engine.
@@ -183,10 +246,18 @@ fi
 LLM_URL="http://127.0.0.1:$LOCAL_PORT/v1"
 
 # start_new_session detaches the tunnel from this shell's process group, so a
-# terminal hiccup cannot kill it mid-run.
-setsid kubectl -n "$NAMESPACE" port-forward "pod/$ENGINE_POD" "$LOCAL_PORT:8000" \
-    > "$RUN_DIR/engine-portforward.log" 2>&1 &
-PF_PID=$!
+# terminal hiccup cannot kill it mid-run. Single spawn point (used here, in
+# the readiness loop below, and by the babysitter) so the PID-file write
+# that makes a restarted tunnel killable from cleanup() (see
+# ENGINE_PF_PID_FILE above) can't be forgotten at one of the call sites.
+: > "$RUN_DIR/engine-portforward.log"
+_spawn_engine_pf() {
+    setsid kubectl -n "$NAMESPACE" port-forward "pod/$ENGINE_POD" "$LOCAL_PORT:8000" \
+        >> "$RUN_DIR/engine-portforward.log" 2>&1 &
+    PF_PID=$!
+    echo "$PF_PID" > "$ENGINE_PF_PID_FILE"
+}
+_spawn_engine_pf
 echo "  tunnel: $LLM_URL (pid $PF_PID)"
 
 echo "  waiting for the model to load and serve /v1/models"
@@ -195,9 +266,7 @@ deadline=$(( $(date +%s) + ENGINE_TIMEOUT ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     # Restart a tunnel that died while the engine was still loading.
     if ! kill -0 "$PF_PID" 2>/dev/null; then
-        setsid kubectl -n "$NAMESPACE" port-forward "pod/$ENGINE_POD" "$LOCAL_PORT:8000" \
-            >> "$RUN_DIR/engine-portforward.log" 2>&1 &
-        PF_PID=$!
+        _spawn_engine_pf
     fi
     curl -sf -m 5 "$LLM_URL/models" > /dev/null 2>&1 && { ready=1; break; }
     sleep 10
@@ -205,18 +274,59 @@ done
 [ $ready -eq 1 ] || { echo "ERROR: engine never served /v1/models" >&2; exit 1; }
 echo "  engine ready"
 
-# Babysit the tunnel for the whole run: kubectl port-forward drops occasionally,
-# which would otherwise fail every in-flight task.
+# Babysit the tunnel for the whole run: kubectl port-forward drops
+# occasionally, which would otherwise fail every in-flight task. This used
+# to check only `kill -0 "$PF_PID"`, i.e. whether the local kubectl process
+# had exited -- exactly the check that missed the production failure this
+# whole project is about: the tunnel's stream breaks (e.g. the apiserver
+# side resets it) while the local process stays alive, so `kill -0` reports
+# perpetual health while every request through it fails (see
+# k8s_pod_providers/providers.py's `_PortForwardSandbox` docstring for the
+# sandbox-side twin of this bug and the traceback it names). Probe the real
+# thing instead -- /v1/models through the tunnel, same as the readiness
+# wait above -- and require a few consecutive failures before restarting,
+# so one slow response under load doesn't trigger a needless restart.
+PROBE_INTERVAL="${TEASBENCH_PF_PROBE_INTERVAL:-15}"
+PROBE_TIMEOUT="${TEASBENCH_PF_PROBE_TIMEOUT:-5}"
+PROBE_FAILURES="${TEASBENCH_PF_PROBE_FAILURES:-2}"
 (
+    consecutive_failures=0
     while kill -0 $$ 2>/dev/null; do
-        if ! kill -0 "$PF_PID" 2>/dev/null; then
-            setsid kubectl -n "$NAMESPACE" port-forward "pod/$ENGINE_POD" "$LOCAL_PORT:8000" \
-                >> "$RUN_DIR/engine-portforward.log" 2>&1 &
-            PF_PID=$!
+        sleep "$PROBE_INTERVAL"
+        kill -0 $$ 2>/dev/null || break
+
+        # Log-stream watchdog: independent of tunnel health, restarted in
+        # place (append, never truncate -- section [5] pushes engine.log,
+        # and a restart mid-run must not lose everything logged before it).
+        if [ -n "$LOGS_PID" ] && ! kill -0 "$LOGS_PID" 2>/dev/null; then
+            _spawn_engine_logs
         fi
-        sleep 5
+
+        if ! kill -0 "$PF_PID" 2>/dev/null; then
+            _journal_engine "pf_drop" "process_exited"
+            _spawn_engine_pf
+            _journal_engine "pf_restart"
+            consecutive_failures=0
+            continue
+        fi
+
+        if curl -sf -m "$PROBE_TIMEOUT" "$LLM_URL/models" > /dev/null 2>&1; then
+            consecutive_failures=0
+            continue
+        fi
+
+        consecutive_failures=$((consecutive_failures + 1))
+        if [ "$consecutive_failures" -lt "$PROBE_FAILURES" ]; then
+            continue
+        fi
+        _journal_engine "pf_drop" "probe_failed"
+        kill "$PF_PID" 2>/dev/null
+        _spawn_engine_pf
+        _journal_engine "pf_restart"
+        consecutive_failures=0
     done
 ) &
+BABYSITTER_PID=$!
 
 echo
 echo "[3] Running the benchmark"
@@ -225,11 +335,183 @@ export TEASBENCH_K8S_NAMESPACE="$NAMESPACE"
 # Referenced by the generated client command (see the eidf swe-bench rule in
 # pipeline/configs/config.yaml); AGENTCAP_DIR and SWEAGENT_DIR come from env.sh.
 export LLM_URL RUN_DIR SWEAGENT_DIR AGENTCAP_DIR
+# Read by k8s_pod_providers.PortForwardK8sProvider (pipeline/k8s/lib) so the
+# per-task sandbox tunnels journal drops the same way the engine tunnel does
+# above, and so their kubectl port-forward stderr lands somewhere instead of
+# DEVNULL. Both are what makes swebench_run_audit's retry classifier able to
+# tell a genuinely-failed task from one that just lost its tunnel.
+export TEASBENCH_PF_EVENTS="$RUN_DIR/portforward-events.jsonl"
+export TEASBENCH_PF_LOG_DIR="$RUN_DIR/portforward"
+
+# TEAS_* env vars, read by agent_cap.agents.teas_output (invoked here via
+# `swebench_run_audit teas-output` below) for the metadata_*.json /
+# metrics_*.json hardware+model fields -- same set pipeline/templates/
+# agentic.yaml exports just before its own client command. Without these the
+# one metadata_*.json this path used to produce recorded "unknown" for
+# engine, GPU type and precision, and AgentCAP's own validate_teas_leaf()
+# rejects "unknown" outright.
+export TEAS_ENGINE="@inference_engine@"
+export TEAS_ENGINE_VERSION="@agentic_engine_version@"
+export TEAS_GPU_TYPE="@teas_gpu_name@"
+export TEAS_NUM_GPUS="@num_gpu@"
+export TEAS_TP="@num_gpu@"
+export TEAS_MODEL_NAME="@hf_model_path@"
+# Literal, not derived: neither pipeline/templates/agentic.yaml nor
+# pipeline/vast/run_agentic_benchmarks.sh source this from a per-row rule
+# either (there is no precision rule in configs/config.yaml) -- both just
+# hardcode "mxfp4" for the model families this pipeline currently runs.
+# Mirrored here rather than invented, so a wrong value is wrong uniformly
+# across all three platforms and fixable in one place if it ever changes.
+export TEAS_PRECISION="mxfp4"
+# CPU identity has to come from the engine pod itself, not this login node:
+# the driver process runs here, but the login node's CPU has nothing to do
+# with the one actually serving the model, and nothing generated for this
+# row names the real one (the engine manifest's cpu resource request is a
+# quota, not a hardware identity). Same kubectl-exec-into-the-server-pod
+# approach AgentCAP/scripts/run_swebench_k8s_100.sh uses for its own (in-pod)
+# runs, pointed at $ENGINE_POD, which is already in scope by this point.
+# Non-fatal: only exported when the exec actually returns a value, so a pod
+# that won't exec into (e.g. right at the edge of its lifetime) leaves the
+# var unset and agent_cap.agents.teas_output falls back to its own
+# "unknown"/0 defaults -- same as this path has always degraded to -- rather
+# than the driver aborting an otherwise-complete run over it.
+_teas_cpu_type="$(kubectl -n "$NAMESPACE" exec "$ENGINE_POD" -- sh -c \
+    "lscpu 2>/dev/null | grep 'Model name' | head -1 | cut -d: -f2" 2>/dev/null | xargs || true)"
+_teas_num_cpus="$(kubectl -n "$NAMESPACE" exec "$ENGINE_POD" -- nproc 2>/dev/null || true)"
+if [ -n "$_teas_cpu_type" ]; then
+    export TEAS_CPU_TYPE="$_teas_cpu_type"
+else
+    echo "  WARNING: could not read CPU type from engine pod $ENGINE_POD; metadata will record it as unknown"
+fi
+if [ -n "$_teas_num_cpus" ] && [ "$_teas_num_cpus" -gt 0 ] 2>/dev/null; then
+    export TEAS_NUM_CPUS="$_teas_num_cpus"
+else
+    echo "  WARNING: could not read CPU count from engine pod $ENGINE_POD; metadata will record it as 0"
+fi
+unset _teas_cpu_type _teas_num_cpus
 @teas_env_exports@
 
-@agentic_client_command@ 2>&1 | tee "$RUN_DIR/client.log"
-RC=${PIPESTATUS[0]}
-echo "  agent_cap exit: $RC"
+# Bounded retry loop, not a single shot: in the evidence run 8 of 100 tasks
+# died purely from a dropped sandbox tunnel (ServerDisconnectedError out of
+# swerex/runtime/remote.py) and the run still exited 0 -- infra noise, not a
+# real SWE-agent failure, and worth one automatic retry. swebench_run_audit
+# draws the line between the two (CONTRACT.md "Retry classification
+# rules"); this loop just drives it: run, classify, prune, resume, up to
+# MAX_ATTEMPTS times, stopping the moment there is nothing left to gain.
+# Marks the start of the benchmark work itself (not prereqs, not engine
+# startup), for the --wall-time-s passed to `swebench_run_audit teas-output`
+# after this loop finishes -- the same scope AgentCAP's own internal wall-time
+# tracking covers when it writes TEAS output directly.
+RUN_START_TIME=$(date +%s)
+ATTEMPT=1
+RESUME_FLAG=""
+RC=1
+while :; do
+    echo
+    if [ -n "$RESUME_FLAG" ]; then
+        echo "[3] Running the benchmark -- attempt $ATTEMPT/$MAX_ATTEMPTS (resume)"
+    else
+        echo "[3] Running the benchmark -- attempt $ATTEMPT/$MAX_ATTEMPTS"
+    fi
+    # tee -a, not tee: plain tee would truncate client.log on every attempt,
+    # and section [5] below pushes *.log wholesale -- attempt 1's log would
+    # simply be gone by the time anything reads it.
+    @agentic_client_command@ $RESUME_FLAG 2>&1 | tee -a "$RUN_DIR/client.log"
+    RC=${PIPESTATUS[0]}
+    echo "  agent_cap exit: $RC (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+
+    [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ] && break
+
+    # Don't retry against a dead engine: every remaining task would fail the
+    # same way, and the retry would just burn the budget for zero new
+    # patches.
+    if ! curl -sf -m 5 "$LLM_URL/models" > /dev/null 2>&1; then
+        echo "  engine no longer serving /v1/models -- not retrying"
+        break
+    fi
+
+    RETRY_LIST_FILE="$RUN_DIR/.retry-tasks-attempt-$ATTEMPT.txt"
+    python -m swebench_run_audit retry-list "$RUN_DIR" --retry-timeouts "$RETRY_TIMEOUTS" \
+        > "$RETRY_LIST_FILE"
+    RETRY_COUNT=$(wc -l < "$RETRY_LIST_FILE" | tr -d ' ')
+    if [ "${RETRY_COUNT:-0}" -eq 0 ]; then
+        echo "  nothing eligible for retry"
+        break
+    fi
+    echo "  $RETRY_COUNT task(s) eligible for retry"
+
+    python -m swebench_run_audit prune "$RUN_DIR" --tasks-file "$RETRY_LIST_FILE" --attempt "$ATTEMPT"
+    PRUNE_RC=$?
+    if [ "$PRUNE_RC" -ne 0 ]; then
+        # A half-rewritten results.jsonl is worse than stopping here: a
+        # resume pass against it could skip tasks that still need retrying,
+        # or fail to skip ones that don't. prune_run() writes via a temp
+        # file + atomic rename precisely so this should be rare, but don't
+        # gamble on it.
+        echo "  prune failed (rc=$PRUNE_RC) -- not retrying"
+        break
+    fi
+
+    # A hard client crash (as opposed to a graceful per-task failure) can
+    # leave swe-rex sandbox Jobs running, holding Kueue quota the next
+    # attempt's own sandboxes then have to queue behind. Same sweep
+    # cleanup() does on the way out (see above).
+    left=$(kubectl -n "$NAMESPACE" get jobs -l app=teasbench-sandbox --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${left:-0}" -gt 0 ]; then
+        echo "  sweeping $left leaked sandbox job(s) before the resume pass"
+        kubectl -n "$NAMESPACE" delete jobs -l app=teasbench-sandbox --wait=false > /dev/null 2>&1
+    fi
+
+    ATTEMPT=$((ATTEMPT + 1))
+    RESUME_FLAG="--resume"
+done
+
+echo
+echo "[3] Completeness gate"
+# The point of this whole change: the evidence run exited 0 with
+# status "completed" while 55 of 100 tasks had silently produced nothing.
+# report prints its own summary and writes completeness.json; a non-zero
+# exit means the run is not safe to publish. cleanup() (the EXIT trap)
+# still runs on the `exit 1` below, so the engine Job is still deleted and
+# GPUs are still freed -- only sections [4]/[5] (recording versions,
+# pushing results) are skipped.
+if ! python -m swebench_run_audit report "$RUN_DIR" --attempts "$ATTEMPT"; then
+    echo
+    echo "=============================================================="
+    echo "RUN INCOMPLETE -- not publishing. See $RUN_DIR/completeness.json"
+    echo "=============================================================="
+    exit 1
+fi
+
+echo
+echo "[3] Writing TEAS output files"
+# AgentCAP *does* call its TEAS writer on this path (agent_cap/agents/cli.py),
+# but it always fails: resolve_quality() prefers official reports found under
+# <run_dir>/logs/run_evaluation/*/*/*/report.json, while SWEBenchK8sEvaluator
+# writes <run_dir>/eval_k8s/<iid>/report.json -- different root, two levels
+# not three. Finding none, it falls back to demanding every row carry
+# eval_details.evaluator == "swebench", but cli.py stamps the raw --evaluator
+# string, "swebench-k8s", onto every graded row. It raises, cli.py catches it
+# into a bare "WARNING: TEAS output writing failed" and still exits 0. So
+# section [4] logs "no metadata_*.json to stamp" and [5] has only *.log to
+# push. teas-output relocates the reports into the layout resolve_quality
+# expects, which routes it to the primary branch -- that branch never reads
+# the evaluator string, so fixing the location makes the naming moot.
+#
+# ORDER IS LOAD-BEARING: this must stay AFTER the completeness gate above.
+# AgentCAP's _has_explicit_swebench_failure() accepts any row with populated
+# errors as a legitimate explicit failure -- it cannot tell "the agent failed"
+# from "a dropped tunnel ate the task". Run against the evidence directory it
+# happily writes acc 0.200 over total_examples 100, counting 55 infrastructure
+# losses as model failures: a leaf that looks valid and is not. The gate's
+# `exit 1` is the only thing standing between that and the results repo.
+#
+# Always exits 0 (it warns, it never blocks) -- by the time we are here the
+# run has already passed the gate, so a missing TEAS file is worth a warning
+# but must not change $RC or this script's own exit code.
+python -m swebench_run_audit teas-output "$RUN_DIR" \
+    --model "@model@" \
+    --wall-time-s "$(( $(date +%s) - RUN_START_TIME ))"
 
 echo
 echo "[4] Recording dependency versions"
@@ -301,7 +583,27 @@ if [ $PUSH -eq 1 ]; then
         DEST="$REPO_CLONE/$RESULTS_SUBDIR"
         mkdir -p "$DEST"
         shopt -s nullglob
-        cp "$RUN_DIR"/metrics*.json "$RUN_DIR"/metadata*.json \
+        # Explicit list, not metrics*.json/metadata*.json: this path's
+        # output_dir is $RUN_DIR itself (see the eidf swe-bench rule in
+        # pipeline/configs/config.yaml), so AgentCAP's own internal
+        # metrics.json (a different schema from the TEAS
+        # metrics_<dataset>_*.json -- see AgentCAP/agent_cap/agents/
+        # teas_output.py) lands in the same directory as the TEAS files
+        # instead of being isolated in a separate agentic/ subdir the way
+        # pipeline/templates/agentic.yaml and pipeline/vast/
+        # run_agentic_benchmarks.sh keep it. A loose glob here would let
+        # downstream consumers pick up metrics.json and compute degraded
+        # numbers from it -- metrics_*.json (with the underscore) is what
+        # actually excludes it. detailed-results_*.jsonl/output-data*.jsonl
+        # are added because they never used to be published at all, so the
+        # results repo's task-completeness audit had nothing to verify a run
+        # against. completeness.json and portforward-events.jsonl are this
+        # branch's own evidence for exactly the failure mode it exists to
+        # catch (see the completeness gate and _journal_engine() above).
+        cp "$RUN_DIR"/metrics_*.json "$RUN_DIR"/metadata_*.json \
+           "$RUN_DIR"/detailed-results_*.jsonl "$RUN_DIR"/output-data*.jsonl \
+           "$RUN_DIR"/results.jsonl \
+           "$RUN_DIR"/completeness.json "$RUN_DIR"/portforward-events.jsonl \
            "$RUN_DIR"/*.log "$DEST/" 2>/dev/null
 	cp "$ENGINE_MANIFEST" "$RUN_DIR/" 2>/dev/null
         cp "$ENGINE_MANIFEST" "$DEST/" 2>/dev/null

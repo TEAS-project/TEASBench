@@ -281,11 +281,32 @@ SWE-bench evaluator uses. Only the sandbox container's payload is substituted
 (busybox serving an `is_alive` file instead of a multi-GB image pip-installing
 swe-rex), because what is under test is the tunnel mechanism, not swe-rex.
 
-The check most worth reading is this one:
+The check most worth reading is this one — it doesn't just wait and hope, it
+kills the tunnel and checks that the babysitter actually puts it back:
 
 ```
-  PASS  tunnel still alive after 10s (babysitter working)
+  [3b] fault injection: killing kubectl port-forward mid-task
+        killed kubectl port-forward pid 84213 (local port 41235)
+        waiting up to 90s for the babysitter to notice and respawn the tunnel
+        on the SAME local port (41235)...
+  PASS  tunnel recovered on the same local port (41235) after 6s
+  PASS  babysitter journalled a pf_drop/running row for this drop
 ```
+
+It kills the local `kubectl port-forward` process out from under a live
+sandbox and checks two things recover, reported separately so a failure says
+which half broke: the tunnel itself, back up on the **same** local port
+(SWE-agent is handed that port once at launch and has no way to learn a new
+one), and a `pf_drop` / `phase: "running"` row in the drop journal for the
+drop — that exact row is what makes a task eligible for retry (see the
+developer guide, §5, for the journal schema and the retry classifier). A
+killed local process isn't quite the production failure that motivated the
+babysitter rewrite — a dropped `kubectl` is not the same as an apiserver-side
+stream reset that leaves `kubectl` running but silently stops forwarding —
+but it's the closest fault this preflight can inject from outside the
+cluster, and it exercises a recovery path that used to be entirely
+unverified outside of production. It runs by default and adds ~90s; skip it
+with `--no-fault-injection` when you only want the faster checks.
 
 A `kubectl port-forward` that dies quietly mid-task is the failure the
 babysitter thread exists to prevent, and the one that would otherwise surface as
@@ -365,18 +386,80 @@ bash out/sglang-gptoss120b-swe-bench-lite-nt100-h200x1.sh
 ```
 
 The script checks prerequisites, submits the engine Job, waits for the model to
-load, opens and babysits the tunnel, runs the benchmark, pushes the results, and
-**deletes the engine Job on exit**; success, failure or Ctrl-C.  This means an aborted
-run cannot leave GPUs allocated. You never start an engine or submit the engine
-manifest by hand.
+load, opens and babysits the tunnel, runs the benchmark (retrying tasks that
+were only lost to a dropped tunnel, see below), checks the run is complete
+enough to publish, pushes the results, and **deletes the engine Job on exit**;
+success, failure or Ctrl-C. This means an aborted run cannot leave GPUs
+allocated. You never start an engine or submit the engine manifest by hand.
 
-Useful flags: `--resume`, `--no-push`, `--namespace`, `--output-root`.
+Useful flags: `--no-push`, `--namespace`, `--output-root`.
+
+There is no `--resume` flag: an earlier version parsed one but never acted on
+it, and since `$TIMESTAMP` is recomputed on every invocation there was never a
+previous run directory for it to resume into. Resuming a run that lost tasks
+to a dropped tunnel now happens automatically, inside the script — see
+"Retrying dropped sandbox tunnels" below.
 
 The driver contains **no install paths of its own**: `TEASBENCH_ROOT`,
 `AGENTCAP_DIR`, `SWEAGENT_DIR` and the interpreter all come from `env.sh`, and it
 refuses to start if that has not been sourced. A generated script is therefore
 portable between machines: relocate a checkout and re-run the setup script rather
 than editing anything generated.
+
+#### Retrying dropped sandbox tunnels
+
+A dropped `kubectl port-forward` tunnel to a sandbox kills the task using it
+— but used to leave the run looking like a clean success anyway: a row still
+landed in `results.jsonl` with an empty patch, and the script exited 0. The
+driver now runs the client in a bounded retry loop instead of once, controlled
+by two env vars (set them before invoking the script; they are not CLI flags,
+since they tune the internal loop rather than anything a one-off run needs to
+override):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `MAX_ATTEMPTS` | `2` | total client invocations, including the first |
+| `RETRY_TIMEOUTS` | `1` | also retry tasks killed by the outer per-task `timeout` (`sweagent_rc == 124`), once each |
+
+After each attempt — while attempts remain and the engine is still serving
+`/v1/models` — `swebench_run_audit retry-list` decides which tasks to re-run:
+only ones with positive evidence of an infrastructure failure (a tunnel drop
+seen by the babysitter after it was already up, a `k8s sidecar failed:`
+error, a tunnel-drop signature in the SWE-agent logs, or, with
+`RETRY_TIMEOUTS=1`, a first-time outer timeout). A task the agent itself gave
+up on — ran out of cost, format, or context budget, or finished and submitted
+nothing — is never retried; doing so would give it a second sample and bias
+accuracy upward. `swebench_run_audit prune` then archives `results.jsonl` and
+clears the retried tasks' stream stats and trajectory files so a retry
+can't inherit an earlier attempt's numbers or patch, and the loop re-invokes
+the client with AgentCAP's own `--resume`. Full retry/do-not-retry rules are
+in the developer guide, §5.
+
+#### Completeness gate
+
+Before pushing anything, the driver runs `swebench_run_audit report`, which
+writes `$RUN_DIR/completeness.json` and exits non-zero if any task is still
+infrastructure-incomplete after the retry loop, or if `predictions.json` /
+`eval_k8s_results.json` are short of the number of patched tasks in
+`results.jsonl`. This is the check the evidence run that motivated all of
+this would have failed: it exited 0 with `status: "completed"` and
+`acc: 0.200` while 55 of 100 tasks had silently produced no patch.
+
+**A failed gate means nothing is published.** The script exits 1 without
+pushing — the engine Job is still torn down first, since the `EXIT` trap runs
+regardless, so a gate failure costs no stranded GPU time. Everything stays in
+`$RUN_DIR`; inspect `completeness.json` for exactly which tasks are still
+incomplete and why, then decide by hand whether to re-run or push manually.
+
+A run directory for a `PortForwardK8sProvider` SWE-bench run now additionally
+contains:
+
+| Path | What |
+|---|---|
+| `portforward-events.jsonl` | the drop journal — one JSON line per tunnel start/drop/restart/release event, engine and sandbox tunnels alike |
+| `portforward/` | per-sandbox `kubectl port-forward` stderr, one log per task (previously discarded to `/dev/null`) |
+| `completeness.json` | the completeness report written by the gate above |
+| `results.attempt-N.jsonl` | `results.jsonl` as it stood before attempt `N+1`'s retries — one archive per retried attempt |
 
 #### Provenance
 

@@ -128,13 +128,66 @@ ok "curated-100 task list present"
 
 # ------------------------------------------------- swe-rex and swebench ----
 step 3 "swe-rex and swebench"
+# Importability alone doesn't prove $SWEREX_SPEC / $SWEBENCH_SPEC is actually
+# satisfied -- an older swe-rex already sitting in the venv imports fine, so
+# the version pin was silently unenforced. version_satisfies checks the
+# *installed* distribution against the spec's constraint with
+# importlib.metadata (stdlib only, no `packaging` dep -- this runs against a
+# bare venv). If it doesn't satisfy, upgrade and re-check once before die-ing.
+version_satisfies() {
+    # $1 = distribution name (importlib.metadata key), $2 = full spec, e.g. "swe-rex>=1.4.0"
+    "$PY" - "$1" "$2" <<'PYEOF'
+import re, sys
+from importlib import metadata
+
+dist_name, spec = sys.argv[1], sys.argv[2]
+constraint = re.sub(r'^[A-Za-z0-9_.-]+', '', spec).strip()
+
+try:
+    installed = metadata.version(dist_name)
+except metadata.PackageNotFoundError:
+    sys.exit(1)
+
+def parse_ver(v):
+    out = []
+    for p in v.split('.'):
+        m = re.match(r'\d+', p)
+        out.append(int(m.group()) if m else 0)
+    return out
+
+def cmp_ver(a, b):
+    la, lb = parse_ver(a), parse_ver(b)
+    n = max(len(la), len(lb))
+    la += [0] * (n - len(la))
+    lb += [0] * (n - len(lb))
+    return (la > lb) - (la < lb)
+
+ops = {'>=': lambda c: c >= 0, '<=': lambda c: c <= 0, '==': lambda c: c == 0,
+       '!=': lambda c: c != 0, '>': lambda c: c > 0, '<': lambda c: c < 0}
+
+for part in constraint.split(','):
+    part = part.strip()
+    if not part:
+        continue
+    m = re.match(r'^(>=|<=|==|!=|>|<)\s*(.+)$', part)
+    if not m:
+        continue
+    op, ver = m.group(1), m.group(2).strip()
+    if not ops[op](cmp_ver(installed, ver)):
+        sys.exit(1)
+sys.exit(0)
+PYEOF
+}
+
 for spec in "$SWEREX_SPEC" "$SWEBENCH_SPEC"; do
     mod=$(echo "$spec" | sed 's/[><=].*//' | tr -d ' ')
     imp=$(echo "$mod" | tr '-' '_'); [ "$imp" = "swe_rex" ] && imp=swerex
-    if "$PY" -c "import $imp" 2>/dev/null; then
-        ok "$mod importable"
+    if "$PY" -c "import $imp" 2>/dev/null && version_satisfies "$mod" "$spec"; then
+        ok "$mod importable and satisfies '$spec'"
     else
-        "$PY" -m pip install --quiet "$spec" || die "pip install '$spec' failed"
+        "$PY" -m pip install --quiet --upgrade "$spec" || die "pip install '$spec' failed"
+        "$PY" -c "import $imp" 2>/dev/null && version_satisfies "$mod" "$spec" \
+            || die "installed '$spec' but the venv still does not satisfy it -- check for a pinned/conflicting requirement elsewhere in the venv"
         did "installed $spec"
     fi
 done
@@ -173,8 +226,60 @@ else
     did "applied streaming patch"
 fi
 
+# ------------------------------------------- SWE-agent / swe-rex compat ----
+# The production failure this guards against (evidence run 20260807-0001):
+# SWE-agent's *recovery* path -- attempt_autosubmission_after_error, the code
+# that salvages a partial patch when a task hits an error mid-run -- calls
+# `self._env.deployment.is_alive(timeout=10)` (sweagent/agent/agents.py:831).
+# 46 of that run's 55 failed tasks crashed identically:
+#   TypeError: RemoteDeployment.is_alive() got an unexpected keyword argument 'timeout'
+# because the installed swe-rex predates the `timeout` kwarg this SWE-agent
+# calls with, turning every recoverable error into a total loss of the task's
+# work. Step 3's version check alone would not have caught this: a build can
+# satisfy ">=1.4.0" and still lack the kwarg, so this checks the actual API
+# SWE-agent depends on. Placed here (after step 4 installs SWE-agent) rather
+# than folded into step 3, because it is a compatibility assertion between the
+# two packages, not a property of swe-rex alone -- it needs both installed to
+# mean anything.
+step 5 "SWE-agent / swe-rex compatibility"
+compat_check() {
+    "$PY" - <<'PYEOF'
+import inspect
+try:
+    from swerex.deployment.remote import RemoteDeployment
+except Exception as e:
+    print(f"FAIL import swerex.deployment.remote.RemoteDeployment: {e}")
+    raise SystemExit(0)
+
+try:
+    params = inspect.signature(RemoteDeployment.is_alive).parameters
+except (TypeError, ValueError) as e:
+    print(f"FAIL inspect RemoteDeployment.is_alive: {e}")
+    raise SystemExit(0)
+
+if "timeout" in params:
+    print("OK")
+else:
+    print("FAIL RemoteDeployment.is_alive has no 'timeout' parameter")
+PYEOF
+}
+
+COMPAT_RESULT=$(compat_check)
+if [ "$COMPAT_RESULT" = "OK" ]; then
+    ok "RemoteDeployment.is_alive accepts timeout= (SWE-agent's recovery path is compatible)"
+else
+    echo "  note    $COMPAT_RESULT -- attempting upgrade of '$SWEREX_SPEC'"
+    "$PY" -m pip install --quiet --upgrade "$SWEREX_SPEC" || die "pip install --upgrade '$SWEREX_SPEC' failed"
+    COMPAT_RESULT=$(compat_check)
+    if [ "$COMPAT_RESULT" = "OK" ]; then
+        did "upgraded swe-rex; RemoteDeployment.is_alive now accepts timeout="
+    else
+        die "swe-rex/SWE-agent incompatible after upgrading to '$SWEREX_SPEC': $COMPAT_RESULT -- attempt_autosubmission_after_error (agents.py:831) calls is_alive(timeout=...), so every recoverable task error would crash instead of salvaging a patch. Raise SWEREX_SPEC to a version that adds the kwarg and re-run."
+    fi
+fi
+
 # ------------------------------------------------------------- kubectl -----
-step 5 "kubectl"
+step 6 "kubectl"
 if command -v kubectl > /dev/null; then
     ok "kubectl on PATH ($(kubectl version --client -o json 2>/dev/null | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["clientVersion"]["gitVersion"])' 2>/dev/null || echo 'version unknown'))"
 else
@@ -190,7 +295,7 @@ fi
 # into the generated driver script, so relocating/re-pointing at a different
 # namespace or secret is a re-run of this script, not an edit of generated
 # output.
-step 6 "Kubernetes namespace and results-push secret"
+step 7 "Kubernetes namespace and results-push secret"
 DEFAULT_NAMESPACE="eidf230ns"
 DEFAULT_GIT_TOKEN_SECRET="teas-develop-results-private-ap"
 
@@ -219,13 +324,14 @@ fi
 # ------------------------------------------------------------- versions ----
 # Recorded now, at the moment the environment is built, so a run's metadata
 # describes the code that actually produced it.
-step 7 "Recording versions"
-"$PY" - "$PREFIX" "$AGENTCAP_DIR" "$SWEAGENT_DIR" "$TEASBENCH_ROOT" <<'PYEOF'
+step 8 "Recording versions"
+"$PY" - "$PREFIX" "$AGENTCAP_DIR" "$SWEAGENT_DIR" "$TEASBENCH_ROOT" "$COMPAT_RESULT" <<'PYEOF'
 import json, subprocess, sys
 from importlib import metadata
 from pathlib import Path
 
 prefix, agentcap, sweagent, teasbench = map(Path, sys.argv[1:5])
+compat_result = sys.argv[5]
 
 def commit(repo):
     try:
@@ -256,6 +362,16 @@ versions = {
     "swe_rex": dist("swe-rex"),
     "swebench": dist("swebench"),
     "sweagent_dist": dist("sweagent"),
+    # attempt_autosubmission_after_error (SWE-agent's recovery path,
+    # agents.py:831) calls RemoteDeployment.is_alive(timeout=...); step 5
+    # already verified this and would have die'd otherwise, so
+    # is_alive_accepts_timeout is always True by the time this file is
+    # written. Recorded anyway (not just asserted) so a run's metadata in the
+    # results repo is traceable to a known-good environment without having to
+    # re-derive it from setup logs -- the same reasoning as the streaming
+    # patch marker above.
+    "swe_rex_compat": {"is_alive_accepts_timeout": compat_result == "OK",
+                        "detail": compat_result},
     "python": sys.version.split()[0],
 }
 out = prefix / "versions.json"
@@ -266,11 +382,12 @@ for k in ("agentcap", "sweagent", "teasbench"):
     print(f"          {k:10s} {(v['commit'] or '?')[:8]}  ({v['ref']})")
 for k in ("swe_rex", "swebench"):
     print(f"          {k:10s} {versions[k]}")
+print(f"          swe_rex_compat  is_alive_accepts_timeout={versions['swe_rex_compat']['is_alive_accepts_timeout']}")
 PYEOF
 [ -f "$PREFIX/versions.json" ] || die "could not write versions.json"
 
 # ------------------------------------------------------------- env file ----
-step 8 "Writing $PREFIX/env.sh"
+step 9 "Writing $PREFIX/env.sh"
 cat > "$PREFIX/env.sh" <<EOF
 # Generated by pipeline/k8s/setup/setup_swebench_env.sh -- do not edit; re-run that.
 #

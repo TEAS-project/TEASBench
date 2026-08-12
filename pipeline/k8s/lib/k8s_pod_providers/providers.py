@@ -42,10 +42,31 @@ can monkeypatch them per-case):
     TEASBENCH_SWEREX_SPEC          default "swe-rex>=1.4.0"
     TEASBENCH_SANDBOX_POD_TIMEOUT  default "1200"
     TEASBENCH_SWEREX_TIMEOUT       default "600"
+
+PortForwardK8sProvider-only (unused by InClusterK8sProvider, which has no
+tunnel to babysit or journal):
+    TEASBENCH_PF_EVENTS            unset = journalling off; else path to
+                                    the port-forward drop journal (JSONL,
+                                    one object per line - see _journal())
+    TEASBENCH_PF_LOG_DIR           unset = kubectl port-forward stderr to
+                                    DEVNULL as before; else a directory to
+                                    append per-sandbox port-forward
+                                    stdout+stderr into
+    TEASBENCH_PF_PROBE_INTERVAL    default "15" (seconds between /is_alive
+                                    probes in the tunnel babysitter)
+    TEASBENCH_PF_PROBE_TIMEOUT     default "5" (per-probe HTTP timeout)
+    TEASBENCH_PF_PROBE_FAILURES    default "2" (consecutive probe
+                                    failures before the babysitter
+                                    restarts the tunnel)
+    TEASBENCH_PF_MAX_RESTARTS      default "20" (cap on babysitter
+                                    restarts per sandbox before giving up)
+    TEASBENCH_PF_BACKOFF_MAX       default "30" (cap, in seconds, on the
+                                    exponential backoff between restarts)
 """
 
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -72,6 +93,11 @@ class SandboxEndpoint:
 def _env_int(name, default):
     """Read an integer env var, falling back to `default` (int or str)."""
     return int(os.environ.get(name, default))
+
+
+def _env_float(name, default):
+    """Read a float env var, falling back to `default` (float or str)."""
+    return float(os.environ.get(name, default))
 
 
 def _kubectl(namespace, *args, input_text=None, timeout=120):
@@ -326,6 +352,42 @@ class InClusterK8sProvider(_BaseK8sProvider):
             pass
 
 
+_JOURNAL_LOCK = threading.Lock()
+
+# Non-filesystem-safe characters in a sandbox `label` (task ids can contain
+# "/", e.g. "django__django-14787" is fine but some benchmarks use paths)
+# get collapsed to "_" when building a log file name - see _PortForwardSandbox
+# ._spawn_pf().
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_for_filename(value):
+    return _UNSAFE_FILENAME_CHARS.sub("_", value) if value else "sandbox"
+
+
+def _journal(label, event, **fields):
+    """Append one JSON line to $TEASBENCH_PF_EVENTS, the port-forward drop
+    journal that swebench_run_audit's retry classifier reads. No-op when
+    the var is unset (the default), and never raises: a journalling
+    failure (e.g. a full disk) must not be allowed to break a run that
+    would otherwise have succeeded - the whole point of this journal is
+    to make failures *more* visible, not to introduce a new one.
+    """
+    path = os.environ.get("TEASBENCH_PF_EVENTS")
+    if not path:
+        return
+    record = {"ts": time.time(), "label": label, "event": event}
+    for key, value in fields.items():
+        if value is not None:
+            record[key] = value
+    try:
+        with _JOURNAL_LOCK:
+            with open(path, "a") as fh:
+                fh.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
 _PORT_LOCK = threading.Lock()
 
 
@@ -345,6 +407,21 @@ class _PortForwardSandbox:
     (agent_cap/agents/sandbox_providers.py) - see PortForwardK8sProvider
     for when this connection strategy is needed instead of
     InClusterK8sProvider.
+
+    The babysitter thread (`_keep_pf_alive`) used to only check
+    `proc.poll()`, i.e. whether the `kubectl port-forward` process had
+    exited. In production that missed the failure mode that actually
+    killed tasks: the tunnel's stream breaks (e.g. the apiserver side
+    resets it) while the local `kubectl` process keeps running - `poll()`
+    stays None forever, so the babysitter saw perpetual health while
+    every request through the tunnel failed. Eight SWE-bench tasks died
+    this way in one evidence run, in two tight clusters (4 within 15s, 4
+    within 3s), each with an `aiohttp ServerDisconnectedError` raised out
+    of `swerex/runtime/remote.py`, and nothing noticed. `_keep_pf_alive`
+    now actively probes `/is_alive` through the tunnel instead of only
+    watching the process, and everything it does is journalled to
+    `TEASBENCH_PF_EVENTS` so a dropped-and-recovered tunnel leaves a
+    record even when the task itself survives.
     """
 
     def __init__(self, namespace, queue, image, token, port, label=""):
@@ -360,10 +437,18 @@ class _PortForwardSandbox:
         self.pf_proc = None
         self._stopped = False
         self._pf_keeper = None
+        # Guards the "is this still alive -> if not, spawn a replacement"
+        # sequence in _keep_pf_alive against stop(): without it, stop()'s
+        # kill() and the babysitter's respawn aren't atomic, so a tunnel
+        # spawned in that window is never killed - and start_new_session
+        # (below) means it survives the driver's whole process group as
+        # an orphan.
+        self._lock = threading.Lock()
 
     def start(self):
         pod_timeout_s = _env_int("TEASBENCH_SANDBOX_POD_TIMEOUT", 1200)
         swerex_timeout_s = _env_int("TEASBENCH_SWEREX_TIMEOUT", 600)
+        probe_timeout_s = _env_float("TEASBENCH_PF_PROBE_TIMEOUT", 5)
 
         job = _sandbox_job_spec(self.namespace, self.queue, self.image,
                                 self.token, self.remote_port)
@@ -394,29 +479,31 @@ class _PortForwardSandbox:
         # group so a terminal/session teardown can't kill it mid-task
         # (observed: session flap killed in-flight sidecar tunnels ->
         # "Cannot connect to host 127.0.0.1:<port>" -> task rc=1).
-        self.pf_proc = subprocess.Popen(
-            ["kubectl", "-n", self.namespace, "port-forward",
-             f"pod/{self.pod_name}", f"{self.local_port}:{self.remote_port}"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        self.pf_proc = self._spawn_pf()
         deadline = time.time() + swerex_timeout_s
         while time.time() < deadline:
             if self.pf_proc.poll() is not None:
-                # port-forward died (e.g. pod still pip-installing) - restart it
-                self.pf_proc = subprocess.Popen(
-                    ["kubectl", "-n", self.namespace, "port-forward",
-                     f"pod/{self.pod_name}", f"{self.local_port}:{self.remote_port}"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
+                # port-forward died (e.g. pod still pip-installing) - restart
+                # it. This is the ordinary "not ready yet" case, not the
+                # production failure this class was rewritten for (a tunnel
+                # that stays alive but stops forwarding, see _keep_pf_alive
+                # below) - tag it phase="startup" so swebench_run_audit's
+                # retry classifier, which only acts on phase="running"
+                # drops, ignores it.
+                old_pid = getattr(self.pf_proc, "pid", None)
+                _journal(self.label, "pf_drop", phase="startup", reason="process_exited",
+                         job=self.job_name, pod=self.pod_name,
+                         local_port=self.local_port, pid=old_pid)
+                self.pf_proc = self._spawn_pf()
+                _journal(self.label, "pf_restart", job=self.job_name, pod=self.pod_name,
+                         local_port=self.local_port,
+                         pid=getattr(self.pf_proc, "pid", None))
                 time.sleep(3)
-            try:
-                req = urllib.request.Request(
-                    f"http://127.0.0.1:{self.local_port}/is_alive",
-                    headers={"X-API-Key": self.token},
-                )
-                urllib.request.urlopen(req, timeout=5)
+            if self._probe(probe_timeout_s):
+                _journal(self.label, "acquire", job=self.job_name, pod=self.pod_name,
+                         local_port=self.local_port)
+                _journal(self.label, "pf_start", job=self.job_name, pod=self.pod_name,
+                         local_port=self.local_port, pid=getattr(self.pf_proc, "pid", None))
                 # Babysit the tunnel for the task's whole lifetime - kubectl
                 # port-forward occasionally drops mid-task, which otherwise
                 # kills the agent with "Cannot connect to 127.0.0.1:<port>".
@@ -424,33 +511,171 @@ class _PortForwardSandbox:
                     target=self._keep_pf_alive, daemon=True)
                 self._pf_keeper.start()
                 return
-            except Exception:
-                time.sleep(3)
+            time.sleep(3)
         raise RuntimeError(f"swerex not alive after {swerex_timeout_s}s ({self.label})")
 
-    def _keep_pf_alive(self):
-        while not self._stopped:
-            proc = self.pf_proc
-            if proc is not None and proc.poll() is not None and not self._stopped:
-                try:
-                    self.pf_proc = subprocess.Popen(
-                        ["kubectl", "-n", self.namespace, "port-forward",
-                         f"pod/{self.pod_name}", f"{self.local_port}:{self.remote_port}"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    def _spawn_pf(self):
+        """Start (or restart) `kubectl port-forward` for this sandbox -
+        single call site for the argv/start_new_session/stderr handling
+        used by both spawn points in start() and by the babysitter's
+        respawn. All three call sites used to send stderr to DEVNULL,
+        which is why the production tunnel drops left no forensic record;
+        TEASBENCH_PF_LOG_DIR now optionally captures it instead."""
+        cmd = ["kubectl", "-n", self.namespace, "port-forward",
+               f"pod/{self.pod_name}", f"{self.local_port}:{self.remote_port}"]
+        log_dir = os.environ.get("TEASBENCH_PF_LOG_DIR")
+        if log_dir:
+            try:
+                os.makedirs(log_dir, exist_ok=True)
+                log_name = (f"{_sanitize_for_filename(self.label)}-"
+                            f"{self.job_name or 'nojob'}.log")
+                with open(os.path.join(log_dir, log_name), "a") as fh:
+                    return subprocess.Popen(
+                        cmd, stdout=fh, stderr=subprocess.STDOUT,
                         start_new_session=True,
                     )
+            except OSError:
+                pass  # a broken log dir must not take down the sandbox
+        return subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def _probe(self, timeout):
+        """Check swe-rex's /is_alive endpoint through the tunnel. This is
+        the only reliable signal that the tunnel is actually forwarding
+        traffic - `proc.poll()` alone (the old check) only tells you the
+        local kubectl process hasn't exited, which is not the same thing
+        (see class docstring)."""
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{self.local_port}/is_alive",
+                headers={"X-API-Key": self.token},
+            )
+            with urllib.request.urlopen(req, timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    def _pod_alive(self):
+        """Same `get pods -l=job-name=...` shape start() uses (lines
+        above) - called by the babysitter before respawning so a sandbox
+        pod that has actually died doesn't get kubectl port-forward
+        relaunched against it every restart-interval for the rest of the
+        task's life."""
+        try:
+            r = _kubectl(self.namespace, "get", "pods", f"-l=job-name={self.job_name}",
+                         "-o", "jsonpath={.items[0].status.phase}|{.items[0].metadata.name}")
+            phase = r.stdout.strip().split("|")[0]
+            return phase == "Running"
+        except Exception:
+            return False
+
+    def _sleep_responsive(self, seconds):
+        """Sleep in short slices instead of one long time.sleep(), so
+        stop() isn't kept waiting for a full probe interval / backoff
+        window before the babysitter notices _stopped and exits."""
+        deadline = time.time() + seconds
+        while not self._stopped:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.5, remaining))
+
+    def _keep_pf_alive(self):
+        probe_interval = _env_float("TEASBENCH_PF_PROBE_INTERVAL", 15)
+        probe_timeout = _env_float("TEASBENCH_PF_PROBE_TIMEOUT", 5)
+        max_failures = _env_int("TEASBENCH_PF_PROBE_FAILURES", 2)
+        max_restarts = _env_int("TEASBENCH_PF_MAX_RESTARTS", 20)
+        backoff_max = _env_float("TEASBENCH_PF_BACKOFF_MAX", 30)
+
+        consecutive_failures = 0
+        restarts = 0
+        # Clamped, not just seeded: a site that lowers TEASBENCH_PF_BACKOFF_MAX
+        # below 1s means it for the first restart too, not only for later ones.
+        backoff = min(1.0, backoff_max)
+
+        while not self._stopped:
+            self._sleep_responsive(probe_interval)
+            if self._stopped:
+                break
+
+            proc = self.pf_proc
+            exited = proc is None or proc.poll() is not None
+            if exited:
+                reason = "process_exited"
+            else:
+                if self._probe(probe_timeout):
+                    consecutive_failures = 0
+                    continue
+                consecutive_failures += 1
+                if consecutive_failures < max_failures:
+                    # Tolerate one blip - a busy sandbox mid-request
+                    # shouldn't get its tunnel torn down needlessly.
+                    continue
+                reason = "probe_failed"
+
+            old_pid = getattr(proc, "pid", None)
+            _journal(self.label, "pf_drop", phase="running", reason=reason,
+                     job=self.job_name, pod=self.pod_name,
+                     local_port=self.local_port, pid=old_pid)
+            consecutive_failures = 0
+
+            if not self._pod_alive():
+                _journal(self.label, "pf_drop", phase="running", reason="pod_gone",
+                         job=self.job_name, pod=self.pod_name, local_port=self.local_port)
+                _journal(self.label, "pf_unrecoverable", reason="pod_gone",
+                         job=self.job_name, pod=self.pod_name, local_port=self.local_port)
+                break
+
+            if restarts >= max_restarts:
+                _journal(self.label, "pf_unrecoverable", reason="restart_exhausted",
+                         job=self.job_name, pod=self.pod_name, local_port=self.local_port)
+                break
+
+            self._sleep_responsive(backoff)
+            if self._stopped:
+                break
+            backoff = min(backoff * 2, backoff_max)
+
+            with self._lock:
+                if self._stopped:
+                    break
+                if self.pf_proc is not None:
+                    try:
+                        self.pf_proc.kill()  # may still hold the listen socket
+                    except Exception:
+                        pass
+                try:
+                    # Same local_port: SWE-agent was handed this URL at
+                    # launch via --env.deployment.port and has no way to
+                    # learn a new one.
+                    self.pf_proc = self._spawn_pf()
+                    restarts += 1
+                    _journal(self.label, "pf_restart", job=self.job_name, pod=self.pod_name,
+                             local_port=self.local_port,
+                             pid=getattr(self.pf_proc, "pid", None))
                 except Exception:
                     pass
-            time.sleep(2)
 
     def stop(self):
-        self._stopped = True
-        if self.pf_proc is not None:
-            self.pf_proc.kill()
+        with self._lock:
+            self._stopped = True
+            proc = self.pf_proc
+            if proc is not None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        if proc is not None:
             try:
-                self.pf_proc.wait(timeout=5)
+                proc.wait(timeout=5)
             except Exception:
                 pass
+        if self._pf_keeper is not None:
+            self._pf_keeper.join(timeout=5)
+        _journal(self.label, "release", job=self.job_name, pod=self.pod_name,
+                 local_port=self.local_port)
         if self.job_name:
             try:
                 _kubectl(self.namespace, "delete", "job", self.job_name,

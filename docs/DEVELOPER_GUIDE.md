@@ -259,6 +259,153 @@ CSV row and the same `config.yaml` rules as everything else, rather than
 hand-maintained. The engine Job is never submitted by hand, and the driver
 deletes it on every exit path — an aborted run cannot strand GPUs.
 
+### Tunnel robustness: drop journal, retry classification, and the completeness gate
+
+The babysitter thread in `_PortForwardSandbox` (`pipeline/k8s/lib/k8s_pod_providers/providers.py`)
+— and the engine-tunnel babysitter in `agentic-driver.sh` — used to only check
+that the local `kubectl port-forward` process hadn't exited. That misses the
+failure that actually killed tasks in production: the tunnel's stream breaks
+(e.g. an apiserver-side reset) while the local process keeps running, so the
+old check reported perpetual health while every request through the tunnel
+failed. Both babysitters now HTTP-probe the thing they're actually meant to
+keep working — `/is_alive` for a sandbox, `/v1/models` for the engine —
+require a few consecutive failures before acting (so one slow response under
+load doesn't trigger a needless restart), and restart onto the **same** local
+port, because SWE-agent and the client are handed that port once at launch and
+have no way to learn a new one.
+
+**A trap worth knowing about.** `engine-portforward.log` is a misleading place
+to debug a dropped *sandbox* tunnel. In the evidence run that motivated this
+work, all 21 `error: lost connection to pod` lines in that file were benign
+warm-up churn while vLLM was still loading, and the 7 mid-run
+`error copying from local connection to remote stream` lines each landed
+2–19s *after* a task had already been SIGKILLed by its outer `timeout` — an
+effect of the kill, not a cause of it. The actual sandbox-tunnel failures
+(`aiohttp ServerDisconnectedError` out of `swerex/runtime/remote.py`) never
+touch that file at all; they show up in `portforward-events.jsonl` and in
+`task_<id>/sweagent_std{out,err}.log`.
+
+#### The drop journal — `$TEASBENCH_PF_EVENTS`
+
+One JSON object per line, appended under a module-level lock, written by both
+`providers.py`'s `_journal()` (sandbox tunnels) and the driver's
+`_journal_engine()` (the engine tunnel). A journalling failure (e.g. a full
+disk) is swallowed, never raised — the journal exists to make failures *more*
+visible, not to introduce a new one.
+
+```json
+{"ts": 1770000000.12, "label": "django__django-14787", "event": "pf_drop",
+ "phase": "running", "reason": "probe_failed", "job": "swe-rex-abc12",
+ "pod": "swe-rex-abc12-x9k", "local_port": 41235, "pid": 12345,
+ "detail": "optional free text"}
+```
+
+| Field | Meaning |
+|---|---|
+| `label` | the value passed to `acquire(image, label)` — for a sandbox this is the SWE-bench `instance_id` (`agent_cap/agents/strategies_sweagent.py:127-128`), so it keys straight to `task_id`. The engine tunnel writes the reserved label `"__engine__"`, which never collides with a real task id; the retry classifier only ever looks up labels matching a `task_id`, so `"__engine__"` rows are invisible to it and only show up in the report's journal tally. |
+| `event` | one of `acquire`, `pf_start`, `pf_drop`, `pf_restart`, `pf_unrecoverable`, `release` |
+| `phase` | `"startup"` or `"running"` — see below, this is load-bearing |
+| `reason` | `probe_failed`, `process_exited`, `pod_gone`, `restart_exhausted` (on `pf_drop` / `pf_unrecoverable`); omitted elsewhere |
+| `job`, `pod`, `local_port`, `pid`, `detail` | optional, best-effort context |
+
+**Why `phase` is load-bearing.** `_PortForwardSandbox.start()` already
+restarts the tunnel while the sandbox pod is still `pip install`-ing swe-rex —
+that's ordinary, expected startup churn, and every sandbox does it at least
+once. Those restarts are tagged `phase: "startup"`. Only a drop the babysitter
+itself observes — i.e. *after* `/is_alive` first succeeded — is tagged
+`phase: "running"`, and the retry classifier below only ever acts on
+`"running"` drops. Without that distinction, ordinary startup churn on every
+task would look identical to a real infrastructure failure, and the
+classifier's whole purpose — telling "genuinely failed" from "infra hiccup" —
+would collapse.
+
+#### Retry classification — `swebench_run_audit`
+
+New module, `pipeline/k8s/lib/swebench_run_audit.py`, stdlib-only, driven as
+`python -m swebench_run_audit <retry-list|prune|report>`. A task is only
+classified at all if it's *incomplete* —
+`not (row["output_text"] or "").strip()`, exactly the condition under which
+AgentCAP's own evaluator refuses to buffer it for grading in the first place.
+Complete tasks are never touched.
+
+| Evidence (first match wins) | Retry? | Reason tag |
+|---|---|---|
+| journal has a `pf_drop` row for this task with `phase: "running"` | **yes** | `pf_drop_running` |
+| `row["errors"][0]` starts with `"k8s sidecar failed:"` — `provider.acquire()` itself raised (sandbox job create failed, pod not Running, swerex not alive) | **yes** | `sidecar_error` |
+| `sweagent_stdout.log` / `sweagent_stderr.log` contains `ServerDisconnectedError`, `Server disconnected`, `Cannot connect to host 127.0.0.1:`, or `SessionExistsError` | **yes** | `log_signature` |
+| `sweagent_rc == 124` (outer `timeout` SIGKILL), `--retry-timeouts 1`, no prior timeout retry for this task | **yes**, once only | `timeout_first_retry` |
+| `sweagent_rc == 124`, `--retry-timeouts 0` | no | `timeout_not_retried` |
+| `sweagent_rc == 124`, already retried once (an earlier `results.attempt-*.jsonl` already shows `sweagent_rc == 124` for this task) | no | `timeout_retry_exhausted` |
+| none of the above — SWE-agent's own `exit_cost` / `exit_format` / `exit_context`, or `sweagent_rc == 0` with an empty patch (agent finished, submitted nothing) | no | `no_evidence` |
+
+The last row is the one to hold the line on: retrying a task the agent itself
+gave up on hands it a second sample it didn't earn, while every task that only
+got one shot keeps a single sample — that biases accuracy upward for exactly
+the tasks that were hardest, the opposite of what a retry mechanism aimed at
+infrastructure noise should do. Same reasoning for `timeout_retry_exhausted`:
+under a fixed per-instance call/step budget a task that timed out once will
+time out again deterministically, so a second retry burns cluster time for a
+result rule 4 already predicts.
+
+`prune RUN_DIR --tasks-file FILE --attempt N` prepares a resume pass for the
+tasks `retry-list` selected:
+
+- archives `results.jsonl` to `results.attempt-N.jsonl` and rewrites
+  `results.jsonl` with exactly one row per `task_id` (last occurrence wins),
+  **with the retried tasks removed entirely**. AgentCAP's `--resume` skips any
+  `task_id` already present in `results.jsonl`, errors or not
+  (`agent_cap/agents/cli.py:503-506`, `_load_resume` at `:735-749`); leaving a
+  retried task's row in place would mean it never actually re-runs. Duplicate
+  rows are collapsed here too, because `cli.py:636-661` patches only the
+  *last* occurrence of a `task_id` on write-back — a stray duplicate silently
+  makes the run's own denominator 101-for-100 and skews `metrics.json`.
+- deletes `task_<id>/stream_stats.jsonl` for each retried task. It's opened in
+  **append** mode (`agent_cap/sweagent_streaming/__init__.py:320`) and summed
+  whole-file (`strategies_sweagent.py:234-252`); left in place, a retried task
+  would report attempt-1 + attempt-2 tokens as one number.
+- deletes `task_<id>/sweagent_traj/` for each retried task.
+  `strategies_sweagent.py:216-226` globs `*.traj` by mtime and takes the first
+  with a non-empty `info.submission`; left in place, a retry that itself fails
+  to produce a patch can silently inherit the *earlier* attempt's patch
+  instead of correctly reporting empty.
+
+`report RUN_DIR --attempts N [--out completeness.json]` is the publish gate.
+It re-classifies every task (always with `retry_timeouts=True` — `report` has
+no `--retry-timeouts` flag of its own, since that's a driver-loop policy
+knob, not a property of the run itself, so it treats an unexhausted timeout as
+still-fixable and only an exhausted one as genuinely failed), flags any task
+that regressed `resolved: true -> false` across successive
+`results.attempt-*.jsonl` snapshots (possible because `finalize()` re-grades
+every buffered instance from scratch each attempt and writes wholesale, no
+merge — `evaluators_swebench.py:169, 236-251` — so a transient exec-pod
+failure on an *unrelated*, already-resolved task can silently downgrade it),
+and exits non-zero if any task is still `infra-incomplete` or if
+`predictions.json` / `eval_k8s_results.json` are short of the patched-row
+count.
+
+#### `TEASBENCH_PF_*` environment variables
+
+Read by `PortForwardK8sProvider` / `_PortForwardSandbox`
+(`pipeline/k8s/lib/k8s_pod_providers/providers.py`); unused by
+`InClusterK8sProvider`, which has no tunnel to babysit or journal. All
+unset-defaults preserve pre-existing behaviour, so existing tests and
+non-driver callers are unaffected.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TEASBENCH_PF_EVENTS` | unset = journalling off | path to the drop journal (the driver sets `$RUN_DIR/portforward-events.jsonl`) |
+| `TEASBENCH_PF_LOG_DIR` | unset = `kubectl port-forward` stderr to `DEVNULL`, as before | directory for per-sandbox `kubectl port-forward` stdout+stderr (the driver sets `$RUN_DIR/portforward/`) |
+| `TEASBENCH_PF_PROBE_INTERVAL` | `15` | seconds between `/is_alive` probes in the babysitter |
+| `TEASBENCH_PF_PROBE_TIMEOUT` | `5` | per-probe HTTP timeout, seconds |
+| `TEASBENCH_PF_PROBE_FAILURES` | `2` | consecutive probe failures before the babysitter restarts the tunnel |
+| `TEASBENCH_PF_MAX_RESTARTS` | `20` | cap on babysitter restarts per sandbox before giving up (emits `pf_unrecoverable`) |
+| `TEASBENCH_PF_BACKOFF_MAX` | `30` | cap, in seconds, on the exponential backoff between restarts |
+
+The driver sets `TEASBENCH_PF_EVENTS` and `TEASBENCH_PF_LOG_DIR` for every
+run; the probe/restart/backoff knobs are exposed for tuning but have no
+driver-side overrides today, so they take these defaults unless set in the
+shell that launches the driver script.
+
 ### The shared rule engine
 
 Both platforms build their commands from the **same** `pipeline/configs/config.yaml`
