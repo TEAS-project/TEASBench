@@ -481,7 +481,7 @@ follow these steps:
    `experiments/` directory. Each CSV can describe MoE/basic or agentic benchmarks.
 2. Run the pipeline `generate.py` script locally:
    ```bash
-    python3 generate.py --csv_file <path to experiment CSV> --vast
+    python3 generate.py --csv_file <path to experiment CSV> --site vastai
    ```
    You may optionally provide a `--target_dir` argument to specify where the output should be generated.
    Depending on the contents of the CSV, one or more bash scripts will be created, each corresponding to one
