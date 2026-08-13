@@ -10,6 +10,7 @@ load_site() below.
 
 import functools
 import os
+import re
 
 import yaml
 
@@ -149,6 +150,12 @@ MCP_ENABLED_SERVERS = (
     "wikipedia"
 )
 
+# Identity stamped into every leaf of the controlled repeatability /
+# engine-build study. Rows opt in via a 'study_block' CSV column (E1..E6);
+# see experiments/replication-study-eidf.csv and
+# eidf/scripts/run_study_block.sh.
+STUDY_ID = "controlled-variation-2026"
+
 # Pipeline families, declared per row in the leading CSV 'family' column.
 # "moe" is the basic server+client benchmark family (gsm8k, arena-hard,
 # longbench_v1); "agentic" is AGENTIC_BENCHMARKS above. The values match the
@@ -250,10 +257,45 @@ def local_model_path(model: str, site: dict):
     return f"{root}/{HF_MODEL_MAP[model]}" if root else ""
 
 
+def study_fields(p: dict):
+    """Validated (study_block, engine_version) for a study row, else None.
+    Study rows are moe-only and must pin engine_version explicitly — the
+    build is the treatment, so inheriting the config default is an error."""
+    block = p.get("study_block")
+    if block is None or block == "":
+        return None
+    if benchmark_family(p) != "moe":
+        raise ValueError("study_block is only supported for family 'moe' rows")
+    if not re.fullmatch(r"[Ee][1-6]", str(block)):
+        raise ValueError(f"study_block {block!r}: expected E1..E6")
+    version = p.get("engine_version")
+    if version is None or str(version).strip() == "":
+        raise ValueError(
+            f"study row (block {block}) has no engine_version; study rows "
+            "must pin the build explicitly")
+    return str(block).lower(), str(version)
+
+
+def study_version_token(version: str):
+    """Dot-free engine version for k8s names: '0.5.12.post1' -> '0512p1'."""
+    return str(version).replace(".", "").replace("post", "p")
+
+
 def get_run_name(p: dict):
     if benchmark_family(p) == "agentic":
         return (f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}"
                 f"_{p['benchmark']}_nt{p['num_tasks']}_{p['gpu']}x{p['num_gpu']}")
+
+    study = study_fields(p)
+    if study:
+        block, version = study
+        # No ns/bsd segments (frozen at 256 samples, batch-default) so the
+        # job name + generateName suffix stays under the 63-char label limit.
+        return (f"study_{block}_{p['inference_engine']}"
+                f"_{study_version_token(version)}"
+                f"_{MODEL_SHORT_NAME_MAP[p['model']]}"
+                f"_{DATASET_SHORT_NAME_MAP[p['dataset']]}"
+                f"_{p['gpu']}x{p['num_gpu']}")
 
     name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
 
@@ -291,6 +333,13 @@ def results_repo_dir(p: dict):
         dir += f"_input{p['input_length']}"
     if p['output_length'] != None:
         dir += f"_output{p['output_length']}"
+
+    # Study ingestion marker: .../batch-size-default/study-e1/<timestamp>.
+    # A directory level, not a timestamp suffix — downstream parsers treat
+    # everything below batch-size as the run id but need a PURE timestamp dir.
+    study = study_fields(p)
+    if study:
+        dir += f"/study-{study[0]}"
 
     return dir
 

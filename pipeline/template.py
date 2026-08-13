@@ -4,7 +4,9 @@ import yaml
 import os
 import re
 import subprocess
-from utils import needs_login_node_driver, swe_bench_lite_on_k8s, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, site_of, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
+from utils import (needs_login_node_driver, swe_bench_lite_on_k8s, get_run_name,
+                   k8s_friendlify, results_repo_dir, benchmark_family, site_of,
+                   study_fields, STUDY_ID, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR)
 
 DEFINED_SENTINEL = "<defined>"
 
@@ -253,10 +255,47 @@ class Template:
         # Construct Image Name: base + version + variant
         img_cfg = self.resolve_generic_variable("image", config, matching_rules, parameters)
         img_version = self.resolve_generic_variable("inference_engine_version", config, matching_rules, parameters)
+        # Per-row engine_version (study rows) beats the config default: the
+        # build is the experimental treatment there.
+        if parameters.get("engine_version"):
+            img_version = parameters["engine_version"]
         cuda_variant = img_cfg.get("cuda_variant", "") if isinstance(img_cfg, dict) else ""
         image_name = f"{img_cfg['base']}:v{img_version}{cuda_variant if cuda_variant else ''}"
 
+        # Study rows pin MoE-CAP; a failed checkout fails the run rather than
+        # silently running latest main.
+        moe_cap_ref = parameters.get("moe_cap_ref")
+        moe_cap_pin = ""
+        if moe_cap_ref:
+            moe_cap_pin = (f"git checkout --quiet --detach {moe_cap_ref}"
+                           " || { echo 'ERROR: MoE-CAP pin failed'; exit 1; }")
+
+        # Study leaves record their identity, the realised environment
+        # (node, GPU UUIDs, pip freeze) and the judge-baseline content hash.
+        study_enrichment = ""
+        study = study_fields(parameters)
+        if study:
+            block, version = study
+            order = int(parameters.get("study_order") or 0)
+            study_enrichment = (
+                "GPU_UUIDS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader"
+                " | paste -sd, -)\n"
+                "BASELINE_SHA=$(sha256sum $PVC_RUN_OUTPUT_DIR/gpt-4-0613.jsonl"
+                " 2>/dev/null | cut -d' ' -f1)\n"
+                "pip freeze > $PVC_RUN_OUTPUT_DIR/pip_freeze.txt\n"
+                "jq --arg gpu_uuids \"$GPU_UUIDS\" --arg node \"$k8s_node_name\" "
+                "--arg bsha \"$BASELINE_SHA\" "
+                f"'.study = {{study_id: \"{STUDY_ID}\", block_id: \"{block}\", "
+                f"planned_order: {order}, engine_version: \"{version}\", "
+                "node: $node, gpu_uuids: $gpu_uuids, "
+                "arena_baseline_sha256: $bsha}' "
+                "$PVC_RUN_OUTPUT_DIR/metadata.json > tmp_study.json "
+                "&& mv tmp_study.json $PVC_RUN_OUTPUT_DIR/metadata.json"
+            )
+
         replacements = {
+            "@moe_cap_pin@": moe_cap_pin,
+            "@study_metadata_enrichment@": study_enrichment,
             "@image_name@": image_name,
             "@extra_container_env@": extra_env,
             "@download_arena_hard_baseline_answers@": arena_dl,

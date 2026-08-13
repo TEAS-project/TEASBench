@@ -52,6 +52,7 @@ spec:
             apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" -y install git
             git clone  https://github.com/Auto-CAP/MoE-CAP.git /dev/shm/MoE-CAP
             cd /dev/shm/MoE-CAP
+            @moe_cap_pin@
             MOE_CAP_COMMIT=$(git rev-parse --short HEAD)
             pip install -e .
             pip install gputil
@@ -154,6 +155,7 @@ spec:
 
             # Add commit IDs of MoE-CAP and TEASBench to metadata.json (on the PVC copy)
             jq --arg moe_cap_commit $MOE_CAP_COMMIT '.system_environment += {"teasbench_commit": "@teasbench_commit@", "moe_cap_commit": $moe_cap_commit}' $PVC_RUN_OUTPUT_DIR/metadata.json > tmp.json && mv tmp.json $PVC_RUN_OUTPUT_DIR/metadata.json
+            @study_metadata_enrichment@
 
             job_end_time=$(date +%s)
             job_duration=$((job_end_time - job_start_time))

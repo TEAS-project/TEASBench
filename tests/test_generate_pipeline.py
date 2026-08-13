@@ -405,5 +405,153 @@ class ResultsRepoDirRoundTripTests(unittest.TestCase):
         self.assertEqual(parsed["batch_size"], "default")
 
 
+class ReplicationStudyTests(unittest.TestCase):
+    """The controlled repeatability / engine-build study: the 72-leaf CSV
+    is balanced as the study design freezes it, study rows pin their engine build
+    into the image tag, and the study-<block> ingestion marker level survives
+    the parse_run_path round trip without breaking timestamp parsing."""
+
+    STUDY_CSV = EXPERIMENTS / "replication-study-eidf.csv"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.utils = load_module_from_path("_pipeline_utils_study", PIPELINE / "utils.py")
+        with open(cls.STUDY_CSV, newline="") as f:
+            rows = list(csv.DictReader(f))
+        cls.rows = rows
+
+        # Generate one block end-to-end via the launcher's own CSV filter
+        # (awk column 10 + sed ref-fill), so a CSV column change that breaks
+        # eidf/scripts/run_study_block.sh breaks this test too.
+        cls.tmp = tempfile.mkdtemp()
+        block_csv = Path(cls.tmp) / "e1.csv"
+        subprocess.run(
+            "awk -F, 'NR==1 || $10==\"E1\"' " + str(cls.STUDY_CSV)
+            + " | sed 's/,$/,abc1234/' > " + str(block_csv),
+            shell=True, check=True)
+        cls.outdir = Path(cls.tmp) / "out"
+        run_generate(PIPELINE, block_csv, cls.outdir)
+        cls.generated = sorted(cls.outdir.glob("*.yaml"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def leaves(self, block):
+        return sorted((r for r in self.rows if r["study_block"] == block),
+                      key=lambda r: int(r["study_order"]))
+
+    def test_matrix_is_the_frozen_72_leaves(self):
+        """6 blocks x 4 arms x 3 datasets, all gpt-oss-120b / H100x1 / bdef."""
+        self.assertEqual(len(self.rows), 72)
+        arms = {("vllm", "0.16.0"), ("vllm", "0.21.0"),
+                ("sglang", "0.5.9"), ("sglang", "0.5.12.post1")}
+        datasets = {"gsm8k", "arena-hard", "longbench_v1"}
+        for block in ("E1", "E2", "E3", "E4", "E5", "E6"):
+            leaves = self.leaves(block)
+            self.assertEqual(len(leaves), 12, block)
+            self.assertEqual([int(r["study_order"]) for r in leaves], list(range(1, 13)))
+            combos = {(r["inference_engine"], r["engine_version"], r["dataset"])
+                      for r in leaves}
+            self.assertEqual(combos, {(e, v, d) for (e, v) in arms for d in datasets})
+            for r in leaves:
+                self.assertEqual(
+                    (r["family"], r["model"], r["num_samples"], r["gpu"],
+                     r["num_gpu"], r["batch_size"]),
+                    ("moe", "gpt-oss-120b", "256", "H100", "1", "default"))
+
+    def test_order_balance_and_pair_adjacency(self):
+        """Control/alternate legs of the same engine x dataset run
+        back-to-back (so a truncated block still yields complete pairs), and
+        engine order / endpoint order are each 3/3 across the six blocks."""
+        control = {"vllm": "0.16.0", "sglang": "0.5.9"}
+        first_engines, first_endpoints = [], []
+        for block in ("E1", "E2", "E3", "E4", "E5", "E6"):
+            leaves = self.leaves(block)
+            for i in range(0, 12, 2):
+                a, b = leaves[i], leaves[i + 1]
+                self.assertEqual(a["inference_engine"], b["inference_engine"], block)
+                self.assertEqual(a["dataset"], b["dataset"], block)
+                self.assertNotEqual(a["engine_version"], b["engine_version"], block)
+            first_engines.append(leaves[0]["inference_engine"])
+            first_endpoints.append(
+                "control" if leaves[0]["engine_version"] ==
+                control[leaves[0]["inference_engine"]] else "alternate")
+        self.assertEqual(sorted(first_engines), ["sglang"] * 3 + ["vllm"] * 3)
+        self.assertEqual(sorted(first_endpoints), ["alternate"] * 3 + ["control"] * 3)
+
+    def test_generated_yaml_pins_build_marker_and_producer(self):
+        """Each generated leaf carries its row's exact image tag, the
+        study-e1 path level, the MoE-CAP checkout pin, and the study identity
+        jq -- and its job name stays under the k8s label limit."""
+        self.assertEqual(len(self.generated), 12)
+        by_name = {p.name: p.read_text() for p in self.generated}
+        for row in self.leaves("E1"):
+            stem = None
+            for name, text in by_name.items():
+                if (f'engine_version: "{row["engine_version"]}"' in text
+                        and f'--datasets {row["dataset"]}' in text
+                        and f'planned_order: {row["study_order"]},' in text):
+                    stem, yaml_text = name, text
+                    break
+            self.assertIsNotNone(stem, f"no YAML for row {row}")
+            base = {"vllm": "vllm/vllm-openai", "sglang": "lmsysorg/sglang"}
+            self.assertIn(f'image: {base[row["inference_engine"]]}:'
+                          f'v{row["engine_version"]}', yaml_text)
+            self.assertIn("/batch-size-default/study-e1/$timestamp", yaml_text)
+            # Pin must fail the run if the checkout fails, not fall back to main.
+            self.assertIn("git checkout --quiet --detach abc1234 || ", yaml_text)
+            self.assertIn('block_id: "e1"', yaml_text)
+            self.assertIn("pip freeze > $PVC_RUN_OUTPUT_DIR/pip_freeze.txt", yaml_text)
+            self.assertIn("arena_baseline_sha256", yaml_text)
+            generate_name = re.search(r"generateName: (\S+)", yaml_text).group(1)
+            self.assertLessEqual(len(generate_name) + 5, 63, generate_name)
+
+    def test_study_marker_level_round_trips_and_keeps_a_pure_timestamp(self):
+        """parse_run_path keeps the standard 6-level prefix and reports
+        'study-e1/<ts>' as the run id; the timestamp stays its own PURE
+        component, which is what the dashboard assembler's run_date() needs."""
+        params = {"family": "moe", "inference_engine": "vllm", "model": "gpt-oss-120b",
+                  "dataset": "gsm8k", "num_samples": 256, "gpu": "H100",
+                  "num_gpu": 1, "batch_size": "default",
+                  "input_length": None, "output_length": None,
+                  "study_block": "E1", "engine_version": "0.21.0"}
+        full_dir = self.utils.results_repo_dir(params)
+        self.assertEqual(
+            full_dir,
+            "moe/eidf/vllm/gpt-oss-120b/gsm8k_256samples/h100x1/"
+            "batch-size-default/study-e1")
+        rel_parts = tuple(full_dir.split("/", 1)[1].split("/")) + ("20260901-1010", "metrics.json")
+        parsed = parse_run_path(rel_parts)
+        self.assertEqual(parsed["dataset"], "gsm8k")
+        self.assertEqual(parsed["batch_size"], "default")
+        self.assertEqual(parsed["run_timestamp"], "study-e1/20260901-1010")
+
+    def test_study_row_without_engine_version_fails_generation(self):
+        """A study row must pin its build; silently inheriting the config
+        default would turn an alternate-build leaf into a control run."""
+        params = {"family": "moe", "inference_engine": "vllm", "model": "gpt-oss-120b",
+                  "dataset": "gsm8k", "num_samples": 256, "gpu": "H100",
+                  "num_gpu": 1, "batch_size": "default", "study_block": "E1"}
+        with self.assertRaises(ValueError):
+            self.utils.get_run_name(params)
+        # study_block on an agentic row is an error, not silently ignored.
+        with self.assertRaises(ValueError):
+            self.utils.study_fields({"family": "agentic", "benchmark": "mcp-atlas",
+                                     "study_block": "E1", "engine_version": "0.5.9"})
+
+    def test_non_study_rows_unaffected(self):
+        """A row with no study_block keeps its historical name and path."""
+        params = {"family": "moe", "inference_engine": "sglang", "model": "gpt-oss-120b",
+                  "dataset": "gsm8k", "num_samples": 256, "gpu": "H100",
+                  "num_gpu": 1, "batch_size": "default",
+                  "input_length": None, "output_length": None}
+        self.assertEqual(self.utils.get_run_name(params),
+                         "sglang_gptoss120b_gsm8k_ns256_H100x1_bsd")
+        self.assertEqual(
+            self.utils.results_repo_dir(params),
+            "moe/eidf/sglang/gpt-oss-120b/gsm8k_256samples/h100x1/batch-size-default")
+
+
 if __name__ == "__main__":
     unittest.main()
