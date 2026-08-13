@@ -280,14 +280,14 @@ GPU_SPECS: dict[str, dict] = {
         "tdp_w": 300,
         "tdp_source": "https://docs.tenstorrent.com/aibs/blackhole/",
     },
-    # Cerebras publishes no CS-3 list price. The Next Platform reports the Galaxy-1
-    # contract at $100M / 32 nodes including Cerebras operations and calls $2.5M per
-    # node its best estimate. This is therefore an analyst estimate, not a vendor quote.
-    # Both it and the 23 kW figure cover one complete integrated CS-3 system, so the
-    # normal 1.2x host/chassis uplift must not be added a second time.
+    # Cerebras publishes no CS-3 list price. The $1.2M per-system figure was privately
+    # communicated by the hardware developer (Cerebras); there is no public source, so
+    # price_source carries a provenance label rather than a URL. Both it and the 23 kW
+    # figure cover one complete integrated CS-3 system, so the normal 1.2x host/chassis
+    # uplift must not be added a second time.
     "cs3": {
-        "price_per_unit_usd": 2500000.0,
-        "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
+        "price_per_unit_usd": 1200000.0,
+        "price_source": "privately communicated by the hardware developer (Cerebras); no public source",
         "tdp_w": 23000,
         "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
         "capital_scale": 1.0,
@@ -301,7 +301,7 @@ CPU_SPECS: dict[str, dict] = {
     "cs3-integrated-host": {
         "model": "Included in complete Cerebras CS-3 system",
         "price_per_unit_usd": 0.0,
-        "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
+        "price_source": "privately communicated by the hardware developer (Cerebras); no public source",
         "tdp_w": 0,
         "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
     },
