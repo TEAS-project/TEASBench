@@ -38,6 +38,7 @@ RUN chmod +x /root/run_benchmarks.sh /root/entrypoint.sh
 # Also copy in the MoE-CAP command resolution infrastructure.
 COPY template.py utils.py /opt/teasbench/pipeline/
 COPY configs/config.yaml /opt/teasbench/pipeline/configs/config.yaml
+COPY configs/sites/vastai.yaml /opt/teasbench/pipeline/configs/sites/vastai.yaml
 COPY vast/resolve_commands.py /opt/teasbench/pipeline/vast/resolve_commands.py
 
 WORKDIR /root

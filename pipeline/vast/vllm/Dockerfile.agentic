@@ -105,6 +105,7 @@ RUN chmod +x /root/run_agentic_benchmarks.sh /root/entrypoint.sh
 COPY template.py utils.py /opt/teasbench/pipeline/
 COPY configs/config.yaml /opt/teasbench/pipeline/configs/config.yaml
 COPY configs/agents/ /opt/teasbench/pipeline/configs/agents/
+COPY configs/sites/vastai.yaml /opt/teasbench/pipeline/configs/sites/vastai.yaml
 COPY vast/resolve_commands.py /opt/teasbench/pipeline/vast/resolve_commands.py
 COPY scripts/ /opt/teasbench/pipeline/scripts/
 
