@@ -2,7 +2,7 @@
 # Launch ONE block of the controlled repeatability / engine-build study on
 # EIDF, from a login node. Six identical blocks (E1..E6), each 12 runs:
 # {vllm 0.16.0, vllm 0.21.0, sglang 0.5.9, sglang 0.5.12.post1} x
-# {gsm8k, arena-hard, longbench_v1}, gpt-oss-120b, H100x1, batch-default
+# {gsm8k, arena-hard, longbench_v1}, gpt-oss-120b, batch-default; E1 on A100x1 (pilot); E2-E6 stratum is decided after the pilot (CSV rows still carry the original H100 placeholder - do not launch them until retargeted)
 # (experiments/replication-study-eidf.csv).
 #
 #   ./run_study_block.sh E1              # run block E1 (12 leaves, sequential)
