@@ -2,6 +2,8 @@ apiVersion: v1
 kind: Pod
 metadata:
   generateName: teas-study-preflight-collector-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf230ns-user-queue
 spec:
   restartPolicy: Never
   containers:
