@@ -756,6 +756,11 @@ rules:
     image:
       cuda_variant: null
 
+  - match:
+      compatibility_preflight: true
+    client_flags:
+      output_dir: "/dev/shm/batch-size-default/compatibility-preflight/$timestamp"
+
 ###########################################
 # Rules based on model and inference engine
 ###########################################

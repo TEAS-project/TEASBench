@@ -46,7 +46,33 @@ jq -e '.quality.total == 256 and .quality.attempted == 256 and
     "$PVC_RUN_OUTPUT_DIR/metrics.json" >/dev/null \
     || study_fail "metrics quality counts are not all 256"
 
-jq -e --arg study_id "$STUDY_ID" --arg block "$STUDY_BLOCK" \
+if [ "${STUDY_PREFLIGHT:-0}" = 1 ]; then
+    jq -e --arg node "$k8s_node_name" --arg job "$k8s_job_name" \
+          --arg uid "$k8s_job_uid" --arg engine "$STUDY_ENGINE" \
+          --arg version "$STUDY_ENGINE_VERSION" --arg teas "$TEASBENCH_COMMIT" \
+          --arg moe "$MOE_CAP_COMMIT" --arg image_ref "$IMAGE_REF" '
+        .model_config.model_name == "unsloth/gpt-oss-120b" and
+        .hardware.num_gpus == 2 and
+        .hardware.gpu_type == "NVIDIA-A100-SXM4-80GB" and
+        .system_environment.inference_engine == $engine and
+        .system_environment.inference_engine_version == $version and
+        .system_environment.teasbench_commit == $teas and
+        .system_environment.moe_cap_commit == $moe and
+        .compatibility_preflight.dataset == "longbench_v1" and
+        .compatibility_preflight.num_samples == 256 and
+        .compatibility_preflight.batch_size == "default" and
+        .compatibility_preflight.gpu == "A100" and
+        .compatibility_preflight.num_gpu == 2 and
+        .compatibility_preflight.node == $node and
+        .compatibility_preflight.job_name == $job and
+        .compatibility_preflight.job_uid == $uid and
+        .compatibility_preflight.image_ref == $image_ref and
+        (.compatibility_preflight.gpu_uuids | length == 2 and
+         (unique | length == 2) and all(.[]; length > 0))' \
+        "$PVC_RUN_OUTPUT_DIR/metadata.json" >/dev/null \
+        || study_fail "metadata does not match the excluded compatibility preflight"
+else
+    jq -e --arg study_id "$STUDY_ID" --arg block "$STUDY_BLOCK" \
       --argjson order "$STUDY_ORDER" --arg node "$k8s_node_name" \
       --arg job "$k8s_job_name" --arg uid "$k8s_job_uid" \
       --arg dataset "$STUDY_DATASET" --arg engine "$STUDY_ENGINE" \
@@ -70,6 +96,7 @@ jq -e --arg study_id "$STUDY_ID" --arg block "$STUDY_BLOCK" \
      length == 2 and (unique | length == 2))' \
     "$PVC_RUN_OUTPUT_DIR/metadata.json" >/dev/null \
     || study_fail "metadata does not match the frozen study coordinate"
+fi
 
 if [ "$STUDY_DATASET" = "arena-hard" ]; then
     jq -e '.study.arena_baseline_sha256 | test("^[0-9a-f]{64}$")' \
@@ -100,6 +127,38 @@ if [ "$STUDY_ENGINE" = "sglang" ]; then
 fi
 RECEIPT="$PVC_RUN_OUTPUT_DIR/study-validation-receipt.json"
 RECEIPT_TMP="$RECEIPT.tmp"
+
+if [ "${STUDY_PREFLIGHT:-0}" = 1 ]; then
+    RECEIPT="$PVC_RUN_OUTPUT_DIR/preflight-validation-receipt.json"
+    RECEIPT_TMP="$RECEIPT.tmp"
+    COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -c -n --arg study_id "$STUDY_ID" --arg job "$k8s_job_name" \
+          --arg job_uid "$k8s_job_uid" --arg node "$k8s_node_name" \
+          --arg artifact_dir "$PVC_RUN_OUTPUT_DIR" --arg teas "$TEASBENCH_COMMIT" \
+          --arg moe_ref "$PREFLIGHT_MOE_CAP_REF" --arg image_tag "$STUDY_IMAGE_TAG" \
+          --arg image_ref "$IMAGE_REF" --arg metadata_sha "$METADATA_SHA" \
+          --arg metrics_sha "$METRICS_SHA" --arg yaml_sha "$JOB_YAML_SHA" \
+          --arg engine "$STUDY_ENGINE" --arg version "$STUDY_ENGINE_VERSION" \
+          --arg completed_at "$COMPLETED_AT" --arg gpu_uuids "$GPU_UUIDS" '
+        {study_id: $study_id, kind: "excluded-compatibility-preflight",
+         inference_engine: $engine, engine_version: $version,
+         gpu: "A100", num_gpu: 2, dataset: "longbench_v1", num_samples: 256,
+         batch_size: "default", outcome: "complete", teasbench_commit: $teas,
+         moe_cap_ref: $moe_ref, image_tag: $image_tag, image_ref: $image_ref,
+         job_uid: $job_uid, job_name: $job, node: $node,
+         gpu_uuids: ($gpu_uuids | split(",") | map(select(length > 0))),
+         completed_at: $completed_at, artifact_dir: $artifact_dir,
+         metadata_sha256: $metadata_sha, metrics_sha256: $metrics_sha,
+         job_yaml_sha256: $yaml_sha}' > "$RECEIPT_TMP" \
+        || study_fail "could not construct preflight evidence receipt"
+    mv "$RECEIPT_TMP" "$RECEIPT" \
+        || study_fail "could not finalize preflight evidence receipt"
+    STUDY_TERMINATION_LOG="${STUDY_TERMINATION_LOG:-/dev/termination-log}"
+    cp "$RECEIPT" "$STUDY_TERMINATION_LOG" \
+        || study_fail "could not publish preflight evidence to the pod status"
+    echo "Preflight evidence receipt written to $RECEIPT"
+    exit 0
+fi
 
 jq -n --arg study_id "$STUDY_ID" --arg block "$STUDY_BLOCK" \
       --argjson order "$STUDY_ORDER" --arg job "$k8s_job_name" \

@@ -746,7 +746,7 @@ def command_validate_preflight(args):
             "--model_name", "unsloth/gpt-oss-120b",
             "--datasets", "longbench_v1", "--num-samples", "256",
             "--api-url", "http://localhost:30000/v1/completions",
-            "--output_dir", output_dir, "--backend", engine, "--use-chat-api",
+            "--backend", engine, "--output_dir", output_dir, "--use-chat-api",
         ]
         if client_tokens[3:] != expected_client_tail:
             raise GuardError(
@@ -815,6 +815,34 @@ def command_validate_preflight(args):
             "combinations": [list(item) for item in sorted(seen)],
         }
         atomic_write(args.record, json.dumps(validation, sort_keys=True, indent=2) + "\n")
+
+
+def command_capture_preflight(args):
+    record = load_json(args.receipt, "preflight receipt")
+    context = str(args.receipt)
+    require_equal(record, "study_id", STUDY_ID, context)
+    require_equal(record, "kind", PREFLIGHT_KIND, context)
+    require_equal(record, "outcome", "complete", context)
+    require_equal(record, "job_name", args.job, context)
+    require_equal(record, "job_uid", args.job_uid, context)
+    source_artifact_dir = record.get("artifact_dir")
+    if (not isinstance(source_artifact_dir, str)
+            or not Path(source_artifact_dir).is_absolute()):
+        raise GuardError(f"{context}: artifact_dir must be an absolute pod path")
+    if args.manifest or args.artifact_dir:
+        if not args.manifest or not args.artifact_dir:
+            raise GuardError("--manifest and --artifact-dir must be supplied together")
+        local_artifact_dir = Path(args.artifact_dir).resolve(strict=True)
+        if not local_artifact_dir.is_dir():
+            raise GuardError("captured preflight artifact_dir is not a directory")
+        record["artifact_dir"] = str(local_artifact_dir)
+        manifest = Path(args.manifest)
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        with manifest.open("a") as handle:
+            handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    print(source_artifact_dir)
 
 
 def build_parser():
@@ -919,6 +947,15 @@ samples as total, attempted, served, and completed.""")
     preflight.add_argument("--moe-cap-ref", required=True)
     preflight.add_argument("--record")
     preflight.set_defaults(func=command_validate_preflight)
+
+    capture = subparsers.add_parser(
+        "capture-preflight", description="Inspect or append one pod preflight receipt.")
+    capture.add_argument("--receipt", required=True)
+    capture.add_argument("--job", required=True)
+    capture.add_argument("--job-uid", required=True)
+    capture.add_argument("--manifest")
+    capture.add_argument("--artifact-dir")
+    capture.set_defaults(func=command_capture_preflight)
 
     return parser
 

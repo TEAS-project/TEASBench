@@ -397,10 +397,34 @@ def study_version_token(version: str):
     return str(version).replace(".", "").replace("post", "p")
 
 
+def compatibility_preflight_fields(p: dict):
+    """Return (engine, version) for one of the four excluded E1 preflights."""
+    marker = p.get("compatibility_preflight")
+    if marker in (None, "", False):
+        return None
+    if marker is not True and str(marker).lower() != "true":
+        raise ValueError("compatibility_preflight must be true when specified")
+    study = study_fields(p)
+    order = int(str(p["study_order"]), 10)
+    if (study is None or study[0] != "e1" or p.get("dataset") != "longbench_v1"
+            or order not in (5, 6, 11, 12)):
+        raise ValueError(
+            "compatibility_preflight is limited to the four E1 LongBench A100x2 recipes")
+    return p["inference_engine"], study[1]
+
+
 def get_run_name(p: dict):
     if benchmark_family(p) == "agentic":
         return (f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}"
                 f"_{p['benchmark']}_nt{p['num_tasks']}_{p['gpu']}x{p['num_gpu']}")
+
+    preflight = compatibility_preflight_fields(p)
+    if preflight:
+        engine, version = preflight
+        return (f"preflight_{engine}_{study_version_token(version)}"
+                f"_{MODEL_SHORT_NAME_MAP[p['model']]}"
+                f"_{DATASET_SHORT_NAME_MAP[p['dataset']]}"
+                f"_{p['gpu']}x{p['num_gpu']}")
 
     study = study_fields(p)
     if study:
@@ -454,7 +478,9 @@ def results_repo_dir(p: dict):
     # A directory level, not a timestamp suffix — downstream parsers treat
     # everything below batch-size as the run id but need a PURE timestamp dir.
     study = study_fields(p)
-    if study:
+    if compatibility_preflight_fields(p):
+        dir += "/compatibility-preflight"
+    elif study:
         dir += f"/study-{study[0]}"
 
     return dir

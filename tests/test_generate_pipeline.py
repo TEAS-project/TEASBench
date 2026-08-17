@@ -19,6 +19,9 @@ REPO = Path(__file__).resolve().parents[1]
 PIPELINE = REPO / "pipeline"
 EXPERIMENTS = REPO / "experiments"
 STUDY_LAUNCHER = PIPELINE / "k8s" / "helpers" / "run_study_block.sh"
+STUDY_PREFLIGHT_RUNNER = PIPELINE / "k8s" / "helpers" / "run_study_preflight.sh"
+STUDY_PREFLIGHT_COLLECTOR = (
+    PIPELINE / "k8s" / "helpers" / "study_preflight_collector.yaml")
 STUDY_GUARD = PIPELINE / "k8s" / "helpers" / "study_guard.py"
 STUDY_TERMINAL_VALIDATOR = (
     PIPELINE / "k8s" / "helpers" / "study_terminal_validate.sh")
@@ -704,6 +707,162 @@ class ReplicationStudyTests(unittest.TestCase):
             self.assertIn("Planned order for E1:", proc.stdout)
             self.assertIn("Dry run: nothing submitted", proc.stdout)
             self.assertEqual(proc.stdout.count(".yaml"), 12)
+
+    def test_preflight_runner_dry_run_generates_exact_excluded_recipes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = load_yaml_no_duplicates(
+                STUDY_PREFLIGHT_COLLECTOR.read_text())
+            collector_command = collector["spec"]["containers"][0]["command"]
+            self.assertIn("while true", collector_command[-1])
+            self.assertNotIn("86400", collector_command[-1])
+
+            proc = subprocess.run(
+                [str(STUDY_PREFLIGHT_RUNNER), "--dry-run"], cwd=str(REPO),
+                env=self.launcher_environment(tmp), text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("Dry run: four YAMLs generated", proc.stdout)
+            yamls = list(Path(tmp).glob("teas-preflight-*/*.yaml"))
+            self.assertEqual(len(yamls), 4)
+            combinations = set()
+            for yaml_path in yamls:
+                text = yaml_path.read_text()
+                self.assertIn("/compatibility-preflight/$timestamp", text)
+                self.assertNotIn("/study-e1/$timestamp", text)
+                self.assertIn("STUDY_PREFLIGHT=1", text)
+                self.assertIn(".compatibility_preflight =", text)
+                self.assertRegex(text, r"image: \S+@sha256:[0-9a-f]{64}")
+                engine = re.search(r'STUDY_ENGINE="([^"]+)"', text).group(1)
+                version = re.search(r'STUDY_ENGINE_VERSION="([^"]+)"', text).group(1)
+                combinations.add((engine, version))
+            self.assertEqual(combinations, {
+                ("vllm", "0.16.0"), ("vllm", "0.21.0"),
+                ("sglang", "0.5.9"), ("sglang", "0.5.12.post1")})
+            self.assertFalse(
+                (Path(tmp) / "state" / "a100x2-compatibility-preflight.jsonl").exists())
+
+    def test_preflight_runner_one_command_collects_through_live_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kubectl_impl = root / "mock_kubectl.py"
+            kubectl_impl.write_text(r'''#!/usr/bin/env python3
+import hashlib, json, os, re, shutil, sys
+from pathlib import Path
+import yaml
+
+root = Path(os.environ["MOCK_KUBE_ROOT"])
+state_path = root / "kube-state.json"
+state = json.loads(state_path.read_text()) if state_path.exists() else {"count": 0}
+args = sys.argv[1:]
+joined = " ".join(args)
+
+def save():
+    state_path.write_text(json.dumps(state))
+
+if " cp " in f" {joined} ":
+    (root / "forbidden-kubectl-cp").write_text("called")
+    raise SystemExit(97)
+if "create" in args:
+    yaml_path = Path(args[args.index("-f") + 1])
+    if yaml_path.name == "study_preflight_collector.yaml":
+        print("pod/mock-preflight-collector")
+        raise SystemExit(0)
+    document = yaml.safe_load(yaml_path.read_text())
+    state["count"] += 1
+    count = state["count"]
+    job = document["metadata"]["name"]
+    uid = f"11111111-1111-4111-8111-{count:012d}"
+    pod = f"preflight-pod-{count}"
+    container = document["spec"]["template"]["spec"]["containers"][0]
+    script = container["args"][0]
+    engine = re.search(r'STUDY_ENGINE="([^"]+)"', script).group(1)
+    version = re.search(r'STUDY_ENGINE_VERSION="([^"]+)"', script).group(1)
+    teas = re.search(r'TEASBENCH_COMMIT="([0-9a-f]{40})"', script).group(1)
+    image_ref = container["image"]
+    image_tag = re.search(r'STUDY_IMAGE_TAG="([^"]+)"', script).group(1)
+    pod_dir = f"/mnt/develop/outputs/mock/compatibility-preflight/run-{count}"
+    local_dir = root / "pvc" / pod_dir.removeprefix("/mnt/develop/")
+    local_dir.mkdir(parents=True)
+    gpu_uuids = [f"GPU-{count}-a", f"GPU-{count}-b"]
+    metadata = {
+        "model_config": {"model_name": "unsloth/gpt-oss-120b"},
+        "hardware": {"num_gpus": 2, "gpu_type": "NVIDIA-A100-SXM4-80GB"},
+        "system_environment": {
+            "inference_engine": engine, "inference_engine_version": version,
+            "teasbench_commit": teas, "moe_cap_commit": "e" * 7},
+        "compatibility_preflight": {
+            "dataset": "longbench_v1", "num_samples": 256,
+            "batch_size": "default", "gpu": "A100", "num_gpu": 2,
+            "node": "gpu-a", "job_name": job, "job_uid": uid,
+            "gpu_uuids": gpu_uuids, "image_ref": image_ref}}
+    metrics = {"quality": {"total": 256, "attempted": 256,
+                           "served": 256, "completed": 256}}
+    metadata_path = local_dir / "metadata.json"
+    metrics_path = local_dir / "metrics.json"
+    metadata_path.write_text(json.dumps(metadata))
+    metrics_path.write_text(json.dumps(metrics))
+    sha = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    receipt = {
+        "study_id": "controlled-variation-2026-x2",
+        "kind": "excluded-compatibility-preflight",
+        "inference_engine": engine, "engine_version": version,
+        "gpu": "A100", "num_gpu": 2, "dataset": "longbench_v1",
+        "num_samples": 256, "batch_size": "default", "outcome": "complete",
+        "teasbench_commit": teas, "moe_cap_ref": "e" * 40,
+        "image_tag": image_tag, "image_ref": image_ref,
+        "job_uid": uid, "job_name": job, "node": "gpu-a",
+        "gpu_uuids": gpu_uuids, "completed_at": "2026-08-17T12:00:00Z",
+        "artifact_dir": pod_dir, "metadata_sha256": sha(metadata_path),
+        "metrics_sha256": sha(metrics_path), "job_yaml_sha256": sha(yaml_path)}
+    state.update({"job": job, "uid": uid, "pod": pod, "receipt": receipt})
+    save()
+    print(uid)
+    raise SystemExit(0)
+if "wait" in args or "delete" in args:
+    raise SystemExit(0)
+if "exec" in args:
+    source = Path(args[-1])
+    local = root / "pvc" / str(source).removeprefix("/mnt/develop/")
+    sys.stdout.buffer.write(local.read_bytes())
+    raise SystemExit(0)
+if "get" in args:
+    if "{.metadata.uid}" in joined:
+        print(state["uid"])
+    elif "{.items[0].metadata.name}" in joined:
+        print(state["pod"])
+    elif "status.phase" in joined:
+        print("Succeeded")
+    elif "Complete" in joined:
+        print("True")
+    elif "Failed" in joined:
+        pass
+    elif "terminated.message" in joined:
+        print(json.dumps(state["receipt"], separators=(",", ":")))
+    raise SystemExit(0)
+raise SystemExit(f"unexpected kubectl call: {joined}")
+''')
+            kubectl_script = f'''#!/bin/sh
+exec python3 '{kubectl_impl}' "$@"
+'''
+            shared = root / "job-configs"
+            shared.mkdir()
+            env = self.launcher_environment(tmp, kubectl_script=kubectl_script)
+            env["STUDY_JOB_CONFIGS_DIR"] = str(shared)
+            env["MOCK_KUBE_ROOT"] = str(root)
+            proc = subprocess.run(
+                [str(STUDY_PREFLIGHT_RUNNER)], cwd=str(REPO), env=env,
+                text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            manifest = root / "state" / "a100x2-compatibility-preflight.jsonl"
+            records = [json.loads(line) for line in manifest.read_text().splitlines()]
+            self.assertEqual(len(records), 4)
+            self.assertEqual(
+                {(r["inference_engine"], r["engine_version"]) for r in records},
+                {("vllm", "0.16.0"), ("vllm", "0.21.0"),
+                 ("sglang", "0.5.9"), ("sglang", "0.5.12.post1")})
+            self.assertTrue(
+                (root / "state" /
+                 "a100x2-compatibility-preflight.validated.json").is_file())
+            self.assertFalse((root / "forbidden-kubectl-cp").exists())
 
     def test_launcher_rejects_unsafe_actual_launch_options(self):
         cases = (
@@ -1458,8 +1617,8 @@ class StudyGuardTests(unittest.TestCase):
                 "python3 -m moe_cap.runner.openai_api_profile "
                 "--model_name unsloth/gpt-oss-120b --datasets longbench_v1 "
                 "--num-samples 256 --api-url http://localhost:30000/v1/completions "
-                "--output_dir /mnt/develop/batch-size-default/"
-                f"compatibility-preflight/run --backend {engine} "
+                f"--backend {engine} --output_dir /mnt/develop/batch-size-default/"
+                "compatibility-preflight/run "
                 "--use-chat-api &> client.log\n")
             job_yaml_path.write_text(yaml.safe_dump({
                 "apiVersion": "batch/v1", "kind": "Job",
@@ -1785,6 +1944,42 @@ class StudyGuardTests(unittest.TestCase):
                 text=True, capture_output=True)
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("missing artifact output_data.jsonl", proc.stderr)
+
+    def test_terminal_validator_emits_compact_preflight_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output, termination_log, env = self.make_terminal_validation_fixture(
+                tmp, engine="vllm")
+            metadata_path = output / "metadata.json"
+            metadata = json.loads(metadata_path.read_text())
+            metadata["hardware"]["gpu_type"] = "NVIDIA-A100-SXM4-80GB"
+            metadata["system_environment"]["teasbench_commit"] = "a" * 40
+            metadata.pop("study")
+            image_ref = "example.invalid/vllm@sha256:" + "1" * 64
+            metadata["compatibility_preflight"] = {
+                "dataset": "longbench_v1", "num_samples": 256,
+                "batch_size": "default", "gpu": "A100", "num_gpu": 2,
+                "node": "gpu-h", "job_name": "study-e1-job",
+                "job_uid": "uid-e1-job", "gpu_uuids": ["GPU-one", "GPU-two"],
+                "image_ref": image_ref,
+            }
+            metadata_path.write_text(json.dumps(metadata))
+            env.update({
+                "STUDY_PREFLIGHT": "1", "STUDY_DATASET": "longbench_v1",
+                "STUDY_IMAGE_TAG": "vllm/vllm-openai:v0.16.0",
+                "PREFLIGHT_MOE_CAP_REF": "e" * 40,
+                "TEASBENCH_COMMIT": "a" * 40,
+                "GPU_UUIDS": "GPU-one,GPU-two",
+            })
+            proc = subprocess.run(
+                ["bash", str(STUDY_TERMINAL_VALIDATOR)], env=env,
+                text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            evidence = json.loads(termination_log.read_text())
+            self.assertEqual(evidence["kind"], "excluded-compatibility-preflight")
+            self.assertEqual(evidence["gpu_uuids"], ["GPU-one", "GPU-two"])
+            self.assertEqual(evidence["job_yaml_sha256"],
+                             self.file_sha256(output / "job.yaml"))
+            self.assertLess(len(termination_log.read_bytes()), 4096)
 
     def test_manifest_guard_checks_completion_and_unique_last_node(self):
         with tempfile.TemporaryDirectory() as tmp:

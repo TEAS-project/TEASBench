@@ -41,7 +41,7 @@ spec:
             @study_initialization@
 
             timestamp=$( date +%Y%m%d-%H%M )
-            RUN_DIR=/dev/shm/$timestamp
+            RUN_DIR=@run_dir@
             mkdir -p $RUN_DIR
             
             exec &> $RUN_DIR/stdout_stderr.log
