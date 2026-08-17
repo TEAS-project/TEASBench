@@ -1,5 +1,7 @@
 import csv
+import hashlib
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -16,6 +18,10 @@ from postprocessing.aggregate_results import parse_run_path
 REPO = Path(__file__).resolve().parents[1]
 PIPELINE = REPO / "pipeline"
 EXPERIMENTS = REPO / "experiments"
+STUDY_LAUNCHER = PIPELINE / "k8s" / "helpers" / "run_study_block.sh"
+STUDY_GUARD = PIPELINE / "k8s" / "helpers" / "study_guard.py"
+STUDY_TERMINAL_VALIDATOR = (
+    PIPELINE / "k8s" / "helpers" / "study_terminal_validate.sh")
 
 # Benchmarks that route through the agentic family (see utils.AGENTIC_BENCHMARKS),
 # with the experiments CSV that exercises each one and the container count its
@@ -420,18 +426,20 @@ class ReplicationStudyTests(unittest.TestCase):
             rows = list(csv.DictReader(f))
         cls.rows = rows
 
-        # Generate one block end-to-end via the launcher's own CSV filter
+        # Generate one block from each hardware stratum end-to-end via the launcher's own CSV filter
         # (awk column 10 + sed ref-fill), so a CSV column change that breaks
-        # eidf/scripts/run_study_block.sh breaks this test too.
+        # run_study_block.sh breaks this test too.
         cls.tmp = tempfile.mkdtemp()
-        block_csv = Path(cls.tmp) / "e1.csv"
-        subprocess.run(
-            "awk -F, 'NR==1 || $10==\"E1\"' " + str(cls.STUDY_CSV)
-            + " | sed 's/,$/,abc1234/' > " + str(block_csv),
-            shell=True, check=True)
-        cls.outdir = Path(cls.tmp) / "out"
-        run_generate(PIPELINE, block_csv, cls.outdir)
-        cls.generated = sorted(cls.outdir.glob("*.yaml"))
+        cls.generated_by_block = {}
+        for block in ("E1", "E4"):
+            block_csv = Path(cls.tmp) / f"{block.lower()}.csv"
+            subprocess.run(
+                f"awk -F, 'NR==1 || $10==\"{block}\"' " + str(cls.STUDY_CSV)
+                + " | sed 's/,$/,abc1234/' > " + str(block_csv),
+                shell=True, check=True)
+            outdir = Path(cls.tmp) / f"out-{block.lower()}"
+            run_generate(PIPELINE, block_csv, outdir)
+            cls.generated_by_block[block] = sorted(outdir.glob("*.yaml"))
 
     @classmethod
     def tearDownClass(cls):
@@ -441,8 +449,127 @@ class ReplicationStudyTests(unittest.TestCase):
         return sorted((r for r in self.rows if r["study_block"] == block),
                       key=lambda r: int(r["study_order"]))
 
+    def launcher_environment(self, root, dirty=False, kubectl_script=None):
+        root = Path(root)
+        bin_dir = root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        git_stub = bin_dir / "git"
+        dirty_output = 'echo " M pipeline/utils.py"' if dirty else ":"
+        git_stub.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            f"  *\"status --porcelain\"*) {dirty_output} ;;\n"
+            "  *\"rev-parse --short HEAD\"*) echo aaaaaaa ;;\n"
+            "  *\"rev-parse HEAD\"*) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;\n"
+            "  *\"ls-remote\"*) printf 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\\trefs/heads/main\\n' ;;\n"
+            "  *) echo \"unexpected git call: $*\" >&2; exit 91 ;;\n"
+            "esac\n")
+        git_stub.chmod(0o755)
+        curl_stub = bin_dir / "curl"
+        curl_stub.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' "
+            "'{\"digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\"}'\n")
+        curl_stub.chmod(0o755)
+        if kubectl_script is not None:
+            kubectl_stub = bin_dir / "kubectl"
+            kubectl_stub.write_text(kubectl_script)
+            kubectl_stub.chmod(0o755)
+            sleep_stub = bin_dir / "sleep"
+            sleep_stub.write_text("#!/bin/sh\nexit 0\n")
+            sleep_stub.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+        env["STUDY_STATE_DIR"] = str(root / "state")
+        env["TMPDIR"] = str(root)
+        env["TMUX"] = "test"
+        return env
+
+    def run_study_launcher(self, root, *args, dirty=False, kubectl_script=None):
+        return subprocess.run(
+            [str(STUDY_LAUNCHER), *args], cwd=str(REPO),
+            env=self.launcher_environment(
+                root, dirty=dirty, kubectl_script=kubectl_script),
+            text=True, capture_output=True)
+
+    @staticmethod
+    def run_guard(*args):
+        return subprocess.run(
+            [sys.executable, str(STUDY_GUARD), *map(str, args)],
+            text=True, capture_output=True)
+
+    @staticmethod
+    def write_complete_study_manifest(state, block):
+        state = Path(state)
+        receipts = state / "receipts"
+        receipts.mkdir(parents=True, exist_ok=True)
+        submitted_yamls = state / "submitted-yamls"
+        submitted_yamls.mkdir(parents=True, exist_ok=True)
+        with open(EXPERIMENTS / "replication-study-eidf.csv", newline="") as handle:
+            coordinates = {
+                int(row["study_order"]): row for row in csv.DictReader(handle)
+                if row["study_block"] == block
+            }
+        records = []
+        for order in range(1, 13):
+            coordinate = coordinates[order]
+            job = f"study-{block.lower()}-{order}"
+            job_uid = f"00000000-0000-4000-8000-{order:012d}"
+            image_ref = "example.invalid/engine@sha256:" + "f" * 64
+            yaml_path = submitted_yamls / f"{job}.yaml"
+            yaml_path.write_text(yaml.safe_dump({
+                "apiVersion": "batch/v1", "kind": "Job",
+                "metadata": {"name": job},
+                "spec": {"template": {"spec": {"containers": [
+                    {"name": "server", "image": image_ref}]}}},
+            }, sort_keys=False))
+            yaml_hash = hashlib.sha256(yaml_path.read_bytes()).hexdigest()
+            publish_path = f"moe/eidf/study-{block.lower()}/run-{order}"
+            output_path = f"/mnt/develop/archive/{publish_path}"
+            artifact_keys = [
+                "metadata", "metrics", "launch_yaml", "detailed_results",
+                "output_data", "timings", "pip_freeze"]
+            if coordinate["inference_engine"] == "sglang":
+                artifact_keys.append("expert_distribution_bundle")
+            hashes = {key: str(order % 10) * 64 for key in artifact_keys}
+            hashes["launch_yaml"] = yaml_hash
+            receipt = {
+                "receipt_version": 1, "status": "validated",
+                "study_id": "controlled-variation-2026-x2",
+                "block": block.lower(), "planned_order": order,
+                "job": job, "job_uid": job_uid,
+                "node": "gpu-a", "output_path": output_path,
+                "publish_path": publish_path, "publication": "development",
+                "inference_engine": coordinate["inference_engine"],
+                "engine_version": coordinate["engine_version"],
+                "dataset": coordinate["dataset"],
+                "teasbench_commit": "a" * 7, "moe_cap_commit": "e" * 7,
+                "image_ref": image_ref,
+                "metadata_sha256": hashes["metadata"],
+                "metrics_sha256": hashes["metrics"],
+                "job_yaml_sha256": hashes["launch_yaml"],
+                "artifact_sha256": hashes,
+                "quality": {"total": 256, "attempted": 256,
+                            "served": 256, "completed": 256},
+            }
+            receipt_path = receipts / f"{job}.json"
+            receipt_path.write_text(json.dumps(receipt))
+            records.append({
+                "study_id": "controlled-variation-2026-x2", "block": block,
+                "planned_order": order, "outcome": "complete", "node": "gpu-a",
+                "image_id": "docker-pullable://example.invalid/engine@sha256:" + "f" * 64,
+                "job": job, "job_uid": receipt["job_uid"],
+                "yaml": yaml_path.name, "yaml_path": str(yaml_path),
+                "yaml_sha256": yaml_hash,
+                "teasbench_commit": "a" * 40, "moe_cap_ref": "e" * 40,
+                "output_path": output_path, "receipt_path": str(receipt_path),
+                "receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+            })
+        (state / f"manifest-{block}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records))
+
     def test_matrix_is_the_frozen_72_leaves(self):
-        """6 blocks x 4 arms x 3 datasets, all gpt-oss-120b / H100x1 / bdef."""
+        """6 blocks x 4 arms x 3 datasets, split 3/3 across A100x2/H100x2."""
         self.assertEqual(len(self.rows), 72)
         arms = {("vllm", "0.16.0"), ("vllm", "0.21.0"),
                 ("sglang", "0.5.9"), ("sglang", "0.5.12.post1")}
@@ -454,11 +581,52 @@ class ReplicationStudyTests(unittest.TestCase):
             combos = {(r["inference_engine"], r["engine_version"], r["dataset"])
                       for r in leaves}
             self.assertEqual(combos, {(e, v, d) for (e, v) in arms for d in datasets})
+            expected_gpu = "A100" if block in ("E1", "E2", "E3") else "H100"
             for r in leaves:
                 self.assertEqual(
                     (r["family"], r["model"], r["num_samples"], r["gpu"],
                      r["num_gpu"], r["batch_size"]),
-                    ("moe", "gpt-oss-120b", "256", "H100", "1", "default"))
+                    ("moe", "gpt-oss-120b", "256", expected_gpu, "2", "default"))
+
+    def test_study_publish_does_not_push_or_succeed_after_commit_failure(self):
+        document = yaml.safe_load(self.generated_by_block["E1"][0].read_text())
+        script = document["spec"]["template"]["spec"]["containers"][0]["args"][0]
+        start = script.index('if git -C "$CLONE" diff --cached --quiet; then')
+        end = script.index('rm -rf "$CLONE"', start)
+        publish_block = script[start:end]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            trace = root / "git-trace"
+            publish_state = root / "publish-state"
+            git_stub = bin_dir / "git"
+            git_stub.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *\" diff --cached --quiet\"*) exit 1 ;;\n"
+                f"  *\" commit \"*) echo commit >> '{trace}'; exit 42 ;;\n"
+                f"  *\" push \"*) echo push >> '{trace}'; exit 0 ;;\n"
+                "  *) exit 0 ;;\n"
+                "esac\n")
+            git_stub.chmod(0o755)
+            harness = (
+                "STUDY_PUBLISH_OK=0\n"
+                f"CLONE='{root / 'clone'}'\n"
+                "PUBLISH_SUBDIR='moe/eidf/study-e1/run'\n"
+                f"PVC_RUN_OUTPUT_DIR='{root / 'pvc-run'}'\n"
+                + publish_block
+                + f"\nprintf '%s' \"$STUDY_PUBLISH_OK\" > '{publish_state}'\n")
+            env = os.environ.copy()
+            env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+            proc = subprocess.run(
+                ["bash"], input=harness, env=env, text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(trace.read_text().splitlines(), ["commit"])
+            self.assertEqual(publish_state.read_text(), "0")
+            self.assertIn("git commit failed", proc.stdout)
+            self.assertNotIn("RESULTS PUBLISHED", proc.stdout)
 
     def test_order_balance_and_pair_adjacency(self):
         """Control/alternate legs of the same engine x dataset run
@@ -480,46 +648,674 @@ class ReplicationStudyTests(unittest.TestCase):
         self.assertEqual(sorted(first_engines), ["sglang"] * 3 + ["vllm"] * 3)
         self.assertEqual(sorted(first_endpoints), ["alternate"] * 3 + ["control"] * 3)
 
-    def test_generated_yaml_pins_build_marker_and_producer(self):
+    def test_generated_yaml_pins_build_hardware_marker_and_producer(self):
         """Each generated leaf carries its row's exact image tag, the
-        study-e1 path level, the MoE-CAP checkout pin, and the study identity
-        jq -- and its job name stays under the k8s label limit."""
-        self.assertEqual(len(self.generated), 12)
-        by_name = {p.name: p.read_text() for p in self.generated}
-        for row in self.leaves("E1"):
-            stem = None
-            for name, text in by_name.items():
-                if (f'engine_version: "{row["engine_version"]}"' in text
-                        and f'--datasets {row["dataset"]}' in text
-                        and f'planned_order: {row["study_order"]},' in text):
-                    stem, yaml_text = name, text
-                    break
-            self.assertIsNotNone(stem, f"no YAML for row {row}")
-            base = {"vllm": "vllm/vllm-openai", "sglang": "lmsysorg/sglang"}
-            self.assertIn(f'image: {base[row["inference_engine"]]}:'
-                          f'v{row["engine_version"]}', yaml_text)
-            self.assertIn("/batch-size-default/study-e1/$timestamp", yaml_text)
-            # Pin must fail the run if the checkout fails, not fall back to main.
-            self.assertIn("git checkout --quiet --detach abc1234 || ", yaml_text)
-            self.assertIn('block_id: "e1"', yaml_text)
-            self.assertIn("pip freeze > $PVC_RUN_OUTPUT_DIR/pip_freeze.txt", yaml_text)
-            self.assertIn("arena_baseline_sha256", yaml_text)
-            generate_name = re.search(r"generateName: (\S+)", yaml_text).group(1)
-            self.assertLessEqual(len(generate_name) + 5, 63, generate_name)
+        study path, TP2 command and allocation, MoE-CAP checkout pin, and the
+        fresh x2 study identity -- and its job name stays under the k8s label
+        limit. E1 and E4 exercise both hardware strata."""
+        base = {"vllm": "vllm/vllm-openai", "sglang": "lmsysorg/sglang"}
+        products = {"A100": "NVIDIA-A100-SXM4-80GB",
+                    "H100": "NVIDIA-H100-80GB-HBM3"}
+        tp_flags = {"vllm": "--tensor-parallel-size 2", "sglang": "--tp-size 2"}
+        for block in ("E1", "E4"):
+            generated = self.generated_by_block[block]
+            self.assertEqual(len(generated), 12)
+            by_name = {p.name: p.read_text() for p in generated}
+            for row in self.leaves(block):
+                stem = None
+                for name, text in by_name.items():
+                    if (f'engine_version: "{row["engine_version"]}"' in text
+                            and f'--datasets {row["dataset"]}' in text
+                            and f'planned_order: {row["study_order"]},' in text):
+                        stem, yaml_text = name, text
+                        break
+                self.assertIsNotNone(stem, f"no YAML for row {row}")
+                self.assertIn(f'image: {base[row["inference_engine"]]}:'
+                              f'v{row["engine_version"]}', yaml_text)
+                self.assertNotIn(f'v{row["engine_version"]}-cu130', yaml_text)
+                self.assertIn(tp_flags[row["inference_engine"]], yaml_text)
+                self.assertIn(f'nvidia.com/gpu.product: {products[row["gpu"]]}',
+                              yaml_text)
+                self.assertEqual(yaml_text.count("nvidia.com/gpu: 2"), 1)
+                self.assertIn(f"/batch-size-default/study-{block.lower()}/$timestamp",
+                              yaml_text)
+                # Pin must fail the run if the checkout fails, not fall back to main.
+                self.assertIn("git checkout --quiet --detach abc1234 || ", yaml_text)
+                self.assertIn('study_id: "controlled-variation-2026-x2"', yaml_text)
+                self.assertIn(f'block_id: "{block.lower()}"', yaml_text)
+                self.assertIn("pip freeze > $PVC_RUN_OUTPUT_DIR/pip_freeze.txt", yaml_text)
+                self.assertIn("arena_baseline_sha256", yaml_text)
+                parsed_job = load_yaml_no_duplicates(yaml_text)
+                env_entries = parsed_job["spec"]["template"]["spec"][
+                    "containers"][0]["env"]
+                self.assertEqual(
+                    [entry["name"] for entry in env_entries].count("k8s_job_uid"), 1)
+                generate_name = re.search(r"generateName: (\S+)", yaml_text).group(1)
+                self.assertLessEqual(len(generate_name) + 5, 63, generate_name)
+
+    def test_launcher_dry_run_executes_successfully_with_diagnostic_options(self):
+        """Exercise the launcher through its /bin/bash shebang. In particular,
+        this proves YAML collection does not depend on Bash-4 mapfile."""
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self.run_study_launcher(
+                tmp, "E1", "--dry-run", "--no-pin",
+                "--results-repo", "Scratch_Results")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("Planned order for E1:", proc.stdout)
+            self.assertIn("Dry run: nothing submitted", proc.stdout)
+            self.assertEqual(proc.stdout.count(".yaml"), 12)
+
+    def test_launcher_rejects_unsafe_actual_launch_options(self):
+        cases = (
+            (("E1", "--no-pin"), "--no-pin is allowed only with --dry-run"),
+            (("E1", "--skip-image-check"),
+             "--skip-image-check is allowed only with --dry-run"),
+            (("E1", "--results-repo", "TEAS_Results_Private"),
+             "study runs must write to TEAS_Development_Results_Private"),
+        )
+        for index, (arguments, message) in enumerate(cases):
+            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as tmp:
+                proc = self.run_study_launcher(tmp, *arguments)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(message, proc.stderr)
+
+    def test_launcher_reconcile_rejects_leaf_without_ambiguous_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_resume_state(tmp)
+            kubectl_marker = Path(tmp) / "unexpected-kubectl"
+            kubectl_script = f'''#!/bin/sh
+touch '{kubectl_marker}'
+exit 0
+'''
+            proc = self.run_study_launcher(
+                tmp, "E4", "--only", "2", "--reconcile-identity",
+                kubectl_script=kubectl_script)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("has no ambiguous identity to reconcile", proc.stderr)
+            self.assertFalse(kubectl_marker.exists())
+
+            submitted = self.run_study_launcher(
+                tmp, "E4", "--only", "1", "--reconcile-identity",
+                kubectl_script=kubectl_script)
+            self.assertNotEqual(submitted.returncode, 0)
+            self.assertIn(
+                "has no ambiguous identity to reconcile", submitted.stderr)
+            self.assertFalse(kubectl_marker.exists())
+
+    def test_launcher_rejects_dirty_actual_launch_but_not_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self.run_study_launcher(tmp, "E1", dirty=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("working tree is dirty", proc.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self.run_study_launcher(
+                tmp, "E1", "--dry-run", "--skip-image-check", dirty=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("dry-run output is verification-only", proc.stdout)
+
+    def test_launcher_enforces_every_first_launch_predecessor(self):
+        schedule = ("E1", "E4", "E2", "E5", "E3", "E6")
+        for index, block in enumerate(schedule[1:], 1):
+            predecessor = schedule[index - 1]
+            with self.subTest(block=block), tempfile.TemporaryDirectory() as tmp:
+                state = Path(tmp) / "state"
+                state.mkdir()
+                for earlier in schedule[:index - 1]:
+                    self.write_complete_study_manifest(state, earlier)
+                proc = self.run_study_launcher(tmp, block)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(
+                    f"{block} is blocked until {predecessor} has 12 successful leaves",
+                    proc.stderr)
+
+    def test_launcher_rejects_out_of_order_later_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            state.mkdir()
+            self.write_complete_study_manifest(state, "E4")
+            proc = self.run_study_launcher(tmp, "E1")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn(
+                "state is out of order: E4 has records before first launch of E1",
+                proc.stderr)
+
+    def test_launcher_preserves_state_on_commit_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            state.mkdir()
+            (state / "teasbench_commit").write_text("old1234\n")
+            (state / "moe_cap_ref").write_text("e" * 40 + "\n")
+            proc = self.run_study_launcher(tmp, "E1")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("Preserve", proc.stderr)
+            self.assertIn("move the state directory aside", proc.stderr)
+            self.assertNotIn("delete", proc.stderr.lower())
+            self.assertTrue((state / "teasbench_commit").exists())
+
+    def test_launcher_rejects_ambiguous_repeat_nodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            state.mkdir()
+            records = [
+                {"study_id": "controlled-variation-2026-x2", "block": "E1",
+                 "planned_order": 1, "outcome": "failed", "node": "gpu-a"},
+                {"study_id": "controlled-variation-2026-x2", "block": "E1",
+                 "planned_order": 1, "outcome": "complete", "node": "gpu-b"},
+            ]
+            (state / "manifest-E1.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in records))
+            proc = self.run_study_launcher(tmp, "E1", "--only", "1")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("records multiple nodes", proc.stderr)
+            self.assertIn("cannot recover a unique node", proc.stderr)
+
+    def test_launcher_freezes_digests_then_blocks_e1_without_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self.run_study_launcher(tmp, "E1")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("compatibility-preflight evidence is incomplete", proc.stderr)
+            state = Path(tmp) / "state"
+            pins = (state / "image-digests.tsv").read_text().splitlines()
+            self.assertEqual(len(pins), 4)
+            self.assertTrue(all("\tsha256:" in line for line in pins))
+            self.assertFalse(
+                (state / "a100x2-compatibility-preflight.validated.json").exists())
+
+    def test_launcher_validates_timeout_before_creating_state(self):
+        invalid_values = ("0", "169", "999", "+1", "1h", "1+2",
+                          "1;touch-should-never-run")
+        for value in invalid_values:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                proc = self.run_study_launcher(
+                    tmp, "E1", "--dry-run", "--leaf-timeout-hours", value)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("decimal integer from 1 to 168", proc.stderr)
+                self.assertFalse((Path(tmp) / "state").exists())
+
+    def test_launcher_exclusive_lock_rejects_a_second_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "state" / ".launcher.lock"
+            lock.mkdir(parents=True)
+            (lock / "owner").write_text("pid=123\n")
+            proc = self.run_study_launcher(
+                tmp, "E1", "--dry-run", "--skip-image-check")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("launcher lock is held", proc.stderr)
+            self.assertTrue(lock.is_dir())
+
+    def make_resume_state(self, root, *, served=256):
+        root = Path(root)
+        state = root / "state"
+        state.mkdir()
+        (state / "teasbench_commit").write_text("a" * 40 + "\n")
+        (state / "moe_cap_ref").write_text("e" * 40 + "\n")
+        digest = "sha256:" + "1" * 64
+        (state / "image-digests.tsv").write_text(
+            "".join(f"{tag}\t{digest}\n" for tag in (
+                "lmsysorg/sglang:v0.5.12.post1", "lmsysorg/sglang:v0.5.9",
+                "vllm/vllm-openai:v0.16.0", "vllm/vllm-openai:v0.21.0")))
+        job = "study-e4-job"
+        uid = "11111111-1111-4111-8111-111111111111"
+        yaml_name = "study-e4-sglang-059-gptoss120b-gsm8k-h100x2.yaml"
+        submitted_dir = state / "submitted-yamls"
+        submitted_dir.mkdir()
+        submitted_yaml = submitted_dir / f"{job}.yaml"
+        submitted_yaml.write_text(yaml.safe_dump({
+            "apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": job},
+            "spec": {"template": {"spec": {"containers": [{
+                "name": "server", "image": "lmsysorg/sglang@" + digest}]}}},
+        }, sort_keys=False))
+        submitted_yaml_hash = hashlib.sha256(submitted_yaml.read_bytes()).hexdigest()
+        submitted = {
+            "study_id": "controlled-variation-2026-x2", "block": "E4",
+            "planned_order": 1, "job": job, "job_uid": uid,
+            "yaml": yaml_name, "yaml_path": str(submitted_yaml),
+            "yaml_sha256": submitted_yaml_hash,
+            "node": "gpu-h", "image_id": "",
+            "moe_cap_ref": "e" * 40, "teasbench_commit": "a" * 40,
+            "submitted_at": "2026-08-17T10:00:00Z", "finished_at": "",
+            "outcome": "submitted", "receipt_path": "",
+            "receipt_sha256": "", "output_path": "",
+        }
+        (state / "manifest-E4.jsonl").write_text(json.dumps(submitted) + "\n")
+        publish_path = "moe/eidf/sglang/gpt-oss-120b/gsm8k_256samples/" \
+                       "h100x2/batch-size-default/study-e4/run"
+        hashes = {key: "2" * 64 for key in (
+            "metadata", "metrics", "launch_yaml", "detailed_results",
+            "output_data", "timings", "pip_freeze",
+            "expert_distribution_bundle")}
+        hashes["launch_yaml"] = submitted_yaml_hash
+        receipt = {
+            "receipt_version": 1, "status": "validated",
+            "study_id": "controlled-variation-2026-x2", "block": "e4",
+            "planned_order": 1, "job": job, "job_uid": uid, "node": "gpu-h",
+            "output_path": "/mnt/develop/archive/" + publish_path,
+            "publish_path": publish_path, "publication": "development",
+            "inference_engine": "sglang", "engine_version": "0.5.9",
+            "dataset": "gsm8k",
+            "teasbench_commit": "a" * 7, "moe_cap_commit": "e" * 7,
+            "image_ref": "lmsysorg/sglang@" + digest,
+            "metadata_sha256": hashes["metadata"],
+            "metrics_sha256": hashes["metrics"],
+            "job_yaml_sha256": hashes["launch_yaml"],
+            "artifact_sha256": hashes,
+            "quality": {"total": 256, "attempted": 256,
+                        "served": served, "completed": 256},
+        }
+        receipt_source = root / "mock-receipt.json"
+        receipt_source.write_text(json.dumps(receipt))
+        return state, receipt_source
+
+    def make_ambiguous_resume_state(self, root):
+        state, receipt = self.make_resume_state(root)
+        manifest = state / "manifest-E4.jsonl"
+        record = json.loads(manifest.read_text())
+        record["job_uid"] = ""
+        record["outcome"] = "identity-unknown"
+        manifest.write_text(json.dumps(record) + "\n")
+        return state, receipt, record
+
+    @staticmethod
+    def polling_kubectl(root, receipt_source=None, failed=False):
+        root = Path(root)
+        deleted = root / "mock-job-deleted"
+        message_case = ":"
+        if receipt_source is not None:
+            generated_root = Path(receipt_source).parent
+            message_case = (
+                f"yaml_path=$(find '{generated_root}' -type f "
+                "-name 'study-e4-job.yaml' "
+                "| head -1); "
+                "yaml_sha=$(sha256sum \"$yaml_path\" | cut -d' ' -f1); "
+                f"jq --arg sha \"$yaml_sha\" '.job_yaml_sha256=$sha | "
+                f".artifact_sha256.launch_yaml=$sha' '{receipt_source}'")
+        complete = "" if failed else "True"
+        failed_value = "True" if failed else ""
+        return (
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            f"  *\" delete job \"*) touch '{deleted}'; exit 0 ;;\n"
+            f"  *\"ownerReferences\"*) [ -f '{deleted}' ] || "
+            "printf 'mock-pod\\t11111111-1111-4111-8111-111111111111\\n' ;;\n"
+            f"  *\"{{.metadata.uid}}\"*) [ -f '{deleted}' ] || "
+            "echo 11111111-1111-4111-8111-111111111111 ;;\n"
+            "  *\"status.phase\"*) echo Succeeded ;;\n"
+            "  *\"spec.nodeName\"*) echo gpu-h ;;\n"
+            "  *\"imageID\"*) echo 'docker-pullable://engine@sha256:" + "1" * 64 + "' ;;\n"
+            f"  *\"Complete\"*) echo '{complete}' ;;\n"
+            f"  *\"Failed\"*) echo '{failed_value}' ;;\n"
+            f"  *\"terminated.message\"*) {message_case} ;;\n"
+            "  *) : ;;\n"
+            "esac\n")
+
+    def recovering_kubectl(self, root, receipt_source, *, already_terminal=False):
+        script = self.polling_kubectl(root, receipt_source)
+        if already_terminal:
+            return script
+        complete_counter = Path(root) / "complete-polls"
+        return script.replace(
+            '  *"Complete"*) echo \'True\' ;;',
+            f'''  *"Complete"*)
+    n=$(cat '{complete_counter}' 2>/dev/null || echo 0)
+    n=$((n + 1)); echo "$n" > '{complete_counter}'
+    [ "$n" -gt 1 ] && echo True ;;
+'''.rstrip())
+
+    def test_launcher_reconciliation_restores_frozen_config_before_monitoring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state, receipt, record = self.make_ambiguous_resume_state(tmp)
+            shared = Path(tmp) / "job-configs"
+            shared.mkdir()
+            env = self.launcher_environment(
+                tmp, kubectl_script=self.recovering_kubectl(tmp, receipt))
+            env["STUDY_JOB_CONFIGS_DIR"] = str(shared)
+            proc = subprocess.run(
+                [str(STUDY_LAUNCHER), "E4", "--only", "1",
+                 "--reconcile-identity"],
+                cwd=str(REPO), env=env, text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            restored = shared / f'{record["job"]}.yaml'
+            frozen = Path(record["yaml_path"])
+            self.assertEqual(restored.read_bytes(), frozen.read_bytes())
+            self.assertEqual(
+                hashlib.sha256(restored.read_bytes()).hexdigest(),
+                record["yaml_sha256"])
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual([r["outcome"] for r in records[-2:]],
+                             ["submitted", "complete"])
+
+    def test_launcher_reconciliation_rejects_unrestorable_or_wrong_config(self):
+        for case in ("copy-failed", "hash-mismatch"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                state, receipt, record = self.make_ambiguous_resume_state(tmp)
+                shared = Path(tmp) / "job-configs"
+                if case == "hash-mismatch":
+                    shared.mkdir()
+                env = self.launcher_environment(
+                    tmp, kubectl_script=self.recovering_kubectl(tmp, receipt))
+                env["STUDY_JOB_CONFIGS_DIR"] = str(shared)
+                if case == "hash-mismatch":
+                    cp_stub = Path(tmp) / "bin" / "cp"
+                    cp_stub.write_text(
+                        "#!/bin/sh\nprintf 'wrong config\\n' > \"$2\"\n")
+                    cp_stub.chmod(0o755)
+                proc = subprocess.run(
+                    [str(STUDY_LAUNCHER), "E4", "--only", "1",
+                     "--reconcile-identity"],
+                    cwd=str(REPO), env=env, text=True, capture_output=True)
+                self.assertNotEqual(proc.returncode, 0)
+                expected = ("could not restore frozen shared config" if
+                            case == "copy-failed" else
+                            "restored shared config hash mismatch")
+                self.assertIn(expected, proc.stderr)
+                self.assertFalse((shared / f'{record["job"]}.yaml').exists())
+                records = [json.loads(line) for line in
+                           (state / "manifest-E4.jsonl").read_text().splitlines()]
+                self.assertEqual(records[-1]["outcome"], "identity-unknown")
+
+    def test_launcher_reconciliation_does_not_leave_terminal_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state, receipt, record = self.make_ambiguous_resume_state(tmp)
+            shared = Path(tmp) / "job-configs"
+            shared.mkdir()
+            destination = shared / f'{record["job"]}.yaml'
+            destination.write_text("stale config\n")
+            env = self.launcher_environment(
+                tmp, kubectl_script=self.recovering_kubectl(
+                    tmp, receipt, already_terminal=True))
+            env["STUDY_JOB_CONFIGS_DIR"] = str(shared)
+            proc = subprocess.run(
+                [str(STUDY_LAUNCHER), "E4", "--only", "1",
+                 "--reconcile-identity"],
+                cwd=str(REPO), env=env, text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("already terminal; no shared config restored", proc.stdout)
+            self.assertFalse(destination.exists())
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-1]["outcome"], "complete")
+
+    def test_launcher_resume_requires_a_valid_terminal_receipt(self):
+        cases = (("success", 256, True, False),
+                 ("quality-254", 254, False, False),
+                 ("missing-receipt", 256, False, False),
+                 ("publish-failed-job", 256, False, True))
+        for label, served, expected_success, job_failed in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                state, receipt = self.make_resume_state(tmp, served=served)
+                receipt_for_stub = None if label == "missing-receipt" else receipt
+                proc = self.run_study_launcher(
+                    tmp, "E4", "--only", "1",
+                    kubectl_script=self.polling_kubectl(
+                        tmp, receipt_for_stub, failed=job_failed))
+                self.assertEqual(proc.returncode == 0, expected_success,
+                                 proc.stdout + proc.stderr)
+                records = [json.loads(line) for line in
+                           (state / "manifest-E4.jsonl").read_text().splitlines()]
+                expected_outcome = (
+                    "complete" if expected_success else
+                    "cleanup-confirmed" if job_failed else "validation-failed")
+                self.assertEqual(records[-1]["outcome"], expected_outcome)
+                if job_failed:
+                    self.assertEqual(records[-2]["outcome"], "failed")
+                if expected_success:
+                    self.assertTrue(Path(records[-1]["receipt_path"]).is_file())
+                    self.assertEqual(records[-1]["output_path"],
+                                     json.loads(receipt.read_text())["output_path"])
+
+    def test_launcher_cleanup_is_uid_bound_and_waits_for_job_and_pods(self):
+        uid = "11111111-1111-4111-8111-111111111111"
+        replacement_uid = "99999999-9999-4999-8999-999999999999"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state, _ = self.make_resume_state(tmp)
+            script = self.polling_kubectl(tmp, failed=True).replace(
+                f"touch '{Path(tmp) / 'mock-job-deleted'}'; exit 0",
+                "exit 17")
+            proc = self.run_study_launcher(
+                tmp, "E4", "--only", "1", kubectl_script=script)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("deletion request failed for exact job", proc.stderr)
+            self.assertNotIn("cleanup confirmed", proc.stdout)
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-1]["outcome"], "failed")
+
+            create_marker = Path(tmp) / "unsafe-retry-create"
+            retry_script = f'''#!/bin/sh
+case "$*" in
+  *" create "*) touch '{create_marker}'; exit 0 ;;
+  *) : ;;
+esac
+'''
+            retry = self.run_study_launcher(
+                tmp, "E4", "--only", "1", kubectl_script=retry_script)
+            self.assertNotEqual(retry.returncode, 0)
+            self.assertIn("automatic resubmission is prohibited", retry.stderr)
+            self.assertFalse(create_marker.exists())
+
+            orphan_create = Path(tmp) / "orphan-replacement-create"
+            orphan_script = f'''#!/bin/sh
+case "$*" in
+  *" create "*) touch '{orphan_create}'; exit 0 ;;
+  *"ownerReferences"*)
+    printf 'orphan-pod\t{uid}\n' ;;
+  *"{{.metadata.uid}}"*) exit 0 ;;
+  *) : ;;
+esac
+'''
+            orphan_retry = self.run_study_launcher(
+                tmp, "E4", "--only", "1", "--reconcile-identity",
+                kubectl_script=orphan_script)
+            self.assertNotEqual(orphan_retry.returncode, 0)
+            self.assertIn("orphan-pod", orphan_retry.stderr)
+            self.assertIn("still exists", orphan_retry.stderr)
+            self.assertFalse(orphan_create.exists())
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-1]["outcome"], "failed")
+
+            safe_create = Path(tmp) / "safe-replacement-create"
+            safe_script = f'''#!/bin/sh
+case "$*" in
+  *" create "*) touch '{safe_create}'; exit 9 ;;
+  *"ownerReferences"*) exit 0 ;;
+  *"{{.metadata.uid}}"*) exit 0 ;;
+  *) : ;;
+esac
+'''
+            safe_retry = self.run_study_launcher(
+                tmp, "E4", "--only", "1", "--reconcile-identity",
+                kubectl_script=safe_script)
+            self.assertNotEqual(safe_retry.returncode, 0)
+            self.assertTrue(safe_create.exists())
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-2]["outcome"], "cleanup-confirmed")
+            self.assertEqual(records[-2]["job_uid"], uid)
+            self.assertEqual(records[-1]["outcome"], "create-failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state, _ = self.make_resume_state(tmp)
+            root = Path(tmp)
+            requested = root / "delete-requested"
+            job_count = root / "job-polls"
+            pod_count = root / "pod-polls"
+            script = f'''#!/bin/sh
+case "$*" in
+  *" delete job "*) touch '{requested}'; exit 0 ;;
+  *"ownerReferences"*)
+    n=$(cat '{pod_count}' 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > '{pod_count}'
+    [ "$n" -gt 3 ] || printf 'mock-pod\t{uid}\n' ;;
+  *"{{.metadata.uid}}"*)
+    if [ ! -f '{requested}' ]; then echo {uid}; exit 0; fi
+    n=$(cat '{job_count}' 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > '{job_count}'
+    [ "$n" -gt 2 ] || echo {uid} ;;
+  *"status.phase"*) echo Failed ;;
+  *"spec.nodeName"*) echo gpu-h ;;
+  *"imageID"*) echo 'docker-pullable://engine@sha256:{'1' * 64}' ;;
+  *"Complete"*) : ;;
+  *"Failed"*) echo True ;;
+  *) : ;;
+esac
+'''
+            proc = self.run_study_launcher(
+                tmp, "E4", "--only", "1", kubectl_script=script)
+            self.assertNotEqual(proc.returncode, 0)  # scientific outcome remains failed
+            self.assertIn("cleanup confirmed", proc.stdout)
+            self.assertGreaterEqual(int(job_count.read_text()), 3)
+            self.assertGreaterEqual(int(pod_count.read_text()), 4)
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-2]["outcome"], "failed")
+            self.assertEqual(records[-1]["outcome"], "cleanup-confirmed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_resume_state(tmp)
+            root = Path(tmp)
+            uid_queries = root / "uid-queries"
+            delete_marker = root / "unsafe-delete"
+            script = f'''#!/bin/sh
+case "$*" in
+  *" delete job "*) touch '{delete_marker}'; exit 0 ;;
+  *"{{.metadata.uid}}"*)
+    n=$(cat '{uid_queries}' 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > '{uid_queries}'
+    if [ "$n" -eq 1 ]; then echo {uid}; else echo {replacement_uid}; fi ;;
+  *"status.phase"*) echo Failed ;;
+  *"spec.nodeName"*) echo gpu-h ;;
+  *"imageID"*) echo 'docker-pullable://engine@sha256:{'1' * 64}' ;;
+  *"Complete"*) : ;;
+  *"Failed"*) echo True ;;
+  *) : ;;
+esac
+'''
+            proc = self.run_study_launcher(
+                tmp, "E4", "--only", "1", kubectl_script=script)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("refusing to delete replacement job", proc.stderr)
+            self.assertFalse(delete_marker.exists())
+
+    def test_launcher_records_successful_create_with_unrecoverable_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state, _ = self.make_resume_state(tmp)
+            prior = json.loads((state / "manifest-E4.jsonl").read_text())
+            prior["outcome"] = "cleanup-confirmed"
+            (state / "manifest-E4.jsonl").write_text(json.dumps(prior) + "\n")
+            # create returns success with an empty jsonpath, but the named Job
+            # lookup recovers its UID. The local config copy then fails, which
+            # exercises exact synchronous cleanup of that recovered identity.
+            proc = self.run_study_launcher(
+                tmp, "E4", "--only", "1",
+                kubectl_script=self.polling_kubectl(tmp))
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("cleanup confirmed", proc.stdout)
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-3]["outcome"], "submitted")
+            self.assertEqual(records[-2]["outcome"], "config-copy-failed")
+            self.assertEqual(records[-1]["outcome"], "cleanup-confirmed")
+            self.assertEqual(records[-1]["job_uid"],
+                             "11111111-1111-4111-8111-111111111111")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state, _ = self.make_resume_state(tmp)
+            prior = json.loads((state / "manifest-E4.jsonl").read_text())
+            prior["outcome"] = "cleanup-confirmed"
+            (state / "manifest-E4.jsonl").write_text(json.dumps(prior) + "\n")
+            script = '''#!/bin/sh
+case "$*" in
+  *" create "*) exit 0 ;;
+  *"{.metadata.uid}"*) exit 0 ;;
+  *) : ;;
+esac
+'''
+            proc = self.run_study_launcher(
+                tmp, "E4", "--only", "1", kubectl_script=script)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("created named job", proc.stderr)
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-1]["outcome"], "identity-unknown")
+            self.assertTrue(records[-1]["job"])
+            self.assertTrue(Path(records[-1]["yaml_path"]).is_file())
+
+            blocked = self.run_guard(
+                "repeat-action", "--manifest", state / "manifest-E4.jsonl",
+                "--block", "E4", "--order", "1")
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("automatic resubmission is prohibited", blocked.stderr)
+            reconciliable = self.run_guard(
+                "repeat-action", "--manifest", state / "manifest-E4.jsonl",
+                "--block", "E4", "--order", "1", "--reconcile")
+            self.assertEqual(reconciliable.returncode, 0, reconciliable.stderr)
+            self.assertTrue(reconciliable.stdout.startswith("reconcile\t"))
+
+            create_marker = Path(tmp) / "retry-create"
+            retry_script = f'''#!/bin/sh
+case "$*" in
+  *" create "*) echo create >> '{create_marker}'; exit 9 ;;
+  *"{{.metadata.uid}}"*) exit 0 ;;
+  *) : ;;
+esac
+'''
+            retry = self.run_study_launcher(
+                tmp, "E4", "--only", "1", kubectl_script=retry_script)
+            self.assertNotEqual(retry.returncode, 0)
+            self.assertIn("automatic resubmission is prohibited", retry.stderr)
+            self.assertFalse(create_marker.exists())
+
+            reconciled_retry = self.run_study_launcher(
+                tmp, "E4", "--only", "1", "--reconcile-identity",
+                kubectl_script=retry_script)
+            self.assertNotEqual(reconciled_retry.returncode, 0)
+            self.assertEqual(create_marker.read_text().splitlines(), ["create"])
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-2]["outcome"], "cleanup-confirmed")
+            self.assertEqual(records[-1]["outcome"], "create-failed")
+
+            ambiguous_failed_create = self.run_guard(
+                "repeat-action", "--manifest", state / "manifest-E4.jsonl",
+                "--block", "E4", "--order", "1")
+            self.assertNotEqual(ambiguous_failed_create.returncode, 0)
+            self.assertIn(
+                "automatic resubmission is prohibited",
+                ambiguous_failed_create.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state, _ = self.make_resume_state(tmp)
+            prior = json.loads((state / "manifest-E4.jsonl").read_text())
+            prior["outcome"] = "cleanup-confirmed"
+            (state / "manifest-E4.jsonl").write_text(json.dumps(prior) + "\n")
+            script = '''#!/bin/sh
+case "$*" in
+  *" create "*) exit 9 ;;
+  *"{.metadata.uid}"*) exit 0 ;;
+  *) : ;;
+esac
+'''
+            proc = self.run_study_launcher(
+                tmp, "E4", "--only", "1", kubectl_script=script)
+            self.assertNotEqual(proc.returncode, 0)
+            records = [json.loads(line) for line in
+                       (state / "manifest-E4.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-1]["outcome"], "create-failed")
 
     def test_study_marker_level_round_trips_and_keeps_a_pure_timestamp(self):
         """parse_run_path keeps the standard 6-level prefix and reports
         'study-e1/<ts>' as the run id; the timestamp stays its own PURE
         component, which is what the dashboard assembler's run_date() needs."""
         params = {"family": "moe", "inference_engine": "vllm", "model": "gpt-oss-120b",
-                  "dataset": "gsm8k", "num_samples": 256, "gpu": "H100",
-                  "num_gpu": 1, "batch_size": "default",
+                  "dataset": "gsm8k", "num_samples": 256, "gpu": "A100",
+                  "num_gpu": 2, "batch_size": "default",
                   "input_length": None, "output_length": None,
-                  "study_block": "E1", "engine_version": "0.21.0"}
+                  "study_block": "E1", "study_order": 2,
+                  "engine_version": "0.21.0"}
         full_dir = self.utils.results_repo_dir(params)
         self.assertEqual(
             full_dir,
-            "moe/eidf/vllm/gpt-oss-120b/gsm8k_256samples/h100x1/"
+            "moe/eidf/vllm/gpt-oss-120b/gsm8k_256samples/a100x2/"
             "batch-size-default/study-e1")
         rel_parts = tuple(full_dir.split("/", 1)[1].split("/")) + ("20260901-1010", "metrics.json")
         parsed = parse_run_path(rel_parts)
@@ -540,6 +1336,33 @@ class ReplicationStudyTests(unittest.TestCase):
             self.utils.study_fields({"family": "agentic", "benchmark": "mcp-atlas",
                                      "study_block": "E1", "engine_version": "0.5.9"})
 
+    def test_direct_generation_rejects_every_mutated_study_coordinate_field(self):
+        valid = dict(self.leaves("E1")[0])
+        self.assertEqual(self.utils.study_fields(valid), ("e1", "0.16.0"))
+        mutations = {
+            "family": "agentic", "model": "another-model", "dataset": "gsm8k-extra",
+            "num_samples": "255", "gpu": "H100", "num_gpu": "1",
+            "batch_size": "8", "inference_engine": "sglang",
+            "engine_version": "9.9.9", "study_block": "E4", "study_order": "12",
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                row = {**valid, field: value}
+                with self.assertRaises(ValueError):
+                    self.utils.study_fields(row)
+        for field, value in (("family", " moe "), ("study_block", "e1"),
+                             ("study_order", "01"), ("num_samples", "0256"),
+                             ("num_gpu", "02")):
+            with self.subTest(field=field, noncanonical=value):
+                with self.assertRaises(ValueError):
+                    self.utils.study_fields({**valid, field: value})
+        with self.assertRaises(ValueError):
+            self.utils.study_fields({
+                "family": "moe", "model": "gpt-oss-120b", "dataset": "gsm8k",
+                "num_samples": "256", "gpu": "A100", "num_gpu": "2",
+                "batch_size": "default", "inference_engine": "vllm",
+                "engine_version": "0.16.0", "study_order": "1"})
+
     def test_non_study_rows_unaffected(self):
         """A row with no study_block keeps its historical name and path."""
         params = {"family": "moe", "inference_engine": "sglang", "model": "gpt-oss-120b",
@@ -551,6 +1374,476 @@ class ReplicationStudyTests(unittest.TestCase):
         self.assertEqual(
             self.utils.results_repo_dir(params),
             "moe/eidf/sglang/gpt-oss-120b/gsm8k_256samples/h100x1/batch-size-default")
+
+
+class StudyGuardTests(unittest.TestCase):
+    STUDY_ID = "controlled-variation-2026-x2"
+    MOE_CAP_REF = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    TEASBENCH_COMMIT = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    COMBINATIONS = (
+        ("vllm", "0.16.0", "1"),
+        ("vllm", "0.21.0", "2"),
+        ("sglang", "0.5.9", "3"),
+        ("sglang", "0.5.12.post1", "4"),
+    )
+
+    def run_guard(self, *args):
+        return subprocess.run(
+            [sys.executable, str(STUDY_GUARD), *map(str, args)],
+            text=True, capture_output=True)
+
+    @staticmethod
+    def file_sha256(path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    def make_preflight_evidence(self, root):
+        root = Path(root)
+        pins_path = root / "image-digests.tsv"
+        manifest_path = root / "a100x2-compatibility-preflight.jsonl"
+        bases = {"vllm": "vllm/vllm-openai", "sglang": "lmsysorg/sglang"}
+        pins = {}
+        records = []
+        for engine, version, digit in self.COMBINATIONS:
+            tag = f"{bases[engine]}:v{version}"
+            digest = "sha256:" + digit * 64
+            pins[tag] = digest
+            artifact_dir = (root / "compatibility-preflight" /
+                            f"{engine}-{version.replace('.', '-')}")
+            artifact_dir.mkdir(parents=True)
+            metadata = {
+                "system_environment": {
+                    "inference_engine": engine,
+                    "inference_engine_version": version,
+                    "teasbench_commit": self.TEASBENCH_COMMIT[:7],
+                    "moe_cap_commit": self.MOE_CAP_REF[:7],
+                },
+                "model_config": {"model_name": "unsloth/gpt-oss-120b"},
+                "hardware": {"num_gpus": 2,
+                             "gpu_type": "NVIDIA-A100-SXM4-80GB"},
+                "compatibility_preflight": {
+                    "dataset": "longbench_v1", "num_samples": 256,
+                    "batch_size": "default", "gpu": "A100", "num_gpu": 2,
+                    "gpu_uuids": [f"GPU-{digit}a", f"GPU-{digit}b"],
+                    "job_uid": f"job-{engine}-{version}",
+                    "job_name": f"preflight-{engine}-{digit}",
+                    "node": "gpu-node-a",
+                    "image_ref": f"{bases[engine]}@{digest}",
+                },
+            }
+            metrics = {
+                "quality": {"total": 256, "attempted": 256,
+                            "served": 256, "completed": 256},
+            }
+            metadata_path = artifact_dir / "metadata.json"
+            metrics_path = artifact_dir / "metrics.json"
+            job_yaml_path = artifact_dir / "preflight-job.yaml"
+            metadata_path.write_text(json.dumps(metadata))
+            metrics_path.write_text(json.dumps(metrics))
+            image_ref = f"{bases[engine]}@{digest}"
+            model_flag = "--model" if engine == "vllm" else "--model-path"
+            tp_flag = "--tensor-parallel-size" if engine == "vllm" else "--tp-size"
+            if engine == "vllm":
+                server_tail = (
+                    f"{model_flag} unsloth/gpt-oss-120b --port 30000 "
+                    f"--host 0.0.0.0 {tp_flag} 2 --reasoning-parser openai_gptoss")
+            else:
+                server_tail = (
+                    f"{model_flag} unsloth/gpt-oss-120b --port 30000 "
+                    "--expert-distribution-recorder-mode stat "
+                    f"{tp_flag} 2 --reasoning-parser gpt-oss")
+            job_script = (
+                f"git checkout --quiet --detach {self.MOE_CAP_REF}\n"
+                f"echo '{{\"teasbench_commit\": \"{self.TEASBENCH_COMMIT[:7]}\"}}'\n"
+                f"python3 -m moe_cap.systems.{engine} {server_tail} &> server.log &\n"
+                "python3 -m moe_cap.runner.openai_api_profile "
+                "--model_name unsloth/gpt-oss-120b --datasets longbench_v1 "
+                "--num-samples 256 --api-url http://localhost:30000/v1/completions "
+                "--output_dir /mnt/develop/batch-size-default/"
+                f"compatibility-preflight/run --backend {engine} "
+                "--use-chat-api &> client.log\n")
+            job_yaml_path.write_text(yaml.safe_dump({
+                "apiVersion": "batch/v1", "kind": "Job",
+                "metadata": {"name": f"preflight-{engine}-{digit}"},
+                "spec": {"template": {"spec": {
+                    "containers": [{"name": "server", "image": image_ref,
+                                    "resources": {"limits": {"nvidia.com/gpu": 2}},
+                                    "args": [job_script]}],
+                    "nodeSelector": {
+                        "nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"},
+                }}},
+            }, sort_keys=False))
+            records.append({
+                "study_id": self.STUDY_ID,
+                "kind": "excluded-compatibility-preflight",
+                "gpu": "A100",
+                "num_gpu": 2,
+                "dataset": "longbench_v1",
+                "num_samples": 256,
+                "batch_size": "default",
+                "outcome": "complete",
+                "teasbench_commit": self.TEASBENCH_COMMIT,
+                "moe_cap_ref": self.MOE_CAP_REF,
+                "inference_engine": engine,
+                "engine_version": version,
+                "image_tag": tag,
+                "image_ref": image_ref,
+                "job_uid": f"job-{engine}-{version}",
+                "job_name": f"preflight-{engine}-{digit}",
+                "node": "gpu-node-a",
+                "gpu_uuids": [f"GPU-{digit}a", f"GPU-{digit}b"],
+                "completed_at": "2020-08-17T12:00:00Z",
+                "artifact_dir": str(artifact_dir.resolve()),
+                "metadata_sha256": self.file_sha256(metadata_path),
+                "metrics_sha256": self.file_sha256(metrics_path),
+                "job_yaml_sha256": self.file_sha256(job_yaml_path),
+            })
+        pins_path.write_text(
+            "".join(f"{tag}\t{pins[tag]}\n" for tag in sorted(pins)))
+        manifest_path.write_text(
+            "".join(json.dumps(record) + "\n" for record in records))
+        return pins_path, manifest_path, records
+
+    def test_preflight_validator_hash_binds_complete_four_arm_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pins, manifest, records = self.make_preflight_evidence(tmp)
+            validation_record = Path(tmp) / "validated.json"
+            proc = self.run_guard(
+                "validate-preflight", "--manifest", manifest,
+                "--image-pins", pins,
+                "--teasbench-commit", self.TEASBENCH_COMMIT,
+                "--moe-cap-ref", self.MOE_CAP_REF,
+                "--record", validation_record)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            validation = json.loads(validation_record.read_text())
+            self.assertEqual(validation["kind"], "validated-compatibility-preflight")
+            self.assertEqual(len(validation["combinations"]), 4)
+            self.assertEqual(validation["manifest_sha256"], self.file_sha256(manifest))
+
+            # A hash-consistent artifact with incomplete LongBench service is
+            # still invalid; the gate derives completion from metrics.json.
+            artifact_dir = Path(records[0]["artifact_dir"])
+            metrics_path = artifact_dir / "metrics.json"
+            metrics = json.loads(metrics_path.read_text())
+            metrics["quality"]["served"] = 255
+            metrics_path.write_text(json.dumps(metrics))
+            records[0]["metrics_sha256"] = self.file_sha256(metrics_path)
+            manifest.write_text(
+                "".join(json.dumps(record) + "\n" for record in records))
+            proc = self.run_guard(
+                "validate-preflight", "--manifest", manifest,
+                "--image-pins", pins,
+                "--teasbench-commit", self.TEASBENCH_COMMIT,
+                "--moe-cap-ref", self.MOE_CAP_REF)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("served must be 256", proc.stderr)
+
+    def test_preflight_rejects_short_commits_future_duplicate_uid_and_alias_escape(self):
+        # Commit pins used by the gate must be full immutable object IDs.
+        with tempfile.TemporaryDirectory() as tmp:
+            pins, manifest, _ = self.make_preflight_evidence(tmp)
+            proc = self.run_guard(
+                "validate-preflight", "--manifest", manifest,
+                "--image-pins", pins, "--teasbench-commit", "a",
+                "--moe-cap-ref", self.MOE_CAP_REF)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("40 lowercase hex digits", proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pins, manifest, records = self.make_preflight_evidence(tmp)
+            records[0]["completed_at"] = "2999-01-01T00:00:00Z"
+            manifest.write_text("".join(json.dumps(r) + "\n" for r in records))
+            proc = self.run_guard(
+                "validate-preflight", "--manifest", manifest,
+                "--image-pins", pins, "--teasbench-commit", self.TEASBENCH_COMMIT,
+                "--moe-cap-ref", self.MOE_CAP_REF)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("in the future", proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pins, manifest, records = self.make_preflight_evidence(tmp)
+            records[1]["job_uid"] = records[0]["job_uid"]
+            manifest.write_text("".join(json.dumps(r) + "\n" for r in records))
+            proc = self.run_guard(
+                "validate-preflight", "--manifest", manifest,
+                "--image-pins", pins, "--teasbench-commit", self.TEASBENCH_COMMIT,
+                "--moe-cap-ref", self.MOE_CAP_REF)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("duplicate job_uid", proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pins, manifest, records = self.make_preflight_evidence(tmp)
+            original = Path(records[0]["artifact_dir"])
+            escaped = Path(tmp) / "study-e1" / "aliased-run"
+            escaped.parent.mkdir()
+            shutil.move(str(original), str(escaped))
+            original.symlink_to(escaped, target_is_directory=True)
+            records[0]["artifact_dir"] = str(original)
+            manifest.write_text("".join(json.dumps(r) + "\n" for r in records))
+            proc = self.run_guard(
+                "validate-preflight", "--manifest", manifest,
+                "--image-pins", pins, "--teasbench-commit", self.TEASBENCH_COMMIT,
+                "--moe-cap-ref", self.MOE_CAP_REF)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("inside a study block path", proc.stderr)
+
+    def test_preflight_parses_job_and_metadata_instead_of_trusting_comments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pins, manifest, records = self.make_preflight_evidence(tmp)
+            job_path = next(Path(records[0]["artifact_dir"]).glob("*.yaml"))
+            document = yaml.safe_load(job_path.read_text())
+            document["spec"]["template"]["spec"]["containers"][0][
+                "resources"]["limits"]["nvidia.com/gpu"] = 1
+            # A truthful-looking comment must not rescue an actual x1 allocation.
+            document["review_note"] = "nvidia.com/gpu: 2 longbench_v1 256 TP2"
+            job_path.write_text(yaml.safe_dump(document, sort_keys=False))
+            records[0]["job_yaml_sha256"] = self.file_sha256(job_path)
+            manifest.write_text("".join(json.dumps(r) + "\n" for r in records))
+            proc = self.run_guard(
+                "validate-preflight", "--manifest", manifest,
+                "--image-pins", pins, "--teasbench-commit", self.TEASBENCH_COMMIT,
+                "--moe-cap-ref", self.MOE_CAP_REF)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("nvidia.com/gpu must be 2", proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pins, manifest, records = self.make_preflight_evidence(tmp)
+            metadata_path = Path(records[0]["artifact_dir"]) / "metadata.json"
+            metadata = json.loads(metadata_path.read_text())
+            metadata["compatibility_preflight"]["job_uid"] = "some-other-job"
+            metadata_path.write_text(json.dumps(metadata))
+            records[0]["metadata_sha256"] = self.file_sha256(metadata_path)
+            manifest.write_text("".join(json.dumps(r) + "\n" for r in records))
+            proc = self.run_guard(
+                "validate-preflight", "--manifest", manifest,
+                "--image-pins", pins, "--teasbench-commit", self.TEASBENCH_COMMIT,
+                "--moe-cap-ref", self.MOE_CAP_REF)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("job_uid", proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pins, manifest, records = self.make_preflight_evidence(tmp)
+            artifact_dir = Path(records[0]["artifact_dir"])
+            metrics_path = artifact_dir / "metrics.json"
+            outside = Path(tmp) / "outside-metrics.json"
+            outside.write_bytes(metrics_path.read_bytes())
+            metrics_path.unlink()
+            metrics_path.symlink_to(outside)
+            proc = self.run_guard(
+                "validate-preflight", "--manifest", manifest,
+                "--image-pins", pins, "--teasbench-commit", self.TEASBENCH_COMMIT,
+                "--moe-cap-ref", self.MOE_CAP_REF)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("resolves outside artifact_dir", proc.stderr)
+
+        for engine, forbidden_flag in (
+                ("vllm", "--gpu-memory-utilization 0.01"),
+                ("sglang", "--mem-fraction-static 0.01")):
+            with self.subTest(recipe_mutation=engine), tempfile.TemporaryDirectory() as tmp:
+                pins, manifest, records = self.make_preflight_evidence(tmp)
+                record = next(r for r in records if r["inference_engine"] == engine)
+                job_path = next(Path(record["artifact_dir"]).glob("*.yaml"))
+                document = yaml.safe_load(job_path.read_text())
+                script = document["spec"]["template"]["spec"]["containers"][0]["args"][0]
+                document["spec"]["template"]["spec"]["containers"][0]["args"][0] = (
+                    script.replace("--port 30000", f"--port 30000 {forbidden_flag}", 1))
+                job_path.write_text(yaml.safe_dump(document, sort_keys=False))
+                record["job_yaml_sha256"] = self.file_sha256(job_path)
+                manifest.write_text("".join(json.dumps(r) + "\n" for r in records))
+                proc = self.run_guard(
+                    "validate-preflight", "--manifest", manifest,
+                    "--image-pins", pins, "--teasbench-commit", self.TEASBENCH_COMMIT,
+                    "--moe-cap-ref", self.MOE_CAP_REF)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("server command differs from the frozen", proc.stderr)
+
+    def make_terminal_validation_fixture(self, root, engine="sglang"):
+        root = Path(root)
+        if engine == "sglang":
+            block, order, version, gpu = "e4", 1, "0.5.9", "H100"
+            gpu_product = "NVIDIA-H100-80GB-HBM3"
+        else:
+            block, order, version, gpu = "e1", 1, "0.16.0", "A100"
+            gpu_product = "NVIDIA-A100-SXM4-80GB"
+        publish_path = (
+            f"moe/eidf/{engine}/gpt-oss-120b/gsm8k_256samples/"
+            f"{gpu.lower()}x2/batch-size-default/study-{block}/run")
+        output = root / "archive" / publish_path
+        output.mkdir(parents=True)
+        metadata = {
+            "model_config": {"model_name": "unsloth/gpt-oss-120b"},
+            "hardware": {"num_gpus": 2},
+            "system_environment": {
+                "inference_engine": engine,
+                "inference_engine_version": version,
+                "teasbench_commit": "a" * 7, "moe_cap_commit": "e" * 7,
+            },
+            "study": {
+                "study_id": self.STUDY_ID, "block_id": block, "planned_order": order,
+                "node": "gpu-h", "job_name": f"study-{block}-job",
+                "job_uid": f"uid-{block}-job", "dataset": "gsm8k",
+                "num_samples": 256, "gpu": gpu, "num_gpu": 2,
+                "batch_size": "default", "gpu_uuids": "GPU-one,GPU-two",
+                "gpu_product": gpu_product,
+                "arena_baseline_sha256": "",
+            },
+        }
+        metrics = {"quality": {"total": 256, "attempted": 256,
+                               "served": 256, "completed": 256}}
+        (output / "metadata.json").write_text(json.dumps(metadata))
+        (output / "metrics.json").write_text(json.dumps(metrics))
+        artifact_names = ["detailed_results.jsonl", "output_data.jsonl", "timings.json",
+                          "pip_freeze.txt"]
+        if engine == "sglang":
+            artifact_names.append("expert_distribution_record.jsonl")
+        for name in artifact_names:
+            (output / name).write_text("evidence\n")
+        (output / "job.yaml").write_text(
+            "containers:\n  - name: server\n"
+            f"    image: example.invalid/{engine}@sha256:" + "1" * 64 + "\n")
+        termination_log = root / "termination-message.json"
+        env = os.environ.copy()
+        env.update({
+            "STUDY_SERVER_OK": "1", "STUDY_CLIENT_OK": "1",
+            "STUDY_ENRICH_OK": "1", "STUDY_PUBLISH_OK": "1",
+            "PVC_RUN_OUTPUT_DIR": str(output), "STUDY_ID": self.STUDY_ID,
+            "STUDY_BLOCK": block, "STUDY_ORDER": str(order), "STUDY_DATASET": "gsm8k",
+            "STUDY_ENGINE": engine, "STUDY_ENGINE_VERSION": version,
+            "STUDY_GPU": gpu, "STUDY_GPU_PRODUCT": gpu_product,
+            "TEASBENCH_COMMIT": "a" * 7, "MOE_CAP_COMMIT": "e" * 7,
+            "k8s_node_name": "gpu-h", "k8s_job_name": f"study-{block}-job",
+            "k8s_job_uid": f"uid-{block}-job", "PUBLISH_SUBDIR": publish_path,
+            "STUDY_TERMINATION_LOG": str(termination_log),
+        })
+        return output, termination_log, env
+
+    def test_terminal_validator_requires_scientific_and_publication_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output, termination_log, env = self.make_terminal_validation_fixture(tmp)
+            proc = subprocess.run(
+                ["bash", str(STUDY_TERMINAL_VALIDATOR)], env=env,
+                text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            receipt = json.loads(termination_log.read_text())
+            self.assertEqual(receipt["quality"]["completed"], 256)
+            self.assertEqual(set(receipt["artifact_sha256"]), {
+                "metadata", "metrics", "launch_yaml", "detailed_results",
+                "output_data", "timings", "pip_freeze",
+                "expert_distribution_bundle"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, termination_log, env = self.make_terminal_validation_fixture(
+                tmp, engine="vllm")
+            proc = subprocess.run(
+                ["bash", str(STUDY_TERMINAL_VALIDATOR)], env=env,
+                text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            receipt = json.loads(termination_log.read_text())
+            self.assertEqual(receipt["inference_engine"], "vllm")
+            self.assertNotIn("expert_distribution_bundle", receipt["artifact_sha256"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output, _, env = self.make_terminal_validation_fixture(tmp, engine="sglang")
+            (output / "expert_distribution_record.jsonl").unlink()
+            proc = subprocess.run(
+                ["bash", str(STUDY_TERMINAL_VALIDATOR)], env=env,
+                text=True, capture_output=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("missing SGLang expert-distribution artifact", proc.stderr)
+
+        failures = (
+            ("server", "STUDY_SERVER_OK", "server did not become ready"),
+            ("client", "STUDY_CLIENT_OK", "client did not finish"),
+            ("enrichment", "STUDY_ENRICH_OK", "metadata enrichment failed"),
+            ("publish", "STUDY_PUBLISH_OK", "publication failed"),
+        )
+        for label, variable, expected in failures:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                _, _, env = self.make_terminal_validation_fixture(tmp)
+                env[variable] = "0"
+                proc = subprocess.run(
+                    ["bash", str(STUDY_TERMINAL_VALIDATOR)], env=env,
+                    text=True, capture_output=True)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(expected, proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output, _, env = self.make_terminal_validation_fixture(tmp)
+            metrics = json.loads((output / "metrics.json").read_text())
+            metrics["quality"]["served"] = 254
+            (output / "metrics.json").write_text(json.dumps(metrics))
+            proc = subprocess.run(
+                ["bash", str(STUDY_TERMINAL_VALIDATOR)], env=env,
+                text=True, capture_output=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("not all 256", proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output, _, env = self.make_terminal_validation_fixture(tmp)
+            (output / "output_data.jsonl").unlink()
+            proc = subprocess.run(
+                ["bash", str(STUDY_TERMINAL_VALIDATOR)], env=env,
+                text=True, capture_output=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("missing artifact output_data.jsonl", proc.stderr)
+
+    def test_manifest_guard_checks_completion_and_unique_last_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "manifest-E1.jsonl"
+            ReplicationStudyTests.write_complete_study_manifest(tmp, "E1")
+            records = [json.loads(line) for line in manifest.read_text().splitlines()]
+            complete = self.run_guard(
+                "block-complete", "--manifest", manifest, "--block", "E1")
+            self.assertEqual(complete.returncode, 0, complete.stderr)
+            node = self.run_guard(
+                "manifest-node", "--manifest", manifest, "--block", "E1")
+            self.assertEqual(node.returncode, 0, node.stderr)
+            self.assertEqual(node.stdout.strip(), "gpu-a")
+
+            records[-1]["outcome"] = "failed"
+            manifest.write_text(
+                "".join(json.dumps(record) + "\n" for record in records))
+            incomplete = self.run_guard(
+                "block-complete", "--manifest", manifest, "--block", "E1")
+            self.assertNotEqual(incomplete.returncode, 0)
+            self.assertIn("missing successful leaves 12", incomplete.stderr)
+
+            records[-1]["node"] = "gpu-node-b"
+            manifest.write_text(
+                "".join(json.dumps(record) + "\n" for record in records))
+            ambiguous = self.run_guard(
+                "manifest-node", "--manifest", manifest, "--block", "E1")
+            self.assertNotEqual(ambiguous.returncode, 0)
+            self.assertIn("records multiple nodes", ambiguous.stderr)
+
+    def test_image_guard_persists_digest_patches_yaml_and_rejects_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pin_file = root / "pins.tsv"
+            resolved = root / "resolved.tsv"
+            yaml_path = root / "job.yaml"
+            tag = "vllm/vllm-openai:v0.21.0"
+            digest = "sha256:" + "a" * 64
+            resolved.write_text(f"{tag}\t{digest}\n")
+            yaml_path.write_text(
+                f"containers:\n  - name: server\n    image: {tag}\n")
+            proc = self.run_guard(
+                "pin-images", "--pin-file", pin_file,
+                "--resolved-file", resolved, "--persist", yaml_path)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(pin_file.read_text(), f"{tag}\t{digest}\n")
+            self.assertIn(f"image: vllm/vllm-openai@{digest}", yaml_path.read_text())
+
+            drift = "sha256:" + "b" * 64
+            resolved.write_text(f"{tag}\t{drift}\n")
+            second_yaml = root / "second.yaml"
+            second_yaml.write_text(
+                f"containers:\n  - name: server\n    image: {tag}\n")
+            proc = self.run_guard(
+                "pin-images", "--pin-file", pin_file,
+                "--resolved-file", resolved, "--persist", second_yaml)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("image tag drift", proc.stderr)
+            self.assertIn(f"image: {tag}", second_yaml.read_text())
 
 
 if __name__ == "__main__":

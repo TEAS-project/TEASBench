@@ -273,10 +273,44 @@ class Template:
         # Study leaves record their identity, the realised environment
         # (node, GPU UUIDs, pip freeze) and the judge-baseline content hash.
         study_enrichment = ""
+        study_initialization = ""
+        study_job_uid_env = ""
+        study_server_ready = ""
+        study_client_success = ""
+        study_publish_success = ""
+        study_terminal_validation = ""
         study = study_fields(parameters)
         if study:
             block, version = study
-            order = int(parameters.get("study_order") or 0)
+            order = int(parameters["study_order"])
+            study_initialization = (
+                "STUDY_SERVER_OK=0\n"
+                "STUDY_CLIENT_OK=0\n"
+                "STUDY_ENRICH_OK=0\n"
+                "STUDY_PUBLISH_OK=0\n"
+                f'STUDY_ID="{STUDY_ID}"\n'
+                f'STUDY_BLOCK="{block}"\n'
+                f'STUDY_ORDER="{order}"\n'
+                f'STUDY_DATASET="{parameters["dataset"]}"\n'
+                f'STUDY_ENGINE="{parameters["inference_engine"]}"\n'
+                f'STUDY_ENGINE_VERSION="{version}"\n'
+                f'STUDY_GPU="{parameters["gpu"]}"\n'
+                f'STUDY_GPU_PRODUCT="{parameters["gpu_product"]}"\n'
+                f'TEASBENCH_COMMIT="{parameters["_teasbench_commit"]}"'
+            )
+            study_job_uid_env = (
+                "- name: k8s_job_uid\n"
+                "  valueFrom:\n"
+                "    fieldRef:\n"
+                "      fieldPath: metadata.labels"
+                "['batch.kubernetes.io/controller-uid']"
+            )
+            study_server_ready = "STUDY_SERVER_OK=1"
+            study_client_success = "STUDY_CLIENT_OK=1"
+            study_publish_success = "STUDY_PUBLISH_OK=1"
+            with open("k8s/helpers/study_terminal_validate.sh", "r") as handle:
+                terminal_lines = handle.read().splitlines()
+            study_terminal_validation = "\n".join(terminal_lines[1:])
             study_enrichment = (
                 "GPU_UUIDS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader"
                 " | paste -sd, -)\n"
@@ -284,18 +318,30 @@ class Template:
                 " 2>/dev/null | cut -d' ' -f1)\n"
                 "pip freeze > $PVC_RUN_OUTPUT_DIR/pip_freeze.txt\n"
                 "jq --arg gpu_uuids \"$GPU_UUIDS\" --arg node \"$k8s_node_name\" "
-                "--arg bsha \"$BASELINE_SHA\" "
+                "--arg gpu_product \"$STUDY_GPU_PRODUCT\" "
+                "--arg bsha \"$BASELINE_SHA\" --arg job \"$k8s_job_name\" "
+                "--arg uid \"$k8s_job_uid\" "
                 f"'.study = {{study_id: \"{STUDY_ID}\", block_id: \"{block}\", "
                 f"planned_order: {order}, engine_version: \"{version}\", "
-                "node: $node, gpu_uuids: $gpu_uuids, "
+                f"dataset: \"{parameters['dataset']}\", num_samples: 256, "
+                f"gpu: \"{parameters['gpu']}\", num_gpu: 2, batch_size: \"default\", "
+                "node: $node, job_name: $job, job_uid: $uid, gpu_uuids: $gpu_uuids, "
+                "gpu_product: $gpu_product, "
                 "arena_baseline_sha256: $bsha}' "
                 "$PVC_RUN_OUTPUT_DIR/metadata.json > tmp_study.json "
-                "&& mv tmp_study.json $PVC_RUN_OUTPUT_DIR/metadata.json"
+                "&& mv tmp_study.json $PVC_RUN_OUTPUT_DIR/metadata.json "
+                "&& STUDY_ENRICH_OK=1"
             )
 
         replacements = {
             "@moe_cap_pin@": moe_cap_pin,
             "@study_metadata_enrichment@": study_enrichment,
+            "@study_initialization@": study_initialization,
+            "@study_job_uid_env@": study_job_uid_env,
+            "@study_server_ready@": study_server_ready,
+            "@study_client_success@": study_client_success,
+            "@study_publish_success@": study_publish_success,
+            "@study_terminal_validation@": study_terminal_validation,
             "@image_name@": image_name,
             "@extra_container_env@": extra_env,
             "@download_arena_hard_baseline_answers@": arena_dl,
@@ -430,6 +476,7 @@ class Template:
 
     def get(self, parameters: dict, results_repo: str,
             extra: dict = None, template_override: str = None):
+        parameters = dict(parameters)
         with open("configs/config.yaml", "r") as f:
             config = yaml.safe_load(f)
 
@@ -437,6 +484,7 @@ class Template:
         matching_rules = self.get_matching_rules(rules, parameters)
 
         teasbench_commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+        parameters["_teasbench_commit"] = teasbench_commit
 
         # Site values: everything about the target cluster that the job
         # manifests would otherwise hardcode. Sourced from configs/sites/
