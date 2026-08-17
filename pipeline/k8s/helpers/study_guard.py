@@ -253,15 +253,28 @@ def command_prepare_job(args):
     if len(matches) != 1:
         raise GuardError(f"{source}: expected exactly one metadata.generateName")
     prefix = matches[0].group(2)
-    suffix = "".join(secrets.choice("abcdefghijklmnopqrstuvwxyz0123456789")
-                     for _ in range(5))
-    job = prefix + suffix
-    if len(job) > 63 or not re.fullmatch(r"[a-z0-9]([-a-z0-9.]*[a-z0-9])?", job):
-        raise GuardError(f"{source}: generated invalid Kubernetes job name {job!r}")
-    prepared = pattern.sub(f"  name: {job}", text, count=1)
-    destination = Path(args.state_dir) / f"{job}.yaml"
-    atomic_write(destination, prepared, mode=source.stat().st_mode)
-    print(f"{job}\t{destination.resolve()}\t{sha256(destination)}")
+    candidate = prefix + "aaaaa"
+    if (len(candidate) > 63
+            or not re.fullmatch(r"[a-z0-9]([-a-z0-9.]*[a-z0-9])?", candidate)):
+        raise GuardError(
+            f"{source}: generateName would produce an invalid Kubernetes job name")
+    try:
+        import yaml
+    except ImportError as exc:
+        raise GuardError("PyYAML is required to prepare a study Job") from exc
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise GuardError(f"{source}: cannot parse generated YAML: {exc}") from exc
+    metadata = document.get("metadata", {}) if isinstance(document, dict) else {}
+    if document.get("kind") != "Job" or metadata.get("generateName") != prefix:
+        raise GuardError(f"{source}: expected one Job with metadata.generateName")
+    if "name" in metadata:
+        raise GuardError(f"{source}: metadata.name is prohibited; use generateName")
+    token = secrets.token_hex(8)
+    destination = Path(args.state_dir) / f"{source.stem}-{token}.yaml"
+    atomic_write(destination, text, mode=source.stat().st_mode)
+    print(f"{destination.resolve()}\t{sha256(destination)}")
 
 
 def image_digest(value, context):
@@ -427,6 +440,10 @@ def command_repeat_action(args):
                          str(yaml_path), latest["yaml_sha256"])))
         return
     if ambiguous_identity:
+        if not isinstance(latest.get("job"), str) or not latest["job"]:
+            raise GuardError(
+                f"{args.block}/{args.order} has no captured server-generated Job name; "
+                "inspect the namespace before any retry")
         for key in ("job", "yaml", "yaml_path", "yaml_sha256", "submitted_at"):
             if not isinstance(latest.get(key), str) or not latest[key]:
                 raise GuardError(
@@ -439,7 +456,7 @@ def command_repeat_action(args):
                 f"{args.block}/{args.order} ambiguous identity YAML is missing or changed")
         if not args.reconcile:
             raise GuardError(
-                f"{args.block}/{args.order} has an unreconciled named-job identity; "
+                f"{args.block}/{args.order} has an unreconciled Job identity; "
                 "automatic resubmission is prohibited")
         prior_uid = str(latest.get("job_uid", ""))
         if not JOB_UID_RE.fullmatch(prior_uid):

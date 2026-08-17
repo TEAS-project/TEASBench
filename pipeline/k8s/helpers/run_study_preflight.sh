@@ -23,6 +23,10 @@ LEAF_TIMEOUT_HOURS=12
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 need_val() { [ $# -ge 2 ] || die "$1 needs a value"; }
+valid_job_name() {
+    [ -n "$1" ] && [ "${#1}" -le 63 ] \
+        && [[ "$1" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]]
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -181,10 +185,19 @@ for index in 0 1 2 3; do
     prepared="$("$PY" "$GUARD" prepare-job --yaml "$yaml_path" \
         --state-dir "$STATE_DIR/preflight-submitted-yamls")" \
         || die "could not prepare preflight $((index + 1))"
-    IFS=$'\t' read -r job submitted_yaml submitted_sha <<< "$prepared"
-    job_uid="$(kubectl -n "$NAMESPACE" create -f "$submitted_yaml" \
-        -o 'jsonpath={.metadata.uid}')" \
+    IFS=$'\t' read -r submitted_yaml submitted_sha extra <<< "$prepared"
+    [ -z "$extra" ] && [ -s "$submitted_yaml" ] \
+        && [[ "$submitted_sha" =~ ^[0-9a-f]{64}$ ]] \
+        || die "preflight preparation returned invalid durable YAML evidence"
+    generate_name="$(sed -n 's/^  generateName: //p' "$submitted_yaml")"
+    create_out="$(kubectl -n "$NAMESPACE" create -f "$submitted_yaml" \
+        -o 'jsonpath={.metadata.name}{"\t"}{.metadata.uid}')" \
         || die "could not submit preflight $((index + 1))"
+    [[ "$create_out" != *$'\n'* ]] \
+        || die "preflight $((index + 1)) returned multiple identity records"
+    IFS=$'\t' read -r job job_uid extra <<< "$create_out"
+    [ -z "$extra" ] && valid_job_name "$job" && [[ "$job" == "$generate_name"* ]] \
+        || die "preflight $((index + 1)) returned an invalid generated Job name"
     [[ "$job_uid" =~ ^[0-9a-f][0-9a-f-]{7,}$ ]] \
         || die "preflight $job returned an invalid UID"
     if ! cp "$submitted_yaml" "$JOB_CONFIGS_DIR/$job.yaml"; then

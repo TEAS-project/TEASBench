@@ -321,6 +321,11 @@ valid_job_uid() {
     [[ "$1" =~ ^[0-9a-f][0-9a-f-]{7,}$ ]]
 }
 
+valid_job_name() {
+    [ -n "$1" ] && [ "${#1}" -le 63 ] \
+        && [[ "$1" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]]
+}
+
 cleanup_exact_job() {
     local job="$1" job_uid="$2" reason="$3"
     local current_uid pod_records pod_name pod_uid deadline
@@ -536,61 +541,39 @@ monitor_leaf() {
 
 run_leaf() {
     local order="$1" yaml="$WORKDIR/$2"
-    local submitted_at job job_uid create_out prepared yaml_path yaml_sha recovered_uid record_uid
+    local submitted_at job job_uid create_out prepared yaml_path yaml_sha generate_name extra
     submitted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     pin_yaml_to_block_node "$yaml"
 
     prepared="$("$PY" "$GUARD" prepare-job --yaml "$yaml" \
         --state-dir "$STATE_DIR/submitted-yamls")" \
-        || die "could not prepare an immutable named job for $BLOCK/$order"
-    IFS=$'\t' read -r job yaml_path yaml_sha <<< "$prepared"
-    [ -n "$job" ] && [ -s "$yaml_path" ] && [[ "$yaml_sha" =~ ^[0-9a-f]{64}$ ]] \
-        || die "job preparation returned an invalid durable identity for $BLOCK/$order"
+        || die "could not prepare immutable Job YAML for $BLOCK/$order"
+    IFS=$'\t' read -r yaml_path yaml_sha extra <<< "$prepared"
+    [ -z "$extra" ] && [ -s "$yaml_path" ] && [[ "$yaml_sha" =~ ^[0-9a-f]{64}$ ]] \
+        || die "job preparation returned invalid durable YAML evidence for $BLOCK/$order"
+    generate_name="$(sed -n 's/^  generateName: //p' "$yaml_path")"
 
     if ! create_out="$(kubectl -n "$NAMESPACE" create -f "$yaml_path" \
-        -o 'jsonpath={.metadata.uid}')"; then
-        if ! recovered_uid="$(kubectl -n "$NAMESPACE" get job "$job" \
-            --ignore-not-found -o jsonpath='{.metadata.uid}' 2>/dev/null)"; then
-            append_manifest "$order" "$job" "" "$(basename "$yaml")" "" "" \
-                "$submitted_at" "identity-unknown" "" "" "" "$yaml_path" "$yaml_sha" \
-                || true
-            die "create failed and the exact state of named job $job cannot be verified"
-        fi
-        record_uid=""
-        valid_job_uid "$recovered_uid" && record_uid="$recovered_uid"
-        if ! append_manifest "$order" "$job" "$record_uid" "$(basename "$yaml")" "" "" \
+        -o 'jsonpath={.metadata.name}{"\t"}{.metadata.uid}')"; then
+        append_manifest "$order" "" "" "$(basename "$yaml")" "" "" \
             "$submitted_at" "create-failed" "" "" "" "$yaml_path" "$yaml_sha" \
-            ; then
-            if valid_job_uid "$recovered_uid"; then
-                cleanup_exact_job "$job" "$recovered_uid" "create-failure manifest write" \
-                    || die "create failure manifest write and exact cleanup both failed"
-            fi
-            die "could not append create failure to $MANIFEST"
-        fi
-        if valid_job_uid "$recovered_uid"; then
-            cleanup_exact_job "$job" "$recovered_uid" "ambiguous create failure" \
-                || die "create failed after $job appeared and exact cleanup failed"
-            append_manifest "$order" "$job" "$recovered_uid" "$(basename "$yaml")" "" "" \
-                "$submitted_at" "cleanup-confirmed" "" "" "" "$yaml_path" "$yaml_sha" \
-                || die "create-failure cleanup completed but its durable confirmation failed"
-        elif [ -n "$recovered_uid" ]; then
-            die "create failed and named job $job returned an invalid UID; no later leaf was submitted"
-        fi
-        echo "   [$order] kubectl create FAILED for $(basename "$yaml")"
-        return 1
+            || true
+        die "create failed before Kubernetes returned the generated Job identity; inspect the namespace before any retry"
     fi
-    job_uid="$create_out"
-    if ! valid_job_uid "$job_uid"; then
-        recovered_uid="$(kubectl -n "$NAMESPACE" get job "$job" \
-            --ignore-not-found -o jsonpath='{.metadata.uid}' 2>/dev/null)"
-        job_uid="$recovered_uid"
-    fi
-    if ! valid_job_uid "$job_uid"; then
-        append_manifest "$order" "$job" "" "$(basename "$yaml")" "" "" \
+    if [[ "$create_out" == *$'\n'* ]]; then
+        append_manifest "$order" "" "" "$(basename "$yaml")" "" "" \
             "$submitted_at" "identity-unknown" "" "" "" "$yaml_path" "$yaml_sha" \
             || true
-        die "created named job $job but could not recover its UID; no later leaf was submitted"
+        die "Kubernetes returned multiple Job identity records; inspect the namespace before any retry"
+    fi
+    IFS=$'\t' read -r job job_uid extra <<< "$create_out"
+    if [ -n "$extra" ] || ! valid_job_name "$job" \
+        || [[ "$job" != "$generate_name"* ]] || ! valid_job_uid "$job_uid"; then
+        append_manifest "$order" "" "" "$(basename "$yaml")" "" "" \
+            "$submitted_at" "identity-unknown" "" "" "" "$yaml_path" "$yaml_sha" \
+            || true
+        die "Kubernetes returned an invalid generated Job name/UID; inspect the namespace before any retry"
     fi
     CURRENT_JOB="$job"
     if ! append_manifest "$order" "$job" "$job_uid" "$(basename "$yaml")" "" "" \

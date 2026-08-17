@@ -769,7 +769,8 @@ if "create" in args:
     document = yaml.safe_load(yaml_path.read_text())
     state["count"] += 1
     count = state["count"]
-    job = document["metadata"]["name"]
+    generate_name = document["metadata"]["generateName"]
+    job = f"{generate_name}{count:05d}"
     uid = f"11111111-1111-4111-8111-{count:012d}"
     pod = f"preflight-pod-{count}"
     container = document["spec"]["template"]["spec"]["containers"][0]
@@ -815,7 +816,7 @@ if "create" in args:
         "metrics_sha256": sha(metrics_path), "job_yaml_sha256": sha(yaml_path)}
     state.update({"job": job, "uid": uid, "pod": pod, "receipt": receipt})
     save()
-    print(uid)
+    print(f"{job}\t{uid}")
     raise SystemExit(0)
 if "wait" in args or "delete" in args:
     raise SystemExit(0)
@@ -863,6 +864,13 @@ exec python3 '{kubectl_impl}' "$@"
                 (root / "state" /
                  "a100x2-compatibility-preflight.validated.json").is_file())
             self.assertFalse((root / "forbidden-kubectl-cp").exists())
+            for record in records:
+                job_yaml = next(Path(record["artifact_dir"]).glob("*.yaml"))
+                document = load_yaml_no_duplicates(job_yaml.read_text())
+                self.assertIn("generateName", document["metadata"])
+                self.assertNotIn("name", document["metadata"])
+                self.assertTrue(record["job_name"].startswith(
+                    document["metadata"]["generateName"]))
 
     def test_launcher_rejects_unsafe_actual_launch_options(self):
         cases = (
@@ -1013,7 +1021,7 @@ exit 0
             "".join(f"{tag}\t{digest}\n" for tag in (
                 "lmsysorg/sglang:v0.5.12.post1", "lmsysorg/sglang:v0.5.9",
                 "vllm/vllm-openai:v0.16.0", "vllm/vllm-openai:v0.21.0")))
-        job = "study-e4-job"
+        job = "study-e4-sglang-059-gptoss120b-gsm8k-h100x2-abcde"
         uid = "11111111-1111-4111-8111-111111111111"
         yaml_name = "study-e4-sglang-059-gptoss120b-gsm8k-h100x2.yaml"
         submitted_dir = state / "submitted-yamls"
@@ -1077,13 +1085,15 @@ exit 0
     @staticmethod
     def polling_kubectl(root, receipt_source=None, failed=False):
         root = Path(root)
+        job = "study-e4-sglang-059-gptoss120b-gsm8k-h100x2-abcde"
+        uid = "11111111-1111-4111-8111-111111111111"
         deleted = root / "mock-job-deleted"
         message_case = ":"
         if receipt_source is not None:
             generated_root = Path(receipt_source).parent
             message_case = (
                 f"yaml_path=$(find '{generated_root}' -type f "
-                "-name 'study-e4-job.yaml' "
+                f"-name '{job}.yaml' "
                 "| head -1); "
                 "yaml_sha=$(sha256sum \"$yaml_path\" | cut -d' ' -f1); "
                 f"jq --arg sha \"$yaml_sha\" '.job_yaml_sha256=$sha | "
@@ -1093,6 +1103,7 @@ exit 0
         return (
             "#!/bin/sh\n"
             "case \"$*\" in\n"
+            f"  *\" create \"*) printf '{job}\\t{uid}\\n' ;;\n"
             f"  *\" delete job \"*) touch '{deleted}'; exit 0 ;;\n"
             f"  *\"ownerReferences\"*) [ -f '{deleted}' ] || "
             "printf 'mock-pod\\t11111111-1111-4111-8111-111111111111\\n' ;;\n"
@@ -1355,15 +1366,14 @@ esac
             self.assertIn("refusing to delete replacement job", proc.stderr)
             self.assertFalse(delete_marker.exists())
 
-    def test_launcher_records_successful_create_with_unrecoverable_identity(self):
+    def test_launcher_captures_generated_identity_and_blocks_ambiguous_create(self):
         with tempfile.TemporaryDirectory() as tmp:
             state, _ = self.make_resume_state(tmp)
             prior = json.loads((state / "manifest-E4.jsonl").read_text())
             prior["outcome"] = "cleanup-confirmed"
             (state / "manifest-E4.jsonl").write_text(json.dumps(prior) + "\n")
-            # create returns success with an empty jsonpath, but the named Job
-            # lookup recovers its UID. The local config copy then fails, which
-            # exercises exact synchronous cleanup of that recovered identity.
+            # The create response returns the API-server generated name and UID.
+            # The local config copy then fails, exercising exact UID cleanup.
             proc = self.run_study_launcher(
                 tmp, "E4", "--only", "1",
                 kubectl_script=self.polling_kubectl(tmp))
@@ -1376,90 +1386,47 @@ esac
             self.assertEqual(records[-1]["outcome"], "cleanup-confirmed")
             self.assertEqual(records[-1]["job_uid"],
                              "11111111-1111-4111-8111-111111111111")
+            self.assertEqual(
+                records[-1]["job"],
+                "study-e4-sglang-059-gptoss120b-gsm8k-h100x2-abcde")
+            submitted = load_yaml_no_duplicates(
+                Path(records[-1]["yaml_path"]).read_text())
+            self.assertIn("generateName", submitted["metadata"])
+            self.assertNotIn("name", submitted["metadata"])
+            self.assertEqual(
+                hashlib.sha256(
+                    Path(records[-1]["yaml_path"]).read_bytes()).hexdigest(),
+                records[-1]["yaml_sha256"])
 
-        with tempfile.TemporaryDirectory() as tmp:
-            state, _ = self.make_resume_state(tmp)
-            prior = json.loads((state / "manifest-E4.jsonl").read_text())
-            prior["outcome"] = "cleanup-confirmed"
-            (state / "manifest-E4.jsonl").write_text(json.dumps(prior) + "\n")
-            script = '''#!/bin/sh
+        for label, create_case, outcome in (
+                ("malformed", '*" create "*) exit 0 ;;', "identity-unknown"),
+                ("failed", '*" create "*) exit 9 ;;', "create-failed")):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                state, _ = self.make_resume_state(tmp)
+                prior = json.loads((state / "manifest-E4.jsonl").read_text())
+                prior["outcome"] = "cleanup-confirmed"
+                (state / "manifest-E4.jsonl").write_text(json.dumps(prior) + "\n")
+                script = f'''#!/bin/sh
 case "$*" in
-  *" create "*) exit 0 ;;
-  *"{.metadata.uid}"*) exit 0 ;;
+  {create_case}
   *) : ;;
 esac
 '''
-            proc = self.run_study_launcher(
-                tmp, "E4", "--only", "1", kubectl_script=script)
-            self.assertNotEqual(proc.returncode, 0)
-            self.assertIn("created named job", proc.stderr)
-            records = [json.loads(line) for line in
-                       (state / "manifest-E4.jsonl").read_text().splitlines()]
-            self.assertEqual(records[-1]["outcome"], "identity-unknown")
-            self.assertTrue(records[-1]["job"])
-            self.assertTrue(Path(records[-1]["yaml_path"]).is_file())
-
-            blocked = self.run_guard(
-                "repeat-action", "--manifest", state / "manifest-E4.jsonl",
-                "--block", "E4", "--order", "1")
-            self.assertNotEqual(blocked.returncode, 0)
-            self.assertIn("automatic resubmission is prohibited", blocked.stderr)
-            reconciliable = self.run_guard(
-                "repeat-action", "--manifest", state / "manifest-E4.jsonl",
-                "--block", "E4", "--order", "1", "--reconcile")
-            self.assertEqual(reconciliable.returncode, 0, reconciliable.stderr)
-            self.assertTrue(reconciliable.stdout.startswith("reconcile\t"))
-
-            create_marker = Path(tmp) / "retry-create"
-            retry_script = f'''#!/bin/sh
-case "$*" in
-  *" create "*) echo create >> '{create_marker}'; exit 9 ;;
-  *"{{.metadata.uid}}"*) exit 0 ;;
-  *) : ;;
-esac
-'''
-            retry = self.run_study_launcher(
-                tmp, "E4", "--only", "1", kubectl_script=retry_script)
-            self.assertNotEqual(retry.returncode, 0)
-            self.assertIn("automatic resubmission is prohibited", retry.stderr)
-            self.assertFalse(create_marker.exists())
-
-            reconciled_retry = self.run_study_launcher(
-                tmp, "E4", "--only", "1", "--reconcile-identity",
-                kubectl_script=retry_script)
-            self.assertNotEqual(reconciled_retry.returncode, 0)
-            self.assertEqual(create_marker.read_text().splitlines(), ["create"])
-            records = [json.loads(line) for line in
-                       (state / "manifest-E4.jsonl").read_text().splitlines()]
-            self.assertEqual(records[-2]["outcome"], "cleanup-confirmed")
-            self.assertEqual(records[-1]["outcome"], "create-failed")
-
-            ambiguous_failed_create = self.run_guard(
-                "repeat-action", "--manifest", state / "manifest-E4.jsonl",
-                "--block", "E4", "--order", "1")
-            self.assertNotEqual(ambiguous_failed_create.returncode, 0)
-            self.assertIn(
-                "automatic resubmission is prohibited",
-                ambiguous_failed_create.stderr)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            state, _ = self.make_resume_state(tmp)
-            prior = json.loads((state / "manifest-E4.jsonl").read_text())
-            prior["outcome"] = "cleanup-confirmed"
-            (state / "manifest-E4.jsonl").write_text(json.dumps(prior) + "\n")
-            script = '''#!/bin/sh
-case "$*" in
-  *" create "*) exit 9 ;;
-  *"{.metadata.uid}"*) exit 0 ;;
-  *) : ;;
-esac
-'''
-            proc = self.run_study_launcher(
-                tmp, "E4", "--only", "1", kubectl_script=script)
-            self.assertNotEqual(proc.returncode, 0)
-            records = [json.loads(line) for line in
-                       (state / "manifest-E4.jsonl").read_text().splitlines()]
-            self.assertEqual(records[-1]["outcome"], "create-failed")
+                proc = self.run_study_launcher(
+                    tmp, "E4", "--only", "1", kubectl_script=script)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("inspect the namespace before any retry", proc.stderr)
+                records = [json.loads(line) for line in
+                           (state / "manifest-E4.jsonl").read_text().splitlines()]
+                self.assertEqual(records[-1]["outcome"], outcome)
+                self.assertEqual(records[-1]["job"], "")
+                self.assertEqual(records[-1]["job_uid"], "")
+                self.assertTrue(Path(records[-1]["yaml_path"]).is_file())
+                blocked = self.run_guard(
+                    "repeat-action", "--manifest", state / "manifest-E4.jsonl",
+                    "--block", "E4", "--order", "1")
+                self.assertNotEqual(blocked.returncode, 0)
+                self.assertIn("no captured server-generated Job name", blocked.stderr)
 
     def test_study_marker_level_round_trips_and_keeps_a_pure_timestamp(self):
         """parse_run_path keeps the standard 6-level prefix and reports
@@ -1554,6 +1521,37 @@ class StudyGuardTests(unittest.TestCase):
     @staticmethod
     def file_sha256(path):
         return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    def test_prepare_job_preserves_generate_name_in_unique_durable_copies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "study-job.yaml"
+            source.write_text(
+                "apiVersion: batch/v1\n"
+                "kind: Job\n"
+                "metadata:\n"
+                "  generateName: study-e1-vllm-0160-gptoss120b-gsm8k-a100x2-\n"
+                "  labels:\n"
+                "    kueue.x-k8s.io/queue-name: eidf230ns-user-queue\n"
+                "spec:\n"
+                "  template:\n"
+                "    spec:\n"
+                "      containers: []\n")
+            outputs = []
+            for _ in range(2):
+                proc = self.run_guard(
+                    "prepare-job", "--yaml", source,
+                    "--state-dir", Path(tmp) / "submitted")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                fields = proc.stdout.strip().split("\t")
+                self.assertEqual(len(fields), 2)
+                durable, digest = Path(fields[0]), fields[1]
+                self.assertEqual(durable.read_bytes(), source.read_bytes())
+                self.assertEqual(self.file_sha256(durable), digest)
+                document = load_yaml_no_duplicates(durable.read_text())
+                self.assertIn("generateName", document["metadata"])
+                self.assertNotIn("name", document["metadata"])
+                outputs.append(durable)
+            self.assertNotEqual(outputs[0], outputs[1])
 
     def make_preflight_evidence(self, root):
         root = Path(root)
