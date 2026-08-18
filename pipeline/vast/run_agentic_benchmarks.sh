@@ -399,6 +399,7 @@ while IFS=',' read -r -a VALUES; do
     if [[ "$benchmark" == "swe-bench-lite" ]]; then
         export SWEBENCH_HARNESS_MODAL=1
         export MODAL_TOKEN_ID MODAL_TOKEN_SECRET
+        env -u MODAL_TOKEN_ID -u MODAL_TOKEN_SECRET modal token set --token-id "$MODAL_TOKEN_ID" --token-secret "$MODAL_TOKEN_SECRET"
         sandbox_provider_for_provenance="modal"
     else
         sandbox_provider_for_provenance=""
