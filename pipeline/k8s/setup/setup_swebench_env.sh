@@ -29,7 +29,14 @@ PREFIX="${TEASBENCH_ENV_PREFIX:-$HOME/teasbench-env}"
 AGENTCAP_REPO="${AGENTCAP_REPO:-https://github.com/Auto-CAP/AgentCAP.git}"
 AGENTCAP_REF="${AGENTCAP_REF:-main}"
 SWEAGENT_REPO="${SWEAGENT_REPO:-https://github.com/SWE-agent/SWE-agent.git}"
-SWEAGENT_REF="${SWEAGENT_REF:-main}"
+# Pinned, not "main". SWE-agent upstream moves continuously and this pipeline
+# depends on two things that drift with it: the exact litellm.completion block
+# AgentCAP's streaming patch string-matches, and the CLI/trajectory surface
+# agent_cap/agents/strategies_sweagent.py drives.
+#
+# Override for a bisect or an upgrade trial; accepts a tag, branch or SHA:
+#   SWEAGENT_REF=v1.1.0 bash pipeline/k8s/setup/setup_swebench_env.sh
+SWEAGENT_REF="${SWEAGENT_REF:-3ea751c087f32b16e039a2233dd6eefecef325d5}"
 SWEREX_SPEC="${SWEREX_SPEC:-swe-rex>=1.4.0}"
 SWEBENCH_SPEC="${SWEBENCH_SPEC:-swebench>=2.0}"
 PYTHON="${PYTHON:-python3}"
@@ -194,15 +201,54 @@ done
 
 # ------------------------------------------------------------ SWE-agent ----
 step 4 "SWE-agent (streaming-patched)"
+SWEAGENT_MOVED=0
 if [ -d "$SWEAGENT_DIR/.git" ]; then
     ok "checkout exists"
 else
-    git clone --quiet --branch "$SWEAGENT_REF" "$SWEAGENT_REPO" "$SWEAGENT_DIR" \
+    # No --branch: it takes tags and branches but not commit SHAs, and
+    # SWEAGENT_REF is pinned to one.
+    git clone --quiet "$SWEAGENT_REPO" "$SWEAGENT_DIR" \
         || die "clone failed: $SWEAGENT_REPO"
     did "cloned SWE-agent"
 fi
 
-if "$PY" -c 'import sweagent' 2>/dev/null; then
+# Verify the checkout is actually at $SWEAGENT_REF instead of assuming any
+# pre-existing directory is the right one. SWE-agent used to be cloned from an
+# unpinned "main", so every checkout already on a login node sits at whatever
+# main happened to be that day -- exactly the drift the pin exists to stop.
+WANT_SHA="$(git -C "$SWEAGENT_DIR" rev-parse --verify --quiet "${SWEAGENT_REF}^{commit}" || true)"
+if [ -z "$WANT_SHA" ]; then
+    git -C "$SWEAGENT_DIR" fetch --quiet --tags origin || die "git fetch failed in $SWEAGENT_DIR"
+    WANT_SHA="$(git -C "$SWEAGENT_DIR" rev-parse --verify --quiet "${SWEAGENT_REF}^{commit}" || true)"
+    [ -n "$WANT_SHA" ] || die "SWEAGENT_REF '$SWEAGENT_REF' not found in $SWEAGENT_REPO"
+fi
+HAVE_SHA="$(git -C "$SWEAGENT_DIR" rev-parse HEAD)"
+if [ "$HAVE_SHA" = "$WANT_SHA" ]; then
+    ok "at pinned ref ${SWEAGENT_REF} (${WANT_SHA:0:7})"
+else
+    # Moving to the pinned ref reverts models.py and so drops the streaming
+    # patch. That is fine and self-healing: the patch step below re-applies it
+    # whenever the marker is absent. Discarding anything *else* someone edited
+    # by hand is not fine, so refuse rather than force-checkout over it.
+    # `diff --name-only HEAD` lists tracked modifications only -- untracked
+    # build droppings (*.egg-info, __pycache__) are not at risk and must not
+    # block the move.
+    DIRTY="$(git -C "$SWEAGENT_DIR" diff --name-only HEAD | grep -v '^sweagent/agent/models\.py$' || true)"
+    if [ -n "$DIRTY" ]; then
+        echo "  local changes beyond the streaming patch:" >&2
+        echo "$DIRTY" | sed 's/^/    /' >&2
+        die "$SWEAGENT_DIR is at ${HAVE_SHA:0:7}, not the pinned ${WANT_SHA:0:7}, and has local edits (listed above). Move or discard them, or delete $SWEAGENT_DIR and re-run."
+    fi
+    git -C "$SWEAGENT_DIR" checkout --quiet --force "$WANT_SHA" \
+        || die "could not check out '$SWEAGENT_REF' in $SWEAGENT_DIR"
+    SWEAGENT_MOVED=1
+    did "moved SWE-agent ${HAVE_SHA:0:7} -> pinned ${WANT_SHA:0:7} (streaming patch re-applied below)"
+fi
+
+# A ref change can bring different dependencies with it, and `import sweagent`
+# would still succeed against the stale editable install -- so reinstall
+# unconditionally when we just moved, rather than trusting importability.
+if [ "$SWEAGENT_MOVED" -eq 0 ] && "$PY" -c 'import sweagent' 2>/dev/null; then
     ok "sweagent importable"
 else
     "$PY" -m pip install --quiet -e "$SWEAGENT_DIR" || die "pip install -e SWE-agent failed"
@@ -268,13 +314,27 @@ COMPAT_RESULT=$(compat_check)
 if [ "$COMPAT_RESULT" = "OK" ]; then
     ok "RemoteDeployment.is_alive accepts timeout= (SWE-agent's recovery path is compatible)"
 else
+    # Upgrade first, in case upstream has since fixed it -- then the patch
+    # below detects the working signature and no-ops.
     echo "  note    $COMPAT_RESULT -- attempting upgrade of '$SWEREX_SPEC'"
     "$PY" -m pip install --quiet --upgrade "$SWEREX_SPEC" || die "pip install --upgrade '$SWEREX_SPEC' failed"
     COMPAT_RESULT=$(compat_check)
     if [ "$COMPAT_RESULT" = "OK" ]; then
         did "upgraded swe-rex; RemoteDeployment.is_alive now accepts timeout="
     else
-        die "swe-rex/SWE-agent incompatible after upgrading to '$SWEREX_SPEC': $COMPAT_RESULT -- attempt_autosubmission_after_error (agents.py:831) calls is_alive(timeout=...), so every recoverable task error would crash instead of salvaging a patch. Raise SWEREX_SPEC to a version that adds the kwarg and re-run."
+        # No released swe-rex fixes this -- 1.4.0 is the latest published
+        # version and upstream main still overrides is_alive without the
+        # kwarg its own AbstractDeployment declares. So patch it, the same
+        # way step 4 patches SWE-agent for streaming.
+        echo "  note    no swe-rex release fixes this; patching RemoteDeployment.is_alive"
+        "$PY" "$TEASBENCH_ROOT/pipeline/k8s/setup/patch_swerex_is_alive.py" \
+            || die "patch_swerex_is_alive.py failed -- see the error above"
+        COMPAT_RESULT=$(compat_check)
+        if [ "$COMPAT_RESULT" = "OK" ]; then
+            did "patched swe-rex; RemoteDeployment.is_alive now accepts timeout="
+        else
+            die "swe-rex/SWE-agent still incompatible after patching: $COMPAT_RESULT -- attempt_autosubmission_after_error (agents.py:831) calls is_alive(timeout=...), so every recoverable task error would crash instead of salvaging a patch. Do not run: ~46% of tasks would lose their partial patch."
+        fi
     fi
 fi
 
@@ -424,7 +484,7 @@ echo "Setup complete."
 echo
 echo "  source $PREFIX/env.sh"
 echo
-echo "Then generate and run as usual (docs/USER_GUIDE.md 4.8):"
+echo "Then generate and run as usual:"
 echo "  cd pipeline && python generate.py --csv_file=../experiments/agentic-smoke-tests-eidf.csv --target_dir=./out"
 echo "  bash out/<run>.sh"
 echo "=============================================================="
