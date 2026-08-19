@@ -61,9 +61,17 @@ RUN chmod +x /root/.local/bin/uv /root/.local/bin/uvx
 # On Vast.ai the SWE-bench sandbox substrate is Modal, which swe-rex supports
 # natively -- so unlike K8s there is no sandbox provider and no kubectl here.
 RUN python3 -m pip install --ignore-installed --no-cache-dir \
-        'swe-rex>=1.4.0' 'swebench>=2.0' modal boto3 && \
+        'swe-rex>=1.4.0' 'swebench>=2.0,<5' 'modal<1.6' boto3 && \
     git clone https://github.com/SWE-agent/SWE-agent.git /opt/swe_agent && \
     python3 -m pip install --ignore-installed --no-cache-dir -e /opt/swe_agent
+
+# The Modal file system API has changed as of early August 2026. Earlier package
+# versions no longer work with the remote backend. Patch the working version of
+# SWE-bench to use the new API.
+COPY vast/swebench_modal_fs.patch /opt/teasbench/pipeline/vast/swebench_modal_fs.patch
+RUN patch -p1 \
+    -d /usr/local/lib/python3.12/dist-packages \
+    < /opt/teasbench/pipeline/vast/swebench_modal_fs.patch
 
 # agent_cap drives a Jupyter kernel so we also need this and ipykernel.
 # math-verify and sympy needed for IMO-Answerbench.
