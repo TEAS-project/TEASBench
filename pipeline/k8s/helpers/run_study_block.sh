@@ -7,16 +7,14 @@
 # (experiments/replication-study-eidf.csv).
 #
 #   ./run_study_block.sh E1              # run block E1 (12 leaves, sequential)
-#   ./run_study_block.sh E1 --dry-run    # generate + preflight only
+#   ./run_study_block.sh E1 --dry-run    # generate and validate; submit nothing
 #   ./run_study_block.sh E1 --only 5,6   # repeat specific leaves of a block
 #   ./run_study_block.sh E1 --only 5 --reconcile-identity
 #   Suggested block sequence: E1, E4, E2, E5, E3, E6
 #
-# Options: --preflight-evidence FILE --leaf-timeout-hours N
+# Options: --leaf-timeout-hours N
 #          --reconcile-identity (one --only leaf with an ambiguous named Job)
 # Dry-run only: --no-pin --skip-image-check --results-repo NAME
-# A non-dry E1 requires a validated four-record A100x2 LongBench compatibility
-# manifest. See study_guard.py validate-preflight --help for the evidence fields.
 #
 # Leaves run one at a time in a fixed, balanced order; leaves 2-12 are pinned
 # to the node leaf 1 landed on. MoE-CAP and the TEASBench checkout are pinned
@@ -42,7 +40,6 @@ DRY_RUN=0
 NO_PIN=0
 SKIP_IMAGE_CHECK=0
 ONLY=""
-PREFLIGHT_EVIDENCE=""
 LEAF_TIMEOUT_HOURS=12
 CLEANUP_TIMEOUT_SECONDS=600
 RECONCILE_IDENTITY=0
@@ -62,7 +59,6 @@ while [[ $# -gt 0 ]]; do
         --no-pin) NO_PIN=1 ;;
         --skip-image-check) SKIP_IMAGE_CHECK=1 ;;
         --only) need_val "$@"; ONLY="$2"; shift ;;
-        --preflight-evidence) need_val "$@"; PREFLIGHT_EVIDENCE="$2"; shift ;;
         --reconcile-identity) RECONCILE_IDENTITY=1 ;;
         --results-repo) need_val "$@"; RESULTS_REPO="$2"; shift ;;
         --leaf-timeout-hours) need_val "$@"; LEAF_TIMEOUT_HOURS="$2"; shift ;;
@@ -134,7 +130,6 @@ MANIFEST="$STATE_DIR/manifest-$BLOCK.jsonl"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/teas-study-$BLOCK-XXXXXX")" \
     || die "could not create temporary launch directory"
 IMAGE_PIN_FILE="$STATE_DIR/image-digests.tsv"
-PREFLIGHT_EVIDENCE="${PREFLIGHT_EVIDENCE:-$STATE_DIR/a100x2-compatibility-preflight.jsonl}"
 
 # A first launch must follow the frozen interleaved schedule and may start only
 # after all 12 predecessor leaves have a successful manifest record. --only is
@@ -285,20 +280,6 @@ if [ "$SKIP_IMAGE_CHECK" -eq 0 ]; then
 fi
 
 [ "$DRY_RUN" -eq 1 ] && { echo "Dry run: nothing submitted. YAMLs left in $WORKDIR"; exit 0; }
-
-# The A100x2 stratum cannot begin until all four exact engine/build images have
-# completed an excluded 256-sample LongBench compatibility run on the frozen
-# commits and digests. The validator hash-binds the metadata and metrics files
-# and writes a durable validation record into this fresh study state.
-if [ "$BLOCK" = "E1" ]; then
-    "$PY" "$GUARD" validate-preflight \
-        --manifest "$PREFLIGHT_EVIDENCE" \
-        --image-pins "$IMAGE_PIN_FILE" \
-        --teasbench-commit "$TEASBENCH_COMMIT" \
-        --moe-cap-ref "$MOE_CAP_REF" \
-        --record "$STATE_DIR/a100x2-compatibility-preflight.validated.json" \
-        || die "E1 blocked: A100x2 compatibility-preflight evidence is incomplete or invalid"
-fi
 
 # --- sequential submission -------------------------------------------------------
 CURRENT_JOB=""

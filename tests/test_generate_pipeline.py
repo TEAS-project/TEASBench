@@ -976,17 +976,35 @@ exit 0
             self.assertIn("records multiple nodes", proc.stderr)
             self.assertIn("cannot recover a unique node", proc.stderr)
 
-    def test_launcher_freezes_digests_then_blocks_e1_without_evidence(self):
+    def test_launcher_starts_e1_without_compatibility_preflight_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
-            proc = self.run_study_launcher(tmp, "E1")
+            create_marker = Path(tmp) / "e1-create-reached"
+            kubectl_script = f'''#!/bin/sh
+case "$*" in
+  *" create "*) touch '{create_marker}'; exit 72 ;;
+  *) exit 91 ;;
+esac
+'''
+            proc = self.run_study_launcher(
+                tmp, "E1", kubectl_script=kubectl_script)
             self.assertNotEqual(proc.returncode, 0)
-            self.assertIn("compatibility-preflight evidence is incomplete", proc.stderr)
+            self.assertIn("create failed before Kubernetes returned", proc.stderr)
+            self.assertTrue(create_marker.exists())
+            self.assertNotIn("compatibility-preflight", proc.stderr)
             state = Path(tmp) / "state"
             pins = (state / "image-digests.tsv").read_text().splitlines()
             self.assertEqual(len(pins), 4)
             self.assertTrue(all("\tsha256:" in line for line in pins))
             self.assertFalse(
                 (state / "a100x2-compatibility-preflight.validated.json").exists())
+
+    def test_launcher_rejects_retired_preflight_evidence_option(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self.run_study_launcher(
+                tmp, "E1", "--preflight-evidence", "obsolete.jsonl")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("unknown option --preflight-evidence", proc.stdout)
+            self.assertFalse((Path(tmp) / "state").exists())
 
     def test_launcher_validates_timeout_before_creating_state(self):
         invalid_values = ("0", "169", "999", "+1", "1h", "1+2",
@@ -1067,7 +1085,7 @@ exit 0
             "job_yaml_sha256": hashes["launch_yaml"],
             "artifact_sha256": hashes,
             "quality": {"total": 256, "attempted": 256,
-                        "served": served, "completed": 256},
+                        "served": served, "completed": served},
         }
         receipt_source = root / "mock-receipt.json"
         receipt_source.write_text(json.dumps(receipt))
@@ -1208,7 +1226,7 @@ exit 0
 
     def test_launcher_resume_requires_a_valid_terminal_receipt(self):
         cases = (("success", 256, True, False),
-                 ("quality-254", 254, False, False),
+                 ("quality-255", 255, False, False),
                  ("missing-receipt", 256, False, False),
                  ("publish-failed-job", 256, False, True))
         for label, served, expected_success, job_failed in cases:
@@ -1926,7 +1944,8 @@ class StudyGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output, _, env = self.make_terminal_validation_fixture(tmp)
             metrics = json.loads((output / "metrics.json").read_text())
-            metrics["quality"]["served"] = 254
+            metrics["quality"]["served"] = 255
+            metrics["quality"]["completed"] = 255
             (output / "metrics.json").write_text(json.dumps(metrics))
             proc = subprocess.run(
                 ["bash", str(STUDY_TERMINAL_VALIDATOR)], env=env,

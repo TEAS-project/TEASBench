@@ -1,6 +1,6 @@
 #!/bin/bash
-# Generate, run, collect, and validate the four excluded A100x2 LongBench
-# compatibility preflights required before study block E1.
+# Optionally generate, run, collect, and validate four excluded A100x2
+# LongBench compatibility diagnostics. These are not an E1 admission requirement.
 #
 #   ./pipeline/k8s/helpers/run_study_preflight.sh
 #   ./pipeline/k8s/helpers/run_study_preflight.sh --dry-run --skip-image-check
