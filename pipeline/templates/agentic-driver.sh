@@ -157,8 +157,28 @@ trap cleanup EXIT INT TERM
 echo
 echo "[1] Prerequisites"
 fail=0
-chk() { if eval "$2" > /dev/null 2>&1; then echo "  ok    $1"; else echo "  FAIL  $1"; [ -n "${3:-}" ] && echo "        $3"; fail=1; fi; }
+# Show the failing command's own output. Discarding it (as this used to) left
+# only "FAIL <label>" to go on: a failed import named neither the module nor
+# the path it searched, which is enough to send you hunting through a cluster
+# for a problem that is one stale variable in env.sh.
+chk() {
+    local out
+    if out=$(eval "$2" 2>&1); then
+        echo "  ok    $1"
+    else
+        echo "  FAIL  $1"
+        [ -n "${3:-}" ] && echo "        $3"
+        [ -n "$out" ] && echo "$out" | sed 's/^/        | /'
+        fail=1
+    fi
+}
 
+# First, because everything below is only meaningful if the environment it
+# reads was actually built. env.sh is rewritten by the setup script on every
+# run and only flagged complete once it finishes, so an unset or 0 value means
+# the last setup died partway and these paths may be from a previous one.
+chk "setup completed"                 "[ \"\${TEASBENCH_SETUP_COMPLETE:-0}\" = 1 ]" \
+    "$TEASBENCH_ENV_PREFIX/env.sh reports an incomplete setup (or predates this check). Re-run setup_swebench_env.sh from the checkout you intend to use, then re-source env.sh."
 chk "kubectl reaches $NAMESPACE"      "kubectl -n '$NAMESPACE' get pods"
 chk "can create jobs"                 "[ \"\$(kubectl -n '$NAMESPACE' auth can-i create jobs)\" = yes ]"
 chk "can create pods/portforward"     "[ \"\$(kubectl -n '$NAMESPACE' auth can-i create pods/portforward)\" = yes ]" \
@@ -166,7 +186,11 @@ chk "can create pods/portforward"     "[ \"\$(kubectl -n '$NAMESPACE' auth can-i
 chk "agent_cap importable"            "python3 -c 'import agent_cap'"
 chk "swe-rex importable"              "python3 -c 'import swerex'"
 chk "swebench importable"             "python3 -c 'import swebench'"
-chk "provider importable"             "PYTHONPATH='$TEASBENCH_ROOT/pipeline/k8s/lib' python -c 'from k8s_pod_providers import PortForwardK8sProvider'"
+# The path is spelled out because a ModuleNotFoundError names the module but
+# never the directory searched, and $TEASBENCH_ROOT is the one variable here
+# that no other check exercises -- so a stale one shows up only as this.
+chk "provider importable"             "PYTHONPATH='$TEASBENCH_ROOT/pipeline/k8s/lib' python -c 'from k8s_pod_providers import PortForwardK8sProvider'" \
+    "Searched \$TEASBENCH_ROOT/pipeline/k8s/lib = $TEASBENCH_ROOT/pipeline/k8s/lib (set by env.sh). If that is not the checkout you pulled into, re-run setup_swebench_env.sh from the right one."
 chk "engine manifest present"         "[ -f '$ENGINE_MANIFEST' ]" "Regenerate with pipeline/generate.py."
 chk "AgentCAP checkout ($AGENTCAP_DIR)" "[ -f '$AGENTCAP_DIR/benchmarks/swe_bench_lite_curated_100.json' ]" \
     "Re-run pipeline/k8s/setup/setup_swebench_env.sh."
