@@ -254,6 +254,54 @@ def parse_kv_args(items: list[str], cast=str) -> dict[str, object]:
     return out
 
 
+def parse_price_json(path: Optional[Path]) -> dict[str, dict[str, object]]:
+    """Load purchase-price overrides from JSON.
+
+    Accepted shapes:
+      {"b200": 35000}
+      {"b200": {"price_per_unit_usd": 35000, "price_source": "..."}}
+      {"b200": {"price": 35000, "source": "..."}}
+    """
+    if path is None:
+        return {}
+    data = load_json(path)
+    if data is None:
+        raise SystemExit(f"cannot read price JSON: {path}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"price JSON must be an object: {path}")
+    out: dict[str, dict[str, object]] = {}
+    for raw_key, raw_value in data.items():
+        key = str(raw_key).strip().lower()
+        if isinstance(raw_value, (int, float)):
+            out[key] = {
+                "price_per_unit_usd": float(raw_value),
+                "price_source": "user-supplied-json",
+            }
+            continue
+        if not isinstance(raw_value, dict):
+            raise SystemExit(
+                f"price JSON entry for {raw_key!r} must be a number or object"
+            )
+        price = (
+            raw_value.get("price_per_unit_usd")
+            if "price_per_unit_usd" in raw_value
+            else raw_value.get("price")
+        )
+        if price is None:
+            raise SystemExit(
+                f"price JSON entry for {raw_key!r} missing price_per_unit_usd"
+            )
+        out[key] = {
+            "price_per_unit_usd": float(price),
+            "price_source": str(
+                raw_value.get("price_source")
+                or raw_value.get("source")
+                or "user-supplied-json"
+            ),
+        }
+    return out
+
+
 def discover_gpu_keys(metrics_files: list[Path], root: Path) -> list[str]:
     keys: set[str] = set()
     for f in metrics_files:
@@ -514,10 +562,14 @@ def main() -> int:
                         help="ISO time when rent prices were quoted (default: now, UTC)")
 
     parser.add_argument("--buy-gpu-price", action="append", default=[])
+    parser.add_argument("--buy-gpu-prices-json", type=Path, default=None,
+                        help="JSON mapping gpu_key -> purchase USD, or gpu_key -> {price_per_unit_usd, price_source}")
     parser.add_argument("--buy-gpu-tdp", action="append", default=[])
     parser.add_argument("--buy-cpu-for", action="append", default=[])
     parser.add_argument("--buy-num-cpus", action="append", default=[])
     parser.add_argument("--buy-cpu-price", action="append", default=[])
+    parser.add_argument("--buy-cpu-prices-json", type=Path, default=None,
+                        help="JSON mapping cpu_key -> purchase USD, or cpu_key -> {price_per_unit_usd, price_source}")
     parser.add_argument("--buy-cpu-tdp", action="append", default=[])
     parser.add_argument("--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS)
     parser.add_argument("--utilisation", "--utilization", dest="utilisation", type=float, default=DEFAULT_UTILISATION,
@@ -568,12 +620,20 @@ def main() -> int:
         print(f"\nProceeding; rent figures will be omitted for {missing}.\n", file=sys.stderr)
 
     gpu_specs = {k: dict(v) for k, v in GPU_SPECS.items()}
+    for k, override in parse_price_json(args.buy_gpu_prices_json).items():
+        spec = gpu_specs.setdefault(k, {})
+        spec["price_per_unit_usd"] = float(override["price_per_unit_usd"])
+        spec["price_source"] = str(override["price_source"])
     for k, v in parse_kv_args(args.buy_gpu_price, float).items():
         spec = gpu_specs.setdefault(k, {}); spec["price_per_unit_usd"] = float(v); spec["price_source"] = "user-supplied"
     for k, v in parse_kv_args(args.buy_gpu_tdp, float).items():
         spec = gpu_specs.setdefault(k, {}); spec["tdp_w"] = float(v); spec["tdp_source"] = "user-supplied"
 
     cpu_specs = {k: dict(v) for k, v in CPU_SPECS.items()}
+    for k, override in parse_price_json(args.buy_cpu_prices_json).items():
+        spec = cpu_specs.setdefault(k, {"model": k})
+        spec["price_per_unit_usd"] = float(override["price_per_unit_usd"])
+        spec["price_source"] = str(override["price_source"])
     for k, v in parse_kv_args(args.buy_cpu_price, float).items():
         spec = cpu_specs.setdefault(k, {"model": k}); spec["price_per_unit_usd"] = float(v); spec["price_source"] = "user-supplied"
     for k, v in parse_kv_args(args.buy_cpu_tdp, float).items():
@@ -635,6 +695,15 @@ def main() -> int:
                     p99_e2e = _percentile(latencies, 99)
 
         if avg_e2e is None or ttft is None or tpot is None or out_tok is None:
+            skipped += 1
+            continue
+        if avg_e2e <= 0 or out_tok <= 0 or (ttft <= 0 and tpot <= 0):
+            print(
+                f"  [warn] skip invalid timing/token metrics for {f.relative_to(root)}: "
+                f"avg_e2e={avg_e2e}, ttft={ttft}, tpot={tpot}, "
+                f"avg_total_output_tokens={out_tok}",
+                file=sys.stderr,
+            )
             skipped += 1
             continue
 
