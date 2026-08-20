@@ -611,13 +611,41 @@ if [ $PUSH -eq 1 ]; then
             echo "  WARNING: could not read key 'token' from secret/$GIT_TOKEN_K8S_SECRET in $NAMESPACE"
         fi
     fi
-    REPO_CLONE="$RUN_DIR/@results_repo@"
+    # Throwaway clone, removed before and after: the previous version cloned
+    # into $RUN_DIR/@results_repo@ and left it there, so every run directory
+    # ended up holding a full copy of the results repo.
+    REPO_CLONE="$RUN_DIR/.results-clone"
     if [ -n "${GIT_TOKEN:-}" ]; then
         REPO_URL="https://oauth2:${GIT_TOKEN%$'\n'}@github.com/TEAS-project/@results_repo@.git"
     else
         REPO_URL="https://github.com/TEAS-project/@results_repo@.git"
     fi
-    if git clone --quiet "$REPO_URL" "$REPO_CLONE" 2>/dev/null; then
+    # Clone strategy ported from the MoE path (pipeline/templates/template.yaml,
+    # "Publish curated subset to results repo"), which had already solved this
+    # properly. --filter=blob:none + --depth 1 + --single-branch fetch none of
+    # the results repo's accumulated history, and --no-checkout with a cone
+    # sparse-checkout materialises only the subdir being published.
+    #
+    # That also makes the LFS problem structural rather than suppressed. The
+    # repo's .lfsconfig points at gitlab.eidf.ac.uk and some of its *other*
+    # leaves (agentic/vastai/**, moe/vastai/**) are LFS-tracked; nothing this
+    # driver writes is, since agentic/eidf/** matches no pattern. A full
+    # checkout smudges those unrelated files, sending git-lfs to GitLab for
+    # credentials the GitHub token in $REPO_URL cannot supply (different host)
+    # -- verified to fail the clone outright with "smudge filter lfs failed".
+    # A sparse checkout never materialises them, so the filter never runs.
+    # GIT_LFS_SKIP_SMUDGE is kept as a belt-and-braces guard in case the cone
+    # ever widens; GIT_TERMINAL_PROMPT stops a detached run blocking on a
+    # password prompt.
+    rm -rf "$REPO_CLONE"
+    # stderr is dropped because $REPO_URL embeds GIT_TOKEN and git echoes the
+    # URL in some failure messages; the branch below reports the failure.
+    if ( export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
+         git clone --quiet --branch main --single-branch --depth 1 \
+             --filter=blob:none --no-checkout "$REPO_URL" "$REPO_CLONE" \
+         && git -C "$REPO_CLONE" sparse-checkout init --cone \
+         && git -C "$REPO_CLONE" checkout --quiet main \
+         && git -C "$REPO_CLONE" sparse-checkout add "$RESULTS_SUBDIR" ) 2>/dev/null; then
         DEST="$REPO_CLONE/$RESULTS_SUBDIR"
         mkdir -p "$DEST"
         shopt -s nullglob
@@ -648,14 +676,46 @@ if [ $PUSH -eq 1 ]; then
         cp "${BASH_SOURCE[0]}" "$RUN_DIR/" 2>/dev/null
         cp "${BASH_SOURCE[0]}" "$DEST/" 2>/dev/null
         shopt -u nullglob
-        ( cd "$REPO_CLONE" \
-          && git config user.email "autopush@eidf" \
-          && git config user.name "Pipeline Autopush" \
-          && git add -A "$RESULTS_SUBDIR" \
-          && git commit -q -m "auto: $RUN_NAME" \
-          && git push -q "$REPO_URL" ) \
-          && echo "  pushed to $RESULTS_SUBDIR" \
-          || echo "  WARNING: push failed; results are still in $RUN_DIR"
+        export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
+        git -C "$REPO_CLONE" config user.email "autopush@eidf"
+        git -C "$REPO_CLONE" config user.name "Pipeline Autopush"
+        # The clone's run dir contains only the files copied above, so -A
+        # stages exactly the intended subset.
+        git -C "$REPO_CLONE" add -A -- "$RESULTS_SUBDIR"
+
+        if git -C "$REPO_CLONE" diff --cached --quiet; then
+            # Distinct from a push failure, and worth saying so: it means the
+            # cp above matched nothing, i.e. the run produced none of the
+            # files this path publishes.
+            echo "  WARNING: nothing staged for $RESULTS_SUBDIR; results are still in $RUN_DIR"
+        elif ! git -C "$REPO_CLONE" commit -q -m "auto: $RUN_NAME" 2>/dev/null; then
+            echo "  WARNING: git commit failed; results are still in $RUN_DIR"
+        else
+            # Retry with a rebase rather than locking: two runs finishing close
+            # together otherwise leave one push rejected with no recovery.
+            # lfs.locksverify=false because git-lfs's pre-push hook calls the
+            # locking API even when nothing being pushed is LFS-tracked -- one
+            # more chance to be asked for GitLab credentials. Disabling only
+            # the lock check (rather than --no-verify) keeps the hook's upload
+            # path intact, so this stays correct if an eidf leaf ever does
+            # become LFS-tracked.
+            PUSHED=0
+            for attempt in 1 2 3 4 5 6; do
+                if git -C "$REPO_CLONE" -c lfs.locksverify=false \
+                       push -q "$REPO_URL" HEAD:main 2>/dev/null; then
+                    PUSHED=1; break
+                fi
+                echo "  push attempt $attempt rejected; rebasing onto origin/main"
+                git -C "$REPO_CLONE" pull --rebase -q "$REPO_URL" main 2>/dev/null || break
+                sleep $(( (RANDOM % 20) + 5 ))
+            done
+            if [ $PUSHED -eq 1 ]; then
+                echo "  pushed to $RESULTS_SUBDIR"
+            else
+                echo "  WARNING: push failed after retries; results are still in $RUN_DIR"
+            fi
+        fi
+        rm -rf "$REPO_CLONE"
     else
         echo "  WARNING: could not clone the results repo (set GIT_TOKEN); results in $RUN_DIR"
     fi
