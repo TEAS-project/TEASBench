@@ -405,5 +405,66 @@ class ResultsRepoDirRoundTripTests(unittest.TestCase):
         self.assertEqual(parsed["batch_size"], "default")
 
 
+class LoginNodeDriverGenerationTests(unittest.TestCase):
+    """The generated login-node driver (swe-bench-lite on k8s) must be runnable,
+    not merely syntactically valid.
+
+    generate.py substitutes @tokens@ everywhere in a template, comments
+    included. A token whose value spans multiple lines therefore turns a
+    one-line comment into one commented line plus live continuation lines --
+    valid shell, so `bash -n` passes, but the script dies at run time on the
+    first variable those lines reference. That shipped once and aborted a run
+    with `line 67: RUN_DIR: unbound variable`.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(dir=str(REPO))
+        cls.out_dir = Path(cls._tmp.name)
+        run_generate(PIPELINE, EXPERIMENTS / "swe-bench-lite-eidf.csv", cls.out_dir)
+        cls.drivers = sorted(cls.out_dir.glob("*.sh"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_drivers_were_generated(self):
+        self.assertTrue(self.drivers, "no driver .sh generated for swe-bench-lite on k8s")
+
+    def test_driver_runs_to_arg_parsing(self):
+        """`--help` exits 0, which means everything above the arg loop ran
+        under `set -u`. That is the region placeholder expansion corrupts, and
+        it needs no cluster, no venv and no network to exercise."""
+        env = dict(os.environ,
+                   TEASBENCH_ENV_PREFIX="/nonexistent",
+                   TEASBENCH_ROOT="/nonexistent",
+                   AGENTCAP_DIR="/nonexistent",
+                   SWEAGENT_DIR="/nonexistent")
+        for driver in self.drivers:
+            with self.subTest(driver=driver.name):
+                r = subprocess.run(["bash", str(driver), "--help"],
+                                   text=True, capture_output=True, env=env)
+                self.assertEqual(
+                    r.returncode, 0,
+                    f"{driver.name} --help exited {r.returncode}\n"
+                    f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}")
+
+    def test_no_multiline_placeholder_left_inside_a_comment(self):
+        """Direct check on the cause: a generated comment line must not be
+        followed by continuation lines that the template had inside it."""
+        for driver in self.drivers:
+            with self.subTest(driver=driver.name):
+                lines = driver.read_text().splitlines()
+                for i, line in enumerate(lines[:-1]):
+                    if line.lstrip().startswith("#") and line.rstrip().endswith("\\"):
+                        nxt = lines[i + 1].strip()
+                        self.assertTrue(
+                            nxt.startswith("#") or not nxt,
+                            f"{driver.name}:{i + 1} a comment ends in a line "
+                            f"continuation and the next line is live code "
+                            f"({nxt!r}) -- a multi-line @token@ was expanded "
+                            f"inside a comment")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -63,9 +63,13 @@ RETRY_TIMEOUTS="${RETRY_TIMEOUTS:-1}"
 # case). TIMESTAMP below is recomputed on every invocation, so every run
 # gets a virgin RUN_DIR; an externally-passed --resume would have had
 # nothing to resume into. What "resume" actually means now lives entirely
-# inside section [3]: the retry loop reruns @agentic_client_command@ with
+# inside section [3]: the retry loop reruns the generated client command with
 # AgentCAP's own --resume across attempts of ONE invocation, driven by
 # swebench_run_audit rather than by a flag on this script.
+#
+# (Deliberately not naming that placeholder here: generate.py substitutes
+# tokens everywhere, comments included, and this one expands to a multi-line
+# command whose continuation lines then land in the script as live code.)
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --namespace)   NAMESPACE="$2"; shift 2 ;;
