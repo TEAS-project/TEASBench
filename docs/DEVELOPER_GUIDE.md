@@ -400,6 +400,7 @@ non-driver callers are unaffected.
 | `TEASBENCH_PF_PROBE_FAILURES` | `2` | consecutive probe failures before the babysitter restarts the tunnel |
 | `TEASBENCH_PF_MAX_RESTARTS` | `20` | cap on babysitter restarts per sandbox before giving up (emits `pf_unrecoverable`) |
 | `TEASBENCH_PF_BACKOFF_MAX` | `30` | cap, in seconds, on the exponential backoff between restarts |
+| `SWEREX_NUM_RETRIES` | `3` | transport-level retries per swe-rex request, once `patch_swerex_retries.py` is applied. The babysitter restarts a dropped tunnel almost immediately, but only a retry re-sends the request that died with it; `0` restores stock swe-rex behaviour |
 
 The driver sets `TEASBENCH_PF_EVENTS` and `TEASBENCH_PF_LOG_DIR` for every
 run; the probe/restart/backoff knobs are exposed for tuning but have no

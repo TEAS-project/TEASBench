@@ -418,7 +418,7 @@ override):
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `MAX_ATTEMPTS` | `2` | total client invocations, including the first |
+| `MAX_ATTEMPTS` | `6` | backstop on total client invocations, including the first. The loop normally exits earlier -- when the retry list is empty, or when an attempt fails to shrink it |
 | `RETRY_TIMEOUTS` | `1` | also retry tasks killed by the outer per-task `timeout` (`sweagent_rc == 124`), once each |
 
 After each attempt — while attempts remain and the engine is still serving
@@ -434,6 +434,23 @@ clears the retried tasks' stream stats and trajectory files so a retry
 can't inherit an earlier attempt's numbers or patch, and the loop re-invokes
 the client with AgentCAP's own `--resume`. Full retry/do-not-retry rules are
 in the developer guide, §5.
+
+Retrying a whole task is the fallback, not the first line of defence: a tunnel
+drop should not cost the task in the first place. swe-rex already ships
+everything needed for that — `RemoteRuntime._request` has a retry loop, and
+every request carries an `X-Request-ID` the server treats as an idempotency
+key — but `num_retries` defaults to `0` and no caller overrides it, so the
+first `ServerDisconnectedError` is fatal even though the babysitter restores
+the tunnel in a millisecond or two. `pipeline/k8s/setup/patch_swerex_retries.py` turns
+the retries on, and makes the server register a request as in-flight *before*
+running it so a retry that arrives mid-execution waits for the original
+instead of putting a second command on the same shell. The client half is
+applied on the login node by `setup_swebench_env.sh`; the server half is
+applied inside each sandbox pod, which pip-installs swe-rex at startup.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `SWEREX_NUM_RETRIES` | `3` | transport-level retries per swe-rex request. `0` restores stock behaviour |
 
 #### Completeness gate
 

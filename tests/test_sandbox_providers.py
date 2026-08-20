@@ -213,6 +213,41 @@ class SandboxJobSpecTests(unittest.TestCase):
             "limits": {"cpu": "7", "memory": "25Gi"},
         })
 
+    def test_pod_applies_the_swerex_server_patch_before_serving(self):
+        """The retries the client now performs are only safe because the server
+        awaits an in-flight duplicate instead of running it twice, and the
+        server lives in the pod, not on the login node. If this drops out of
+        the pod command, retries silently become able to put two commands on
+        one shell."""
+        args = _sandbox_job_spec("ns", "q", "img", "tok", 9999)[
+            "spec"]["template"]["spec"]["containers"][0]["args"][0]
+        self.assertIn("TEASBENCH_SWEREX_INFLIGHT_DEDUPE_PATCH_APPLIED", args)
+        # Ordering is load-bearing in both directions: patch after the install
+        # (nothing to patch before it) and before the server starts (patching a
+        # running server does nothing).
+        self.assertLess(args.index("pip install"),
+                        args.index("TEASBENCH_SWEREX_PATCH_EOF"))
+        self.assertLess(args.rindex("TEASBENCH_SWEREX_PATCH_EOF"),
+                        args.index("exec python3 -m swerex"))
+
+    def test_pod_command_is_valid_shell(self):
+        """The patch source is embedded in a heredoc; a quoting slip would only
+        show up as a pod that dies at startup, mid-run."""
+        args = _sandbox_job_spec("ns", "q", "img", "tok", 9999)[
+            "spec"]["template"]["spec"]["containers"][0]["args"][0]
+        proc = subprocess.run(["bash", "-n"], input=args, text=True,
+                              capture_output=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_embedded_patch_source_is_the_real_script(self):
+        """Read from disk rather than duplicated, so the pod's server half and
+        the login node's client half cannot drift apart."""
+        args = _sandbox_job_spec("ns", "q", "img", "tok", 9999)[
+            "spec"]["template"]["spec"]["containers"][0]["args"][0]
+        script = (Path(__file__).resolve().parents[1] / "pipeline" / "k8s"
+                  / "setup" / "patch_swerex_retries.py").read_text()
+        self.assertIn(script, args)
+
 
 class InClusterK8sProviderTests(unittest.TestCase):
     """B2: the default in-cluster provider."""

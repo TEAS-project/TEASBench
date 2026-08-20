@@ -367,6 +367,19 @@ else
     fi
 fi
 
+# Enable swe-rex's own request retries. Separate from the is_alive patch above
+# and doing a different job: is_alive keeps a *recoverable* error recoverable,
+# this keeps a dropped tunnel from producing an error at all. swe-rex ships the
+# retry loop and the X-Request-ID idempotency key already, but defaults
+# num_retries to 0 and never overrides it, so the first ServerDisconnectedError
+# on any request kills the task. The same script also makes the server await an
+# in-flight duplicate instead of executing it twice, which is what makes the
+# retries safe; that half only matters inside the sandbox pod, where
+# _sandbox_job_spec applies it, but it is harmless (and idempotent) here.
+"$PY" "$TEASBENCH_ROOT/pipeline/k8s/setup/patch_swerex_retries.py" \
+    || die "patch_swerex_retries.py failed -- see the error above"
+did "swe-rex request retries enabled (SWEREX_NUM_RETRIES, default 3)"
+
 # ------------------------------------------------------------- kubectl -----
 step 6 "kubectl"
 if command -v kubectl > /dev/null; then

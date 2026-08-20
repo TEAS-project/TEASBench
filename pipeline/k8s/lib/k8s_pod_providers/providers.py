@@ -74,6 +74,7 @@ import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -120,6 +121,20 @@ def _resource_limits():
     }
 
 
+def _swerex_server_patch_source():
+    """Source of the swe-rex patch script, to run inside the sandbox pod.
+
+    The pod pip-installs swe-rex at startup, so the server half of the patch
+    (in-flight duplicate requests await the original instead of executing a
+    second time) has to be applied there rather than on the login node. Read
+    from the one file that also patches the client side, so the two halves
+    cannot drift apart. The script no-ops on the half that does not apply.
+    """
+    path = (Path(__file__).resolve().parents[2]
+            / "setup" / "patch_swerex_retries.py")
+    return path.read_text(encoding="utf-8")
+
+
 def _sandbox_job_spec(namespace, queue, image, token, port):
     """Job spec for a swe-rex sandbox pod. Shared by InClusterK8sProvider
     and PortForwardK8sProvider - only how they *connect* to the resulting
@@ -146,9 +161,19 @@ def _sandbox_job_spec(namespace, queue, image, token, port):
                         "image": image,
                         "command": ["/bin/bash", "-c"],
                         "args": [
+                            # The heredoc delimiter is quoted, so the patch
+                            # source passes through the shell untouched. `set
+                            # -e` means a failed patch fails the pod at
+                            # startup rather than silently leaving retries
+                            # unsafe -- a loud failure before any task runs,
+                            # which the port-forward preflight also checks
+                            # for.
                             "set -e; "
                             "git config --global --add safe.directory '*'; "
-                            f"python3 -m pip install --quiet --no-input '{swerex_spec}' && "
+                            f"python3 -m pip install --quiet --no-input '{swerex_spec}'\n"
+                            "python3 - <<'TEASBENCH_SWEREX_PATCH_EOF'\n"
+                            f"{_swerex_server_patch_source()}\n"
+                            "TEASBENCH_SWEREX_PATCH_EOF\n"
                             f"exec python3 -m swerex --port {port} --auth-token {token}"
                         ],
                         "ports": [{"containerPort": port}],

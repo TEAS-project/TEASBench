@@ -431,6 +431,23 @@ class LoginNodeDriverGenerationTests(unittest.TestCase):
     def test_drivers_were_generated(self):
         self.assertTrue(self.drivers, "no driver .sh generated for swe-bench-lite on k8s")
 
+    def test_retry_loop_keeps_going_and_stops_on_no_progress(self):
+        """With MAX_ATTEMPTS at 2 the loop gets exactly one retry, which
+        clears only part of the infrastructure backlog and leaves the rest to
+        be caught by the completeness gate. The loop has to keep going while it
+        is still shrinking the retry list -- and stop when it is not, so a
+        cluster dropping tunnels faster than tasks finish cannot burn every
+        attempt for nothing."""
+        for driver in self.drivers:
+            with self.subTest(driver=driver.name):
+                body = driver.read_text()
+                self.assertIn('MAX_ATTEMPTS="${MAX_ATTEMPTS:-6}"', body)
+                self.assertIn("PREV_RETRY_COUNT", body)
+                self.assertIn(
+                    'if [ -n "$PREV_RETRY_COUNT" ] && '
+                    '[ "$RETRY_COUNT" -ge "$PREV_RETRY_COUNT" ]; then',
+                    body)
+
     def test_driver_runs_to_arg_parsing(self):
         """`--help` exits 0, which means everything above the arg loop ran
         under `set -u`. That is the region placeholder expansion corrupts, and

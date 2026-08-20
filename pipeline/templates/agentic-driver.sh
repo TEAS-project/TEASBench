@@ -55,7 +55,7 @@ PUSH=1
 # Driver-level retry knobs (CONTRACT.md "Environment variables"): env only,
 # not CLI flags, since they tune section [3]'s internal retry loop rather
 # than anything a one-off invocation needs to override per-run.
-MAX_ATTEMPTS="${MAX_ATTEMPTS:-2}"
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-6}"
 RETRY_TIMEOUTS="${RETRY_TIMEOUTS:-1}"
 
 # No --resume flag here (there used to be one: it set $RESUME and nothing
@@ -429,13 +429,16 @@ fi
 unset _teas_cpu_type _teas_num_cpus
 @teas_env_exports@
 
-# Bounded retry loop, not a single shot: in the evidence run 8 of 100 tasks
-# died purely from a dropped sandbox tunnel (ServerDisconnectedError out of
-# swerex/runtime/remote.py) and the run still exited 0 -- infra noise, not a
-# real SWE-agent failure, and worth one automatic retry. swebench_run_audit
-# draws the line between the two (CONTRACT.md "Retry classification
-# rules"); this loop just drives it: run, classify, prune, resume, up to
-# MAX_ATTEMPTS times, stopping the moment there is nothing left to gain.
+# Retry until the infrastructure-failure list is empty, not a single shot:
+# tasks die purely from a dropped sandbox tunnel (ServerDisconnectedError out
+# of swerex/runtime/remote.py) and the run still exits 0 -- infra noise, not a
+# real SWE-agent failure. swebench_run_audit draws the line between the two
+# (CONTRACT.md "Retry classification rules"); this loop just drives it: run,
+# classify, prune, resume, repeat. It stops on the first of three conditions:
+# the retry list is empty (the intended exit), an attempt made no progress, or
+# MAX_ATTEMPTS is reached. A single retry is not enough: one pass typically
+# clears only part of the backlog, and whatever it leaves behind is lost to the
+# completeness gate unless the loop is allowed to keep going.
 # Marks the start of the benchmark work itself (not prereqs, not engine
 # startup), for the --wall-time-s passed to `swebench_run_audit teas-output`
 # after this loop finishes -- the same scope AgentCAP's own internal wall-time
@@ -444,6 +447,7 @@ RUN_START_TIME=$(date +%s)
 ATTEMPT=1
 RESUME_FLAG=""
 RC=1
+PREV_RETRY_COUNT=""
 while :; do
     echo
     if [ -n "$RESUME_FLAG" ]; then
@@ -477,6 +481,19 @@ while :; do
         break
     fi
     echo "  $RETRY_COUNT task(s) eligible for retry"
+
+    # Stop as soon as an attempt stops buying anything. MAX_ATTEMPTS is the
+    # backstop, not the plan: the loop is meant to run until the retry list is
+    # empty, and this is what keeps "until empty" from turning into "until the
+    # budget runs out" when the cluster is dropping tunnels faster than the
+    # agent can finish a task. A strictly-shrinking list is the progress
+    # signal: a shorter list than last time is worth another pass, two
+    # attempts that leave the same count are not.
+    if [ -n "$PREV_RETRY_COUNT" ] && [ "$RETRY_COUNT" -ge "$PREV_RETRY_COUNT" ]; then
+        echo "  no progress since the previous attempt ($PREV_RETRY_COUNT -> $RETRY_COUNT) -- not retrying again"
+        break
+    fi
+    PREV_RETRY_COUNT="$RETRY_COUNT"
 
     python -m swebench_run_audit prune "$RUN_DIR" --tasks-file "$RETRY_LIST_FILE" --attempt "$ATTEMPT"
     PRUNE_RC=$?
