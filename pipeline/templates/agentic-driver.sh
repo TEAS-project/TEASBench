@@ -90,6 +90,19 @@ RUN_DIR="$OUTPUT_ROOT/$RUN_NAME/$TIMESTAMP"
 mkdir -p "$RUN_DIR" || { echo "ERROR: could not create $RUN_DIR" >&2; exit 1; }
 [ -w "$RUN_DIR" ] || { echo "ERROR: $RUN_DIR exists but is not writable" >&2; exit 1; }
 
+# From here on, everything this script writes to stdout/stderr -- including
+# from the babysitter subshell and cleanup() below, both of which inherit
+# fds from this point -- goes to a log file alongside the rest of this run's
+# outputs, named after the script itself so a later reader can tell which
+# generated driver produced it without opening the file. Named after
+# BASH_SOURCE rather than RUN_NAME: the two are the same by construction
+# (RUN_NAME="@name_k8s@" and the file is generated as @name_k8s@.sh), but
+# BASH_SOURCE is what is actually true if this script is ever invoked under
+# a different filename.
+LOG_FILE="$RUN_DIR/$(basename "${BASH_SOURCE[0]}" .sh).log"
+echo "logging all output to $LOG_FILE"
+exec &> "$LOG_FILE"
+
 # One run per output dir. flock is present on the EIDF login nodes; where it is
 # not (macOS, minimal images) carry on rather than aborting -- an absent flock
 # previously reported "another driver is already active", which is both wrong
