@@ -1396,7 +1396,12 @@ rules:
         kubectl config use-context in-cluster
         kubectl get pods > /dev/null
 
-        pip install --quiet 'swe-rex>=1.4.0' swebench
+        # swebench capped below 5 for the same reason as the login-node path
+        # (see SWEBENCH_SPEC in pipeline/k8s/setup/setup_swebench_env.sh):
+        # swebench 5 moved swebench.harness.test_spec, which AgentCAP imports
+        # to load task specs, so an unpinned install aborts the run before its
+        # first task.
+        pip install --quiet 'swe-rex>=1.4.0' 'swebench>=2.0,<5'
 
         echo "Cloning SWE-agent..."
         rm -rf /dev/shm/swe_agent

@@ -188,8 +188,18 @@ chk "can create jobs"                 "[ \"\$(kubectl -n '$NAMESPACE' auth can-i
 chk "can create pods/portforward"     "[ \"\$(kubectl -n '$NAMESPACE' auth can-i create pods/portforward)\" = yes ]" \
     "Without this the driver cannot reach the engine or any sandbox."
 chk "agent_cap importable"            "python3 -c 'import agent_cap'"
-chk "swe-rex importable"              "python3 -c 'import swerex'"
-chk "swebench importable"             "python3 -c 'import swebench'"
+# Version, not just importability: a package upgraded out from under the pin
+# still imports and then fails deep in the run. swebench 5 moved
+# swebench.harness.test_spec, which AgentCAP imports to load task specs, so an
+# unpinned upgrade aborted a run after the engine was already up and holding
+# GPUs. The specs come from env.sh, so this asserts the venv still matches what
+# setup_swebench_env.sh built it to be.
+chk "swe-rex satisfies ${TEASBENCH_SWEREX_SPEC:-<unset>}" \
+    "python -m version_check swe-rex '${TEASBENCH_SWEREX_SPEC:-}'" \
+    "Re-run setup_swebench_env.sh; something changed the venv since it last ran."
+chk "swebench satisfies ${TEASBENCH_SWEBENCH_SPEC:-<unset>}" \
+    "python -m version_check swebench '${TEASBENCH_SWEBENCH_SPEC:-}'" \
+    "Re-run setup_swebench_env.sh; something changed the venv since it last ran."
 # The path is spelled out because a ModuleNotFoundError names the module but
 # never the directory searched, and $TEASBENCH_ROOT is the one variable here
 # that no other check exercises -- so a stale one shows up only as this.

@@ -38,7 +38,13 @@ SWEAGENT_REPO="${SWEAGENT_REPO:-https://github.com/SWE-agent/SWE-agent.git}"
 #   SWEAGENT_REF=v1.1.0 bash pipeline/k8s/setup/setup_swebench_env.sh
 SWEAGENT_REF="${SWEAGENT_REF:-3ea751c087f32b16e039a2233dd6eefecef325d5}"
 SWEREX_SPEC="${SWEREX_SPEC:-swe-rex>=1.4.0}"
-SWEBENCH_SPEC="${SWEBENCH_SPEC:-swebench>=2.0}"
+# Capped below 5: swebench 5 moved the module this pipeline loads task specs
+# from, so AgentCAP aborts before the first task with
+#   ModuleNotFoundError: No module named 'swebench.harness.test_spec'
+# Lift the cap only together with the AgentCAP import that depends on it
+# (agent_cap/runner/unified_runner.py, `from swebench.harness.test_spec.python
+# import MAP_REPO_VERSION_TO_SPECS`).
+SWEBENCH_SPEC="${SWEBENCH_SPEC:-swebench>=2.0,<5}"
 PYTHON="${PYTHON:-python3}"
 FORCE=0
 # Namespace the driver operates in, and the k8s secret it reads GIT_TOKEN from
@@ -103,6 +109,13 @@ export TEASBENCH_ROOT="$TEASBENCH_ROOT"
 export AGENTCAP_DIR="$AGENTCAP_DIR"
 export SWEAGENT_DIR="$SWEAGENT_DIR"
 export TEASBENCH_VERSIONS_FILE="$PREFIX/versions.json"
+
+# The specs this environment was built to satisfy. The driver re-checks the
+# installed versions against them before starting: importability alone lets a
+# package that has since been upgraded out from under the pin (swebench 5)
+# through, and it then fails deep inside a run rather than in prerequisites.
+export TEASBENCH_SWEREX_SPEC="$SWEREX_SPEC"
+export TEASBENCH_SWEBENCH_SPEC="$SWEBENCH_SPEC"
 
 # Namespace to operate in, and the k8s secret (key 'token') the driver reads
 # GIT_TOKEN from at push time -- see templates/agentic-driver.sh step [5].
@@ -195,49 +208,11 @@ step 3 "swe-rex and swebench"
 # *installed* distribution against the spec's constraint with
 # importlib.metadata (stdlib only, no `packaging` dep -- this runs against a
 # bare venv). If it doesn't satisfy, upgrade and re-check once before die-ing.
+# Shared with the generated driver, which re-checks these same specs in its
+# prerequisites -- see pipeline/k8s/lib/version_check.py.
 version_satisfies() {
     # $1 = distribution name (importlib.metadata key), $2 = full spec, e.g. "swe-rex>=1.4.0"
-    "$PY" - "$1" "$2" <<'PYEOF'
-import re, sys
-from importlib import metadata
-
-dist_name, spec = sys.argv[1], sys.argv[2]
-constraint = re.sub(r'^[A-Za-z0-9_.-]+', '', spec).strip()
-
-try:
-    installed = metadata.version(dist_name)
-except metadata.PackageNotFoundError:
-    sys.exit(1)
-
-def parse_ver(v):
-    out = []
-    for p in v.split('.'):
-        m = re.match(r'\d+', p)
-        out.append(int(m.group()) if m else 0)
-    return out
-
-def cmp_ver(a, b):
-    la, lb = parse_ver(a), parse_ver(b)
-    n = max(len(la), len(lb))
-    la += [0] * (n - len(la))
-    lb += [0] * (n - len(lb))
-    return (la > lb) - (la < lb)
-
-ops = {'>=': lambda c: c >= 0, '<=': lambda c: c <= 0, '==': lambda c: c == 0,
-       '!=': lambda c: c != 0, '>': lambda c: c > 0, '<': lambda c: c < 0}
-
-for part in constraint.split(','):
-    part = part.strip()
-    if not part:
-        continue
-    m = re.match(r'^(>=|<=|==|!=|>|<)\s*(.+)$', part)
-    if not m:
-        continue
-    op, ver = m.group(1), m.group(2).strip()
-    if not ops[op](cmp_ver(installed, ver)):
-        sys.exit(1)
-sys.exit(0)
-PYEOF
+    "$PY" "$TEASBENCH_ROOT/pipeline/k8s/lib/version_check.py" "$1" "$2" > /dev/null 2>&1
 }
 
 for spec in "$SWEREX_SPEC" "$SWEBENCH_SPEC"; do
