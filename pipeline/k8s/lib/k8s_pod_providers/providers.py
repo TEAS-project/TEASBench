@@ -171,7 +171,14 @@ def _sandbox_job_spec(namespace, queue, image, token, port):
                             "set -e; "
                             "git config --global --add safe.directory '*'; "
                             f"python3 -m pip install --quiet --no-input '{swerex_spec}'\n"
-                            "python3 - <<'TEASBENCH_SWEREX_PATCH_EOF'\n"
+                            # --require server: a pod has no client to
+                            # patch. aiohttp is not a swe-rex dependency and
+                            # only the login node installs it, so importing
+                            # the client module here raises ModuleNotFoundError
+                            # -- which must not be treated as a failure, or
+                            # `set -e` takes the pod down before it serves.
+                            "python3 - --require server "
+                            "<<'TEASBENCH_SWEREX_PATCH_EOF'\n"
                             f"{_swerex_server_patch_source()}\n"
                             "TEASBENCH_SWEREX_PATCH_EOF\n"
                             f"exec python3 -m swerex --port {port} --auth-token {token}"

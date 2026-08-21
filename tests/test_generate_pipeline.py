@@ -431,6 +431,22 @@ class LoginNodeDriverGenerationTests(unittest.TestCase):
     def test_drivers_were_generated(self):
         self.assertTrue(self.drivers, "no driver .sh generated for swe-bench-lite on k8s")
 
+    def test_real_image_preflight_gates_the_run_before_the_engine_starts(self):
+        """The sandbox pod command runs nowhere but inside a pod, so a mistake
+        in it is invisible until every task has burned its 600s sandbox
+        timeout. Only --real-image exercises it: the default preflight swaps in
+        a busybox httpd and never runs the swe-rex install at all. The gate
+        must also sit ahead of section [2], or a failure costs GPU time."""
+        for driver in self.drivers:
+            with self.subTest(driver=driver.name):
+                body = driver.read_text()
+                self.assertIn("preflight_portforward.py", body)
+                self.assertIn("--real-image", body)
+                self.assertIn("SKIP_PREFLIGHT", body)
+                self.assertLess(body.index("preflight_portforward.py"),
+                                body.index("[2] Starting the engine"),
+                                "preflight must gate the run before the GPU job")
+
     def test_retry_loop_keeps_going_and_stops_on_no_progress(self):
         """With MAX_ATTEMPTS at 2 the loop gets exactly one retry, which
         clears only part of the infrastructure backlog and leaves the rest to

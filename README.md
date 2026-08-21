@@ -420,6 +420,7 @@ override):
 |---|---|---|
 | `MAX_ATTEMPTS` | `6` | backstop on total client invocations, including the first. The loop normally exits earlier -- when the retry list is empty, or when an attempt fails to shrink it |
 | `RETRY_TIMEOUTS` | `1` | also retry tasks killed by the outer per-task `timeout` (`sweagent_rc == 124`), once each |
+| `SKIP_PREFLIGHT` | `0` | set to `1` to bypass the real-image sandbox preflight in step `[1b]`. That gate pulls a real SWE-bench instance image and proves a sandbox pod actually serves swe-rex before any GPU is claimed — it is the only check that exercises the pod command, which otherwise fails invisibly until every task has burned its 600s sandbox timeout |
 
 After each attempt — while attempts remain and the engine is still serving
 `/v1/models` — `swebench_run_audit retry-list` decides which tasks to re-run:

@@ -232,6 +232,48 @@ chk "SWE-agent streaming-patched"     "grep -q AGENTCAP_STREAMING_PATCH_APPLIED 
 [ $fail -eq 0 ] || { echo; echo "Prerequisites failed -- nothing started."; exit 1; }
 
 echo
+echo "[1b] Sandbox preflight (real instance image)"
+# A gate, not a smoke test, and it runs before section [2] so a failure costs
+# no GPU time.
+#
+# The sandbox pod command is assembled in providers.py and only ever runs
+# inside a pod: nothing above exercises it, and a mistake there is invisible
+# until all 100 tasks have each burned their 600s sandbox timeout with
+# "swerex not alive". Checks [1] cannot see it either -- they only prove the
+# login node's own venv is sane.
+#
+# --real-image is the only mode that runs what a task actually gets. The
+# default preflight swaps the container for a busybox httpd, so the swe-rex
+# install and everything layered on it never execute, and a broken pod command
+# sails straight through.
+#   --skip-exec: the exec container is a separate job spec unrelated to the
+#     sandbox pod command; skipping it avoids a second multi-GB pull.
+#   --no-fault-injection: babysitter recovery is covered by unit tests and
+#     journalled on every real run. It adds ~90s and proves nothing this gate
+#     is asking about.
+# The queue is passed explicitly: the provider honours TEASBENCH_K8S_QUEUE but
+# the preflight does not, so leaving it implicit would gate on a queue the run
+# is not going to use.
+if [ "${SKIP_PREFLIGHT:-0}" = 1 ]; then
+    echo "  skipped (SKIP_PREFLIGHT=1)"
+else
+    echo "  pulling a real instance image and starting a sandbox -- takes minutes"
+    if PYTHONPATH="$TEASBENCH_ROOT/pipeline/k8s/lib${PYTHONPATH:+:$PYTHONPATH}" \
+       python "$TEASBENCH_ROOT/pipeline/k8s/preflight/preflight_portforward.py" \
+           --namespace "$NAMESPACE" \
+           --queue "${TEASBENCH_K8S_QUEUE:-$NAMESPACE-user-queue}" \
+           --real-image --skip-exec --no-fault-injection; then
+        echo "  ok    sandbox pods serve swe-rex in the real instance image"
+    else
+        echo
+        echo "Sandbox preflight failed -- nothing started, no GPU claimed."
+        echo "Every task would have failed with 'swerex not alive after 600s'."
+        echo "The FAIL lines above say why. SKIP_PREFLIGHT=1 bypasses this gate."
+        exit 1
+    fi
+fi
+
+echo
 echo "[2] Starting the engine (GPU Job)"
 ENGINE_JOB=$(kubectl -n "$NAMESPACE" create -f "$ENGINE_MANIFEST" -o jsonpath='{.metadata.name}')
 [ -n "$ENGINE_JOB" ] || { echo "ERROR: engine Job not created" >&2; exit 1; }

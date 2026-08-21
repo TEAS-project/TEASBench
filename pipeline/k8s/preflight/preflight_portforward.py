@@ -420,7 +420,17 @@ def main():
 
     print("=" * 62)
     print(f"PortForwardK8sProvider preflight (namespace {ns})")
-    print(f"target image: {CHECK_IMAGE}   (no GPU requested)")
+    # Name the image actually used. Printing CHECK_IMAGE unconditionally said
+    # "busybox" even under --real-image, i.e. the exact opposite of what the
+    # run had just proved -- and the substitution this banner was hiding is
+    # what lets a broken sandbox pod command pass a preflight unnoticed.
+    if args.real_image:
+        print(f"target image: {swebench_image(args.real_image)}")
+        print(f"              (REAL instance image: {args.real_image}, no GPU requested)")
+    else:
+        print(f"target image: {CHECK_IMAGE}   (no GPU requested)")
+        print("              substitutes for the sandbox container: the real")
+        print("              swe-rex install is NOT exercised -- use --real-image")
     print("=" * 62)
 
     if not check_kubectl(ns):

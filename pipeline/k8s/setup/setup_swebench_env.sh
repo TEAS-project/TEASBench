@@ -376,7 +376,7 @@ fi
 # in-flight duplicate instead of executing it twice, which is what makes the
 # retries safe; that half only matters inside the sandbox pod, where
 # _sandbox_job_spec applies it, but it is harmless (and idempotent) here.
-"$PY" "$TEASBENCH_ROOT/pipeline/k8s/setup/patch_swerex_retries.py" \
+"$PY" "$TEASBENCH_ROOT/pipeline/k8s/setup/patch_swerex_retries.py" --require client \
     || die "patch_swerex_retries.py failed -- see the error above"
 did "swe-rex request retries enabled (SWEREX_NUM_RETRIES, default 3)"
 

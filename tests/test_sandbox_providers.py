@@ -4,6 +4,7 @@ are monkeypatched with in-process fakes that never touch a real process
 or socket beyond the OS-local free-port lookup used by
 PortForwardK8sProvider (a loopback bind, not a network call)."""
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -21,6 +22,15 @@ sys.path.insert(0, str(REPO / "pipeline" / "k8s" / "lib"))
 # From the module, not the package: SandboxEndpoint and the private
 # _sandbox_job_spec are implementation detail that __init__ deliberately does
 # not re-export (only the two provider classes are public API).
+_PATCH_SCRIPT = (Path(__file__).resolve().parents[1] / "pipeline" / "k8s"
+                 / "setup" / "patch_swerex_retries.py")
+_spec = importlib.util.spec_from_file_location("patch_swerex_retries", _PATCH_SCRIPT)
+patch_swerex_retries = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(patch_swerex_retries)
+# The fixture below must be text the patch actually recognises, so take it from
+# the patch itself rather than keeping a copy that can quietly drift.
+OLD_MIDDLEWARE_TEXT = patch_swerex_retries.OLD_MIDDLEWARE
+
 from k8s_pod_providers.providers import (
     InClusterK8sProvider,
     PortForwardK8sProvider,
@@ -247,6 +257,73 @@ class SandboxJobSpecTests(unittest.TestCase):
         script = (Path(__file__).resolve().parents[1] / "pipeline" / "k8s"
                   / "setup" / "patch_swerex_retries.py").read_text()
         self.assertIn(script, args)
+
+    def test_pod_patch_survives_a_client_that_cannot_import(self):
+        """A sandbox pod has no aiohttp -- it is not a swe-rex dependency, and
+        only the login node installs it -- so importing the *client* module
+        there raises ModuleNotFoundError. The patch must treat that as "not
+        applicable", not as failure: under the pod's `set -e` a non-zero exit
+        kills the container before it serves, and every task in the run then
+        dies with `swerex not alive`."""
+        script = (Path(__file__).resolve().parents[1] / "pipeline" / "k8s"
+                  / "setup" / "patch_swerex_retries.py")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pkg = root / "swerex"
+            (pkg / "runtime").mkdir(parents=True)
+            (pkg / "__init__.py").write_text("")
+            (pkg / "runtime" / "__init__.py").write_text("")
+            # Stands in for the real client module, which drags in aiohttp.
+            (pkg / "runtime" / "remote.py").write_text(
+                "import aiohttp_not_installed_in_pods\n")
+            # Minimal but faithful copy of the two spots the server half edits.
+            (pkg / "server.py").write_text(
+                "class ResponseManager:\n"
+                "    def __init__(self):\n"
+                "        self.last_processed_request_id = None\n"
+                "        self.last_processed_response = None\n"
+                "\n"
+                "    def get_response(self, request_id):\n"
+                "        if request_id == self.last_processed_request_id:\n"
+                "            return self.last_processed_response\n"
+                "        return None\n"
+                "\n"
+                "    def set_response(self, request_id, response):\n"
+                "        self.last_processed_request_id = request_id\n"
+                "        self.last_processed_response = response\n"
+                "\n"
+                "\n"
+                "async def handle_request_id(request, call_next):\n"
+                + OLD_MIDDLEWARE_TEXT + "\n")
+            env = dict(os.environ, PYTHONPATH=str(root))
+            proc = subprocess.run(
+                [sys.executable, str(script), "--require", "server"],
+                capture_output=True, text=True, env=env, cwd=td)
+            self.assertEqual(proc.returncode, 0,
+                             f"pod patch failed:\n{proc.stdout}\n{proc.stderr}")
+            self.assertIn("client: not applicable here", proc.stdout)
+            self.assertIn("wait_for_in_flight", (pkg / "server.py").read_text())
+
+    def test_require_client_still_fails_when_the_client_is_missing(self):
+        """The flip side: skipping must not become a silent pass on the login
+        node, where the client half is the one that matters."""
+        script = (Path(__file__).resolve().parents[1] / "pipeline" / "k8s"
+                  / "setup" / "patch_swerex_retries.py")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pkg = root / "swerex"
+            (pkg / "runtime").mkdir(parents=True)
+            (pkg / "__init__.py").write_text("")
+            (pkg / "runtime" / "__init__.py").write_text("")
+            (pkg / "runtime" / "remote.py").write_text(
+                "import aiohttp_not_installed_in_pods\n")
+            (pkg / "server.py").write_text("")
+            env = dict(os.environ, PYTHONPATH=str(root))
+            proc = subprocess.run(
+                [sys.executable, str(script), "--require", "client"],
+                capture_output=True, text=True, env=env, cwd=td)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("--require client", proc.stderr)
 
 
 class InClusterK8sProviderTests(unittest.TestCase):

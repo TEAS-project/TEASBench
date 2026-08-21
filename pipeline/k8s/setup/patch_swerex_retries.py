@@ -37,10 +37,18 @@ runs the action a second time. For `run_in_session` that puts two commands on
 one shell at once. This script therefore also registers a request as in-flight
 *before* it runs, so a duplicate awaits the original instead of racing it.
 
-Both halves are needed, and both are applied here: the client half matters on
-the login node, the server half matters inside the sandbox pod. The same script
-runs in both places -- swerex ships both files -- and each half is skipped where
-it is already correct.
+Both halves are needed, and they live in different places: the client half
+matters on the login node, the server half inside the sandbox pod. The same
+script runs in both, and each half is skipped where it does not apply.
+
+That split is not cosmetic. `aiohttp` is NOT a swe-rex dependency -- only the
+client needs it, and only the login node installs it (SWE-agent pulls it in).
+A sandbox pod runs `python3 -m swerex`, which imports cleanly without it. So
+importing the client module inside a pod raises ModuleNotFoundError, and a
+script that treats that as failure kills every pod at startup under `set -e`.
+Hence: an un-importable half is "not applicable here", not an error -- and
+`--require` lets each caller name the half it actually depends on, so a real
+failure still fails loudly where it matters.
 
 The client half reads SWEREX_NUM_RETRIES from the environment (default 3)
 rather than adding a config field. A field is the right shape upstream, and is
@@ -50,13 +58,22 @@ changing a pydantic model that SWE-agent constructs.
 Idempotent: re-running is a no-op, and if a future swe-rex fixes either half
 upstream the script detects it and leaves that file alone.
 
-Usage:  python patch_swerex_retries.py
+Usage:  python patch_swerex_retries.py [--require client|server|both]
+        --require names the half that MUST be applied here; the other is
+        applied opportunistically and skipped if its module will not import.
+        The sandbox pod passes `server`, the login node passes `client`.
 Exit:   0 patched or already fine, 1 could not patch (message on stderr).
 """
 
+import argparse
 import re
 import sys
 from pathlib import Path
+
+# Return values for the two halves.
+APPLIED = "applied"     # patched now, or already correct
+SKIPPED = "skipped"     # not applicable in this environment
+FAILED = "failed"       # importable, but could not be patched
 
 CLIENT_MARKER = "TEASBENCH_SWEREX_REQUEST_RETRIES_PATCH_APPLIED"
 SERVER_MARKER = "TEASBENCH_SWEREX_INFLIGHT_DEDUPE_PATCH_APPLIED"
@@ -85,15 +102,21 @@ NEW_REQUEST_SIG = '''{i}async def _request(self, endpoint: str, payload: BaseMod
 def patch_client():
     try:
         from swerex.runtime import remote as remote_mod
+    except ImportError as exc:
+        # Almost always `aiohttp` missing, which means this is a sandbox pod:
+        # it runs the server only and has no client to patch. Not an error.
+        print(f"client: not applicable here ({exc})")
+        return SKIPPED
     except Exception as exc:
-        return fail(f"cannot import swerex.runtime.remote: {exc}")
+        fail(f"cannot import swerex.runtime.remote: {exc}")
+        return FAILED
 
     path = Path(remote_mod.__file__)
     src = path.read_text(encoding="utf-8")
 
     if CLIENT_MARKER in src:
         print(f"client: already patched ({path})")
-        return 0
+        return APPLIED
 
     matches = OLD_REQUEST_SIG_RE.findall(src)
     if len(matches) != 1:
@@ -104,8 +127,8 @@ def patch_client():
                 f"client: `_request` no longer defaults num_retries to 0 in {path}; "
                 "assuming upstream fixed this and leaving it alone"
             )
-            return 0
-        return fail(
+            return APPLIED
+        return _failed(
             f"expected exactly one `_request(..., num_retries: int = 0)` definition in "
             f"{path}, found {len(matches)}. swe-rex's layout has changed; re-check "
             "whether this patch is still needed before forcing it."
@@ -122,10 +145,10 @@ def patch_client():
     try:
         path.write_text(patched, encoding="utf-8")
     except OSError as exc:
-        return fail(f"cannot write {path}: {exc}")
+        return _failed(f"cannot write {path}: {exc}")
     print(f"client: patched {path} (default {DEFAULT_NUM_RETRIES} retries, "
           "override with SWEREX_NUM_RETRIES)")
-    return 0
+    return APPLIED
 
 
 # --------------------------------------------------------------------------
@@ -229,27 +252,31 @@ NEW_MIDDLEWARE = '''    request_id = request.headers.get("X-Request-ID")
 def patch_server():
     try:
         from swerex import server as server_mod
+    except ImportError as exc:
+        print(f"server: not applicable here ({exc})")
+        return SKIPPED
     except Exception as exc:
-        return fail(f"cannot import swerex.server: {exc}")
+        fail(f"cannot import swerex.server: {exc}")
+        return FAILED
 
     path = Path(server_mod.__file__)
     src = path.read_text(encoding="utf-8")
 
     if SERVER_MARKER in src:
         print(f"server: already patched ({path})")
-        return 0
+        return APPLIED
     if "wait_for_in_flight" in src:
         print(f"server: {path} already handles in-flight duplicates; leaving it alone")
-        return 0
+        return APPLIED
 
     n_init = len(OLD_MANAGER_INIT_RE.findall(src))
     if n_init != 1:
-        return fail(
+        return _failed(
             f"expected exactly one ResponseManager.__init__ of the known shape in "
             f"{path}, found {n_init}. swe-rex's layout has changed; re-check this patch."
         )
     if src.count(OLD_MIDDLEWARE) != 1:
-        return fail(
+        return _failed(
             f"the handle_request_id middleware in {path} does not match the expected "
             "text. swe-rex's layout has changed; re-check this patch."
         )
@@ -263,9 +290,9 @@ def patch_server():
     try:
         path.write_text(patched, encoding="utf-8")
     except OSError as exc:
-        return fail(f"cannot write {path}: {exc}")
+        return _failed(f"cannot write {path}: {exc}")
     print(f"server: patched {path} (in-flight duplicate requests now await the original)")
-    return 0
+    return APPLIED
 
 
 def fail(msg):
@@ -273,8 +300,35 @@ def fail(msg):
     return 1
 
 
-def main():
-    return patch_client() or patch_server()
+def _failed(msg):
+    fail(msg)
+    return FAILED
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "--require", choices=("client", "server", "both"), default="both",
+        help="the half that must be applied here; the other is opportunistic. "
+             "A sandbox pod has no client to patch (no aiohttp) and a "
+             "client-only environment may have no server, so requiring both "
+             "is right only when you know both are installed.")
+    args = ap.parse_args(argv)
+
+    results = {"client": patch_client(), "server": patch_server()}
+
+    for half, status in results.items():
+        required = args.require in (half, "both")
+        if status == FAILED:
+            # Always fatal: the module is there and we could not patch it.
+            return 1
+        if status == SKIPPED and required:
+            return fail(
+                f"--require {args.require}: the {half} half could not be applied "
+                "because its module would not import here. Retries are only safe "
+                "with both halves in place, so this is not being skipped silently."
+            )
+    return 0
 
 
 if __name__ == "__main__":
