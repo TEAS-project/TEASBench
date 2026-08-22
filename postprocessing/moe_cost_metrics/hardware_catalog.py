@@ -231,6 +231,53 @@ GPU_KEY_FALLBACK = {
 }
 
 
+# Deployment tier is an owned-hardware property, so it lives beside the price/power catalog
+# consumed by both cost producers.  A missing entry is not silently treated as datacentre:
+# choosing the wrong lifetime/utilisation pair changes every buy metric for that accelerator.
+GPU_TIER = {
+    "a100": "datacentre",
+    "h100": "datacentre",
+    "h200": "datacentre",
+    "b200": "datacentre",
+    "b300": "datacentre",
+    "mi355x": "datacentre",
+    "gb10": "workstation",
+    "blackhole-p150b": "workstation",
+    "cs3": "datacentre",
+}
+
+# Published buy-TCO defaults.  `base_lifetime_hours` is the calendar lifetime before the
+# utilisation discount; the effective amortisation window is their product.  CLI overrides are
+# resolved per run by resolve_buy_tco_assumptions, after the accelerator key is known.
+BUY_TCO_DEFAULTS_BY_TIER = {
+    "datacentre": {"base_lifetime_hours": 5 * 365 * 24, "utilisation": 0.9},
+    "workstation": {"base_lifetime_hours": 3 * 365 * 24, "utilisation": 0.4},
+}
+
+
+def resolve_buy_tco_assumptions(
+    gpu_key: str,
+    *,
+    base_lifetime_hours: float | None = None,
+    utilisation: float | None = None,
+) -> dict[str, float | str]:
+    """Resolve tier defaults plus independent explicit CLI overrides for one accelerator."""
+    tier = GPU_TIER[gpu_key]
+    defaults = BUY_TCO_DEFAULTS_BY_TIER[tier]
+    base = defaults["base_lifetime_hours"] if base_lifetime_hours is None else base_lifetime_hours
+    util = defaults["utilisation"] if utilisation is None else utilisation
+    if not isinstance(base, (int, float)) or isinstance(base, bool) or base <= 0:
+        raise ValueError("buy lifetime hours must be greater than zero")
+    if not isinstance(util, (int, float)) or isinstance(util, bool) or not (0.0 < util <= 1.0):
+        raise ValueError("utilisation must be in (0, 1]")
+    return {
+        "hardware_tier": tier,
+        "base_lifetime_hours": float(base),
+        "utilisation": float(util),
+        "lifetime_hours": float(base) * float(util),
+    }
+
+
 GPU_SPECS: dict[str, dict] = {
     "a100": {
         "price_per_unit_usd": 15000.0,

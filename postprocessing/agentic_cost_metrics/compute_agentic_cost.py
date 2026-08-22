@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -56,6 +57,7 @@ if __package__:
         CPU_SPECS,
         GPU_HOST_CPU,
         GPU_SPECS,
+        resolve_buy_tco_assumptions,
     )
 else:
     sys.path.insert(
@@ -65,14 +67,13 @@ else:
         CPU_SPECS,
         GPU_HOST_CPU,
         GPU_SPECS,
+        resolve_buy_tco_assumptions,
     )
 
 
 VASTAI_PRICING_URL = "https://vast.ai/pricing"
 DEFAULT_RENT_PRICE_SOURCE = VASTAI_PRICING_URL
 
-DEFAULT_LIFETIME_HOURS = 5 * 365 * 24
-DEFAULT_UTILISATION = 0.9
 DEFAULT_ELECTRICITY_USD_PER_KWH = 0.15
 DEFAULT_SCALE_OTHER_CAPITAL = 1.2
 
@@ -222,6 +223,19 @@ def cost_path_for(metrics_path: Path) -> Path:
     return metrics_path.with_name(_swap_prefix(metrics_path.name, "metrics", "cost"))
 
 
+def remove_cost_sidecar(metrics_path: Path, root: Path, dry_run: bool) -> None:
+    """Remove generated output when its source metrics cannot be costed."""
+    path = cost_path_for(metrics_path)
+    if not path.is_file():
+        return
+    relative = path.relative_to(root.parent)
+    if dry_run:
+        print(f"  [dry-run] would remove stale {relative}")
+        return
+    path.unlink()
+    print(f"  [removed stale] {relative}")
+
+
 def metadata_path_for(metrics_path: Path) -> Path:
     return metrics_path.with_name(_swap_prefix(metrics_path.name, "metrics", "metadata"))
 
@@ -346,10 +360,10 @@ def build_buy_pricing(
     }
 
 
-def _per_token_scale(output_tokens: float) -> float:
-    if output_tokens and output_tokens > 0:
+def _per_token_scale(output_tokens: Optional[float]) -> Optional[float]:
+    if isinstance(output_tokens, (int, float)) and math.isfinite(output_tokens) and output_tokens > 0:
         return 1_000_000.0 / output_tokens
-    return float("nan")
+    return None
 
 
 def achieved_concurrency(perf: dict, latencies: list[float], n_tasks=None) -> float:
@@ -390,8 +404,8 @@ def achieved_concurrency(perf: dict, latencies: list[float], n_tasks=None) -> fl
 
 
 def compute_costs_lumped(
-    e2e_s: float,
-    output_tokens: float,
+    e2e_s: Optional[float],
+    output_tokens: Optional[float],
     hourly_rate_usd: float,
     *,
     p50_e2e_s: Optional[float] = None,
@@ -402,45 +416,68 @@ def compute_costs_lumped(
     # C*T/e2e tasks, so cost per token is e2e*price/(C*tokens). Dividing the rate is equivalent.
     price_per_s = hourly_rate_usd / 3600.0 / max(concurrency, 1.0)
     scale = _per_token_scale(output_tokens)
-    out: dict[str, float] = {
-        "avg_cost_per_task_usd": e2e_s * price_per_s,
-        "avg_cost_per_1M_output_tokens_usd": e2e_s * price_per_s * scale,
-    }
+    out: dict[str, float] = {}
+    if e2e_s is not None:
+        out["avg_cost_per_task_usd"] = e2e_s * price_per_s
+        if scale is not None:
+            out["avg_cost_per_1M_output_tokens_usd"] = e2e_s * price_per_s * scale
     if p50_e2e_s is not None:
         out["p50_cost_per_task_usd"] = p50_e2e_s * price_per_s
-        out["p50_cost_per_1M_output_tokens_usd"] = p50_e2e_s * price_per_s * scale
+        if scale is not None:
+            out["p50_cost_per_1M_output_tokens_usd"] = p50_e2e_s * price_per_s * scale
     if p99_e2e_s is not None:
         out["p99_cost_per_task_usd"] = p99_e2e_s * price_per_s
-        out["p99_cost_per_1M_output_tokens_usd"] = p99_e2e_s * price_per_s * scale
+        if scale is not None:
+            out["p99_cost_per_1M_output_tokens_usd"] = p99_e2e_s * price_per_s * scale
     return out
 
 
 def _compute_split_mode_costs(
-    gpu_billable_s: float,
-    cpu_billable_s: float,
-    output_tokens: float,
+    gpu_billable_s: Optional[float],
+    cpu_billable_s: Optional[float],
+    output_tokens: Optional[float],
     gpu_hourly_rate_usd: float,
     cpu_hourly_rate_usd: float,
     *,
+    p50_gpu_billable_s: Optional[float] = None,
+    p50_cpu_billable_s: Optional[float] = None,
     p99_gpu_billable_s: Optional[float] = None,
     p99_cpu_billable_s: Optional[float] = None,
 ) -> dict[str, float]:
     gpu_per_s = gpu_hourly_rate_usd / 3600.0
     cpu_per_s = cpu_hourly_rate_usd / 3600.0
     scale = _per_token_scale(output_tokens)
-
-    gpu_cost_task = gpu_billable_s * gpu_per_s
-    cpu_cost_task = cpu_billable_s * cpu_per_s
-    out: dict[str, float] = {
-        "gpu_billable_s": gpu_billable_s,
-        "cpu_billable_s": cpu_billable_s,
-        "gpu_cost_per_task_usd": gpu_cost_task,
-        "cpu_cost_per_task_usd": cpu_cost_task,
-        "avg_cost_per_task_usd": gpu_cost_task + cpu_cost_task,
-        "gpu_cost_per_1M_output_tokens_usd": gpu_cost_task * scale,
-        "cpu_cost_per_1M_output_tokens_usd": cpu_cost_task * scale,
-        "avg_cost_per_1M_output_tokens_usd": (gpu_cost_task + cpu_cost_task) * scale,
-    }
+    out: dict[str, float] = {}
+    if gpu_billable_s is not None and cpu_billable_s is not None:
+        gpu_cost_task = gpu_billable_s * gpu_per_s
+        cpu_cost_task = cpu_billable_s * cpu_per_s
+        out.update({
+            "gpu_billable_s": gpu_billable_s,
+            "cpu_billable_s": cpu_billable_s,
+            "gpu_cost_per_task_usd": gpu_cost_task,
+            "cpu_cost_per_task_usd": cpu_cost_task,
+            "avg_cost_per_task_usd": gpu_cost_task + cpu_cost_task,
+        })
+        if scale is not None:
+            out.update({
+                "gpu_cost_per_1M_output_tokens_usd": gpu_cost_task * scale,
+                "cpu_cost_per_1M_output_tokens_usd": cpu_cost_task * scale,
+                "avg_cost_per_1M_output_tokens_usd": (gpu_cost_task + cpu_cost_task) * scale,
+            })
+    if p50_gpu_billable_s is not None and p50_cpu_billable_s is not None:
+        p50_gpu_task = p50_gpu_billable_s * gpu_per_s
+        p50_cpu_task = p50_cpu_billable_s * cpu_per_s
+        out.update({
+            "p50_gpu_billable_s": p50_gpu_billable_s,
+            "p50_cpu_billable_s": p50_cpu_billable_s,
+            "p50_gpu_cost_per_task_usd": p50_gpu_task,
+            "p50_cpu_cost_per_task_usd": p50_cpu_task,
+            "p50_cost_per_task_usd": p50_gpu_task + p50_cpu_task,
+        })
+        if scale is not None:
+            out["p50_gpu_cost_per_1M_output_tokens_usd"] = p50_gpu_task * scale
+            out["p50_cpu_cost_per_1M_output_tokens_usd"] = p50_cpu_task * scale
+            out["p50_cost_per_1M_output_tokens_usd"] = (p50_gpu_task + p50_cpu_task) * scale
     if p99_gpu_billable_s is not None and p99_cpu_billable_s is not None:
         p99_gpu_task = p99_gpu_billable_s * gpu_per_s
         p99_cpu_task = p99_cpu_billable_s * cpu_per_s
@@ -449,9 +486,10 @@ def _compute_split_mode_costs(
         out["p99_gpu_cost_per_task_usd"] = p99_gpu_task
         out["p99_cpu_cost_per_task_usd"] = p99_cpu_task
         out["p99_cost_per_task_usd"] = p99_gpu_task + p99_cpu_task
-        out["p99_gpu_cost_per_1M_output_tokens_usd"] = p99_gpu_task * scale
-        out["p99_cpu_cost_per_1M_output_tokens_usd"] = p99_cpu_task * scale
-        out["p99_cost_per_1M_output_tokens_usd"] = (p99_gpu_task + p99_cpu_task) * scale
+        if scale is not None:
+            out["p99_gpu_cost_per_1M_output_tokens_usd"] = p99_gpu_task * scale
+            out["p99_cpu_cost_per_1M_output_tokens_usd"] = p99_cpu_task * scale
+            out["p99_cost_per_1M_output_tokens_usd"] = (p99_gpu_task + p99_cpu_task) * scale
     return out
 
 
@@ -519,10 +557,11 @@ def main() -> int:
     parser.add_argument("--buy-num-cpus", action="append", default=[])
     parser.add_argument("--buy-cpu-price", action="append", default=[])
     parser.add_argument("--buy-cpu-tdp", action="append", default=[])
-    parser.add_argument("--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS)
-    parser.add_argument("--utilisation", "--utilization", dest="utilisation", type=float, default=DEFAULT_UTILISATION,
+    parser.add_argument("--buy-lifetime-hours", type=float, default=None,
+                        help="Calendar lifetime hours before utilisation (default: 5 yr datacentre, 3 yr workstation)")
+    parser.add_argument("--utilisation", "--utilization", dest="utilisation", type=float, default=None,
                         help=("Average hardware utilisation in (0, 1]; effective buy lifetime "
-                              f"hours are --buy-lifetime-hours * utilisation (default: {DEFAULT_UTILISATION})"))
+                              "hours are calendar lifetime * utilisation (default: 0.9 datacentre, 0.4 workstation)"))
     parser.add_argument("--buy-electricity-usd-per-kwh", type=float, default=DEFAULT_ELECTRICITY_USD_PER_KWH)
     parser.add_argument("--buy-scale-other-capital", type=float, default=DEFAULT_SCALE_OTHER_CAPITAL)
     parser.add_argument("--buy-price-quote-time", default=None,
@@ -534,10 +573,9 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    if not (0.0 < args.utilisation <= 1.0):
+    if args.utilisation is not None and not (0.0 < args.utilisation <= 1.0):
         print("error: --utilisation must be in (0, 1]", file=sys.stderr)
         return 2
-    effective_lifetime_hours = args.buy_lifetime_hours * args.utilisation
 
     root: Path = args.root.resolve()
     if not root.is_dir():
@@ -548,10 +586,23 @@ def main() -> int:
     if not metrics_files:
         print(f"error: no metrics files under {root}", file=sys.stderr)
         return 2
-
     gpu_keys = discover_gpu_keys(metrics_files, root)
     print(f"GPU types found: {gpu_keys}")
-
+    try:
+        buy_assumptions_by_gpu = {
+            k: resolve_buy_tco_assumptions(
+                k,
+                base_lifetime_hours=args.buy_lifetime_hours,
+                utilisation=args.utilisation,
+            )
+            for k in gpu_keys
+        }
+    except KeyError as e:
+        print(f"error: no hardware tier catalogued for GPU key {e.args[0]!r}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     rent_prices: dict[str, float] = {}
     if args.rent_prices_json and args.rent_prices_json.is_file():
         rent_prices.update(
@@ -598,12 +649,14 @@ def main() -> int:
         info = describe_run(f, root)
         parsed = parse_gpu_dir(info["gpu_dir"])
         if not parsed:
+            remove_cost_sidecar(f, root, args.dry_run)
             skipped += 1
             continue
         gpu_key, num_gpus = parsed
 
         metrics = load_json(f)
         if not metrics:
+            remove_cost_sidecar(f, root, args.dry_run)
             skipped += 1
             continue
         perf = metrics.get("performance") or {}
@@ -618,6 +671,8 @@ def main() -> int:
         p99_tpot = perf.get("p99_tpot")
         num_req = ag.get("avg_num_requests")
         out_tok = ag.get("avg_total_output_tokens")
+        if not isinstance(out_tok, (int, float)) or isinstance(out_tok, bool) or not math.isfinite(out_tok) or out_tok < 0:
+            out_tok = None
         tool_calls = ag.get("avg_tool_call_count")
 
         # Runs that omit the end-to-end summary fields still record each task individually.
@@ -634,27 +689,29 @@ def main() -> int:
                 if p99_e2e is None:
                     p99_e2e = _percentile(latencies, 99)
 
-        if avg_e2e is None or ttft is None or tpot is None or out_tok is None:
+        if avg_e2e is None and p50_e2e is None and p99_e2e is None:
+            remove_cost_sidecar(f, root, args.dry_run)
             skipped += 1
             continue
 
-        # Prefill comes from the per-turn records where they support it, and falls back to the
-        # num_req * ttft estimate otherwise. See task_prefill_times() for why ttft cannot be
-        # used directly across the suite.
-        prefill_times = task_prefill_times(f, num_req, out_tok)
-        if prefill_times:
-            prefill_s = sum(prefill_times) / len(prefill_times)
-            prefill_source = "measured"
-        else:
-            prefill_s = (num_req or 0) * ttft
-            prefill_source = "derived"
-
-        llm_active_s = prefill_s + out_tok * tpot
-        tool_wait_s = max(0.0, avg_e2e - llm_active_s)
-
+        active_evidenced = avg_e2e is not None and ttft is not None and tpot is not None and out_tok is not None
+        prefill_s = prefill_source = llm_active_s = tool_wait_s = None
         p99_llm_active_s = None
         p99_tool_wait_s = None
-        if p99_e2e is not None and p99_tpot is not None:
+        prefill_times = []
+        if active_evidenced:
+            # Prefill comes from complete per-turn records where available and otherwise from
+            # num_req * ttft. A missing TTFT cannot support active-resource attribution.
+            prefill_times = task_prefill_times(f, num_req, out_tok)
+            if prefill_times:
+                prefill_s = sum(prefill_times) / len(prefill_times)
+                prefill_source = "measured"
+            else:
+                prefill_s = (num_req or 0) * ttft
+                prefill_source = "derived"
+            llm_active_s = prefill_s + out_tok * tpot
+            tool_wait_s = max(0.0, avg_e2e - llm_active_s)
+        if active_evidenced and p99_e2e is not None and p99_tpot is not None:
             # The p99 prefill term comes from the same per-task series as the mean, so the two
             # figures share a basis. Without this the average becomes physically possible while
             # the p99 keeps the double-count.
@@ -702,6 +759,9 @@ def main() -> int:
                 "p99_tool_wait_s": p99_tool_wait_s,
             },
         }
+        if not active_evidenced:
+            payload["performance"] = {k: v for k, v in payload["performance"].items() if v is not None}
+            payload["agentic"] = {k: v for k, v in payload["agentic"].items() if v is not None}
 
         if gpu_key in rent_prices:
             rent_hourly = rent_prices[gpu_key] * num_gpus
@@ -718,12 +778,13 @@ def main() -> int:
                 ),
             }
 
+        buy_assumptions = buy_assumptions_by_gpu[gpu_key]
         buy_pricing = build_buy_pricing(
             gpu_key, num_gpus,
             gpu_specs=gpu_specs, cpu_specs=cpu_specs, gpu_host_cpu=gpu_host_cpu,
-            lifetime_hours=effective_lifetime_hours,
-            base_lifetime_hours=args.buy_lifetime_hours,
-            utilisation=args.utilisation,
+            lifetime_hours=buy_assumptions["lifetime_hours"],
+            base_lifetime_hours=buy_assumptions["base_lifetime_hours"],
+            utilisation=buy_assumptions["utilisation"],
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
             buy_price_quote_time=buy_price_quote_time,
@@ -731,29 +792,42 @@ def main() -> int:
         if buy_pricing is not None:
             buy = dict(buy_pricing)
             buy_cost_mode = args.buy_cost_mode.replace("-", "_")
-            buy["default_cost_mode"] = buy_cost_mode
             buy["accounting_modes"] = {
-                "active_resource": {
+                "reserved_worker": {
+                    "description": "Single-task/exclusive-worker upper bound. Both GPU and CPU are charged for full end-to-end latency because the whole worker is treated as reserved.",
+                },
+            }
+            if avg_e2e is not None:
+                buy["accounting_modes"]["reserved_worker"].update({"avg_gpu_billable_s": avg_e2e, "avg_cpu_billable_s": avg_e2e})
+            if active_evidenced:
+                buy["default_cost_mode"] = buy_cost_mode
+                buy["accounting_modes"]["active_resource"] = {
                     "description": "Default per-resource active-time attribution. GPU is charged for estimated LLM-active time; CPU is charged for estimated tool-wait/tool-execution time. Appropriate for continuous batching/multiplexing where the GPU can serve other requests while this task waits on tools.",
                     "avg_gpu_billable_s": llm_active_s,
                     "avg_cpu_billable_s": tool_wait_s,
-                },
-                "reserved_worker": {
-                    "description": "Single-task/exclusive-worker upper bound. Both GPU and CPU are charged for full end-to-end latency because the whole worker is treated as reserved.",
-                    "avg_gpu_billable_s": avg_e2e,
-                    "avg_cpu_billable_s": avg_e2e,
-                },
-            }
-            buy["cost"] = compute_costs_split(
-                avg_e2e, llm_active_s, tool_wait_s, out_tok,
-                buy_pricing["gpu"]["effective_hourly_rate_usd"],
-                buy_pricing["cpu"]["effective_hourly_rate_usd"],
-                default_mode=buy_cost_mode,
-                concurrency=concurrency,
-                p99_e2e_s=p99_e2e,
-                p99_llm_active_s=p99_llm_active_s,
-                p99_tool_wait_s=p99_tool_wait_s,
-            )
+                }
+                buy["cost"] = compute_costs_split(
+                    avg_e2e, llm_active_s, tool_wait_s, out_tok,
+                    buy_pricing["gpu"]["effective_hourly_rate_usd"],
+                    buy_pricing["cpu"]["effective_hourly_rate_usd"],
+                    default_mode=buy_cost_mode,
+                    concurrency=concurrency,
+                    p99_e2e_s=p99_e2e,
+                    p99_llm_active_s=p99_llm_active_s,
+                    p99_tool_wait_s=p99_tool_wait_s,
+                )
+            else:
+                buy["default_cost_mode"] = "reserved_worker"
+                reserved = _compute_split_mode_costs(
+                    avg_e2e, avg_e2e, out_tok,
+                    buy_pricing["gpu"]["effective_hourly_rate_usd"],
+                    buy_pricing["cpu"]["effective_hourly_rate_usd"],
+                    p50_gpu_billable_s=p50_e2e,
+                    p50_cpu_billable_s=p50_e2e,
+                    p99_gpu_billable_s=p99_e2e,
+                    p99_cpu_billable_s=p99_e2e,
+                )
+                buy["cost"] = {"reserved_worker": reserved, **reserved}
             payload["buy"] = buy
 
         out_path = cost_path_for(f)

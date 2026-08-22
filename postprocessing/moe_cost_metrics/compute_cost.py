@@ -64,6 +64,7 @@ if __package__:
         CPU_SPECS,
         GPU_HOST_CPU,
         GPU_SPECS,
+        resolve_buy_tco_assumptions,
     )
     from .prefill_rate import resolve_for_metrics_path
 else:
@@ -72,6 +73,7 @@ else:
         CPU_SPECS,
         GPU_HOST_CPU,
         GPU_SPECS,
+        resolve_buy_tco_assumptions,
     )
     from prefill_rate import resolve_for_metrics_path
 
@@ -79,8 +81,6 @@ else:
 VASTAI_PRICING_URL = "https://vast.ai/pricing"
 DEFAULT_RENT_PRICE_SOURCE = VASTAI_PRICING_URL
 
-DEFAULT_LIFETIME_HOURS = 5 * 365 * 24
-DEFAULT_UTILISATION = 0.9
 DEFAULT_ELECTRICITY_USD_PER_KWH = 0.15
 DEFAULT_SCALE_OTHER_CAPITAL = 1.2
 
@@ -185,6 +185,19 @@ def _swap_prefix(name: str, old: str, new: str) -> str:
 
 def cost_path_for(metrics_path: Path) -> Path:
     return metrics_path.with_name(_swap_prefix(metrics_path.name, "metrics", "cost"))
+
+
+def remove_cost_sidecar(metrics_path: Path, root: Path, dry_run: bool) -> None:
+    """Remove generated output when its source metrics cannot be costed."""
+    path = cost_path_for(metrics_path)
+    if not path.is_file():
+        return
+    relative = path.relative_to(root.parent)
+    if dry_run:
+        print(f"  [dry-run] would remove stale {relative}")
+        return
+    path.unlink()
+    print(f"  [removed stale] {relative}")
 
 
 def metadata_path_for(metrics_path: Path) -> Path:
@@ -604,14 +617,14 @@ def main() -> int:
         help="Override CPU TDP (W)",
     )
     parser.add_argument(
-        "--buy-lifetime-hours", type=float, default=DEFAULT_LIFETIME_HOURS,
-        help=f"Server calendar lifetime hours before utilisation (default: {DEFAULT_LIFETIME_HOURS} = 5 yr)",
+        "--buy-lifetime-hours", type=float, default=None,
+        help="Calendar lifetime hours before utilisation (default: 5 yr datacentre, 3 yr workstation)",
     )
     parser.add_argument(
-        "--utilisation", "--utilization", dest="utilisation", type=float, default=DEFAULT_UTILISATION,
+        "--utilisation", "--utilization", dest="utilisation", type=float, default=None,
         help=(
             "Average hardware utilisation in (0, 1]; effective buy lifetime "
-            f"hours are --buy-lifetime-hours * utilisation (default: {DEFAULT_UTILISATION})"
+            "hours are calendar lifetime * utilisation (default: 0.9 datacentre, 0.4 workstation)"
         ),
     )
     parser.add_argument(
@@ -630,10 +643,9 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    if not (0.0 < args.utilisation <= 1.0):
+    if args.utilisation is not None and not (0.0 < args.utilisation <= 1.0):
         print("error: --utilisation must be in (0, 1]", file=sys.stderr)
         return 2
-    effective_lifetime_hours = args.buy_lifetime_hours * args.utilisation
 
     root: Path = args.root.resolve()
     if not root.is_dir():
@@ -644,9 +656,23 @@ def main() -> int:
     if not metrics_files:
         print(f"error: no metrics files under {root}", file=sys.stderr)
         return 2
-
     gpu_keys = discover_gpu_keys(metrics_files, root)
     print(f"GPU types found: {gpu_keys}")
+    try:
+        buy_assumptions_by_gpu = {
+            k: resolve_buy_tco_assumptions(
+                k,
+                base_lifetime_hours=args.buy_lifetime_hours,
+                utilisation=args.utilisation,
+            )
+            for k in gpu_keys
+        }
+    except KeyError as e:
+        print(f"error: no hardware tier catalogued for GPU key {e.args[0]!r}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
     rent_prices: dict[str, float] = {}
     if args.rent_prices_json and args.rent_prices_json.is_file():
@@ -719,16 +745,19 @@ def main() -> int:
         "--buy-gpu-prices-json/--buy-cpu-prices-json and set --utilisation "
         "explicitly."
     )
-    print(f"\nBuy specs (lifetime={effective_lifetime_hours}h, "
-          f"base_lifetime={args.buy_lifetime_hours}h, utilisation={args.utilisation}, "
-          f"electricity=${args.buy_electricity_usd_per_kwh}/kWh, "
+    print(f"\nBuy specs (electricity=${args.buy_electricity_usd_per_kwh}/kWh, "
           f"scale_other_capital={args.buy_scale_other_capital}):")
     for k in gpu_keys:
+        assumptions = buy_assumptions_by_gpu[k]
         if k in gpu_specs and k in gpu_host_cpu:
             g = gpu_specs[k]
             num_cpu, cpu_key = gpu_host_cpu[k]
             c = cpu_specs.get(cpu_key, {})
-            print(f"  {k}: GPU ${g.get('price_per_unit_usd', '?')}/{g.get('tdp_w', '?')}W "
+            print(f"  {k} [{assumptions['hardware_tier']}]: "
+                  f"lifetime={assumptions['base_lifetime_hours']}h, "
+                  f"utilisation={assumptions['utilisation']}, "
+                  f"effective={assumptions['lifetime_hours']}h; "
+                  f"GPU ${g.get('price_per_unit_usd', '?')}/{g.get('tdp_w', '?')}W "
                   f"+ {num_cpu}x {c.get('model', cpu_key)} "
                   f"(${c.get('price_per_unit_usd', '?')}/{c.get('tdp_w', '?')}W)")
         else:
@@ -741,11 +770,13 @@ def main() -> int:
         info = describe_run(f, root)
         parsed = parse_gpu_dir(info["gpu_dir"])
         if not parsed:
+            remove_cost_sidecar(f, root, args.dry_run)
             skipped += 1
             continue
         gpu_key, num_gpus = parsed
         metrics = load_json(f)
         if not metrics:
+            remove_cost_sidecar(f, root, args.dry_run)
             skipped += 1
             continue
         perf = metrics.get("performance") or {}
@@ -759,6 +790,7 @@ def main() -> int:
             if request_rate:
                 e2e_s = 1.0 / request_rate
         if e2e_s is None:
+            remove_cost_sidecar(f, root, args.dry_run)
             skipped += 1
             continue
 
@@ -844,12 +876,13 @@ def main() -> int:
                     prefill_rate=prefill_resolved,
                 )
 
+        buy_assumptions = buy_assumptions_by_gpu[gpu_key]
         buy = build_buy_block(
             gpu_key, num_gpus, e2e_s, ttft, tpot, batch_profile,
             gpu_specs=gpu_specs, cpu_specs=cpu_specs, gpu_host_cpu=gpu_host_cpu,
-            lifetime_hours=effective_lifetime_hours,
-            base_lifetime_hours=args.buy_lifetime_hours,
-            utilisation=args.utilisation,
+            lifetime_hours=buy_assumptions["lifetime_hours"],
+            base_lifetime_hours=buy_assumptions["base_lifetime_hours"],
+            utilisation=buy_assumptions["utilisation"],
             electricity_usd_per_kwh=args.buy_electricity_usd_per_kwh,
             scale_other_capital=args.buy_scale_other_capital,
             buy_price_quote_time=buy_price_quote_time,
