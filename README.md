@@ -418,7 +418,7 @@ override):
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `MAX_ATTEMPTS` | `6` | backstop on total client invocations, including the first. The loop normally exits earlier -- when the retry list is empty, or when an attempt fails to shrink it |
+| `MAX_ATTEMPTS` | `50` | backstop on total client invocations, including the first. Deliberately far above what a healthy run needs: the loop is meant to end when the retry list is empty, and the no-progress guard stops it as soon as an attempt fails to shrink that list, so this only bites if something is retryable but never succeeding |
 | `RETRY_TIMEOUTS` | `1` | also retry tasks killed by the outer per-task `timeout` (`sweagent_rc == 124`), once each |
 | `SKIP_PREFLIGHT` | `0` | set to `1` to bypass the real-image sandbox preflight in step `[1b]`. That gate pulls a real SWE-bench instance image and proves a sandbox pod actually serves swe-rex before any GPU is claimed — it is the only check that exercises the pod command, which otherwise fails invisibly until every task has burned its 600s sandbox timeout |
 
@@ -452,6 +452,25 @@ applied inside each sandbox pod, which pip-installs swe-rex at startup.
 | Env var | Default | Meaning |
 |---|---|---|
 | `SWEREX_NUM_RETRIES` | `3` | transport-level retries per swe-rex request. `0` restores stock behaviour |
+
+The other half of the problem was the babysitter itself. swe-rex runs the
+sandbox shell synchronously inside its own event loop — blocking `pexpect`
+in `run_in_session`, `subprocess.run` in `execute`, neither offloaded — so
+while an agent command runs, which for a test suite is minutes, the server
+answers nothing at all. Probing `/is_alive` therefore reported a healthy
+tunnel as dead, and the restart that followed tore down the connection
+carrying that very command: the babysitter manufacturing the drop it exists
+to detect, on a schedule set by its own probe cadence.
+
+Both ends are now fixed. `PortForwardK8sProvider._probe_tunnel` tests the
+tunnel rather than the application — a TCP connect, where silence is the
+healthy answer and an immediate EOF means kubectl could not forward — while
+`_probe_server` keeps the `/is_alive` check for the one place it belongs,
+deciding at startup that the sandbox is ready to hand over. And
+`pipeline/k8s/setup/patch_swerex_nonblocking.py` runs each blocking shell
+operation in a worker thread so the server stays responsive, serialised by a
+single lock so that unblocking the loop cannot introduce a race the blocking
+was previously preventing.
 
 #### Completeness gate
 

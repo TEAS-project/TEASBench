@@ -7,9 +7,12 @@ PortForwardK8sProvider (a loopback bind, not a network call)."""
 import importlib.util
 import json
 import os
+import re
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import contextmanager
@@ -32,6 +35,7 @@ _spec.loader.exec_module(patch_swerex_retries)
 OLD_MIDDLEWARE_TEXT = patch_swerex_retries.OLD_MIDDLEWARE
 
 from k8s_pod_providers.providers import (
+    _PortForwardSandbox,
     InClusterK8sProvider,
     PortForwardK8sProvider,
     SandboxEndpoint,
@@ -129,6 +133,32 @@ class FakeHTTPResponse:
 
 def fake_urlopen_ok(req, timeout=None):
     return FakeHTTPResponse()
+
+
+class ScriptedProbe:
+    """Stand-in for `_PortForwardSandbox._probe_tunnel`, scriptable per-call.
+
+    The babysitter's probe is a TCP connect to the tunnel's local port, not an
+    HTTP request, so it cannot be steered through ScriptedUrlopen -- that one
+    still drives the `/is_alive` readiness check `start()` makes before handing
+    the sandbox over. Splitting them is the point: the two probes answer
+    different questions (is the server up / is the tunnel up), and conflating
+    them is what made the babysitter restart healthy tunnels.
+
+    Same semantics as ScriptedUrlopen: `outcomes` is consumed one per call and
+    the last entry repeats forever, so a test can flip `.outcomes` mid-run
+    without predicting how many probes will happen.
+    """
+
+    def __init__(self, outcomes=(True,)):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def __call__(self, *_a, **_kw):
+        outcomes = self.outcomes  # snapshot in case a test reassigns mid-call
+        idx = min(self.calls, len(outcomes) - 1)
+        self.calls += 1
+        return outcomes[idx]
 
 
 class ScriptedUrlopen:
@@ -232,13 +262,19 @@ class SandboxJobSpecTests(unittest.TestCase):
         args = _sandbox_job_spec("ns", "q", "img", "tok", 9999)[
             "spec"]["template"]["spec"]["containers"][0]["args"][0]
         self.assertIn("TEASBENCH_SWEREX_INFLIGHT_DEDUPE_PATCH_APPLIED", args)
+        self.assertIn("TEASBENCH_SWEREX_NONBLOCKING_PATCH_APPLIED", args)
         # Ordering is load-bearing in both directions: patch after the install
         # (nothing to patch before it) and before the server starts (patching a
         # running server does nothing).
         self.assertLess(args.index("pip install"),
-                        args.index("TEASBENCH_SWEREX_PATCH_EOF"))
-        self.assertLess(args.rindex("TEASBENCH_SWEREX_PATCH_EOF"),
+                        args.index("TEASBENCH_SWEREX_PATCH_EOF_0"))
+        self.assertLess(args.rindex("TEASBENCH_SWEREX_PATCH_EOF_"),
                         args.index("exec python3 -m swerex"))
+        # Each script gets its own delimiter; a shared one would end the first
+        # heredoc at the wrong place and feed the rest to the shell.
+        delimiters = sorted(set(re.findall(r"TEASBENCH_SWEREX_PATCH_EOF_\d+", args)))
+        self.assertEqual(delimiters, ["TEASBENCH_SWEREX_PATCH_EOF_0",
+                                      "TEASBENCH_SWEREX_PATCH_EOF_1"])
 
     def test_pod_command_is_valid_shell(self):
         """The patch source is embedded in a heredoc; a quoting slip would only
@@ -254,9 +290,10 @@ class SandboxJobSpecTests(unittest.TestCase):
         the login node's client half cannot drift apart."""
         args = _sandbox_job_spec("ns", "q", "img", "tok", 9999)[
             "spec"]["template"]["spec"]["containers"][0]["args"][0]
-        script = (Path(__file__).resolve().parents[1] / "pipeline" / "k8s"
-                  / "setup" / "patch_swerex_retries.py").read_text()
-        self.assertIn(script, args)
+        setup = Path(__file__).resolve().parents[1] / "pipeline" / "k8s" / "setup"
+        for name in ("patch_swerex_retries.py", "patch_swerex_nonblocking.py"):
+            with self.subTest(script=name):
+                self.assertIn((setup / name).read_text(), args)
 
     def test_pod_patch_survives_a_client_that_cannot_import(self):
         """A sandbox pod has no aiohttp -- it is not a swe-rex dependency, and
@@ -324,6 +361,76 @@ class SandboxJobSpecTests(unittest.TestCase):
                 capture_output=True, text=True, env=env, cwd=td)
             self.assertEqual(proc.returncode, 1)
             self.assertIn("--require client", proc.stderr)
+
+    def test_nonblocking_patch_leaves_interrupt_alone(self):
+        """`BashSession.run` awaits `self.interrupt`. Wrapping both against one
+        non-reentrant lock deadlocks: run holds it, interrupt is dispatched to
+        another thread and waits for it forever. Offloading run already moves
+        interrupt off the loop, and the server has no route to it directly."""
+        src = (Path(__file__).resolve().parents[1] / "pipeline" / "k8s" / "setup"
+               / "patch_swerex_nonblocking.py").read_text()
+        wrapped = re.findall(r'\((BashSession|LocalRuntime), "(\w+)"\)', src)
+        self.assertEqual(sorted(wrapped),
+                         [("BashSession", "close"), ("BashSession", "run"),
+                          ("BashSession", "start"), ("LocalRuntime", "execute")])
+        self.assertNotIn(("BashSession", "interrupt"), wrapped)
+
+    def test_nonblocking_patch_applies_and_is_idempotent(self):
+        """Applied against a stand-in for swerex.runtime.local: the patch binds
+        to class/method names at import time, so a layout change has to be a
+        refusal rather than a file that imports and silently does nothing."""
+        script = (Path(__file__).resolve().parents[1] / "pipeline" / "k8s" / "setup"
+                  / "patch_swerex_nonblocking.py")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pkg = root / "swerex" / "runtime"
+            pkg.mkdir(parents=True)
+            (root / "swerex" / "__init__.py").write_text("")
+            (pkg / "__init__.py").write_text("")
+            (pkg / "local.py").write_text(
+                "class BashSession:\n"
+                "    async def start(self): return 'start'\n"
+                "    async def run(self, a): return a\n"
+                "    async def interrupt(self, a): return a\n"
+                "    async def close(self): return 'close'\n"
+                "\n"
+                "class LocalRuntime:\n"
+                "    async def execute(self, c): return c\n")
+            env = dict(os.environ, PYTHONPATH=str(root))
+            first = subprocess.run([sys.executable, str(script)],
+                                   capture_output=True, text=True, env=env, cwd=td)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            second = subprocess.run([sys.executable, str(script)],
+                                    capture_output=True, text=True, env=env, cwd=td)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("already patched", second.stdout)
+
+            # And the patched module must still import, with run offloaded and
+            # interrupt untouched.
+            check = subprocess.run(
+                [sys.executable, "-c",
+                 "import swerex.runtime.local as l;"
+                 "print(hasattr(l.BashSession.run,'_tb_wrapped'),"
+                 "      hasattr(l.BashSession.interrupt,'_tb_wrapped'))"],
+                capture_output=True, text=True, env=env, cwd=td)
+            self.assertEqual(check.returncode, 0, check.stderr)
+            self.assertEqual(check.stdout.strip(), "True False")
+
+    def test_nonblocking_patch_refuses_an_unrecognised_layout(self):
+        script = (Path(__file__).resolve().parents[1] / "pipeline" / "k8s" / "setup"
+                  / "patch_swerex_nonblocking.py")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pkg = root / "swerex" / "runtime"
+            pkg.mkdir(parents=True)
+            (root / "swerex" / "__init__.py").write_text("")
+            (pkg / "__init__.py").write_text("")
+            (pkg / "local.py").write_text("class SomethingElse:\n    pass\n")
+            env = dict(os.environ, PYTHONPATH=str(root))
+            proc = subprocess.run([sys.executable, str(script)],
+                                  capture_output=True, text=True, env=env, cwd=td)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("layout has changed", proc.stderr)
 
 
 class InClusterK8sProviderTests(unittest.TestCase):
@@ -472,7 +579,8 @@ class PortForwardBabysitterTests(unittest.TestCase):
             popen_instances.append(p)
             return p
 
-        urlopen = ScriptedUrlopen(outcomes=[True])  # start() probe succeeds
+        urlopen = ScriptedUrlopen(outcomes=[True])  # start() readiness probe
+        probe = ScriptedProbe(outcomes=[True])      # babysitter tunnel probe
 
         provider = PortForwardK8sProvider(namespace="eidf230ns")
         endpoint = None
@@ -490,6 +598,8 @@ class PortForwardBabysitterTests(unittest.TestCase):
                 with patch("subprocess.run", side_effect=kubectl.run), \
                      patch("subprocess.Popen", side_effect=fake_popen), \
                      patch("urllib.request.urlopen", side_effect=urlopen), \
+                     patch.object(_PortForwardSandbox, "_probe_tunnel",
+                                  lambda self, timeout: probe()), \
                      patch.dict(os.environ, env):
                     endpoint = provider.acquire("some/image:latest", label="task-restart")
                     self.assertEqual(len(popen_instances), 1)
@@ -497,7 +607,7 @@ class PortForwardBabysitterTests(unittest.TestCase):
 
                     # Flip every subsequent probe to fail - the babysitter
                     # (not start(), which already returned) must notice.
-                    urlopen.outcomes = [False]
+                    probe.outcomes = [False]
 
                     self.assertTrue(
                         _wait_until(lambda: len(popen_instances) >= 2, timeout=5.0),
@@ -533,9 +643,10 @@ class PortForwardBabysitterTests(unittest.TestCase):
             popen_instances.append(p)
             return p
 
-        # call1 (start()) succeeds, call2 (1st babysitter probe) fails,
-        # call3+ succeed again - never two CONSECUTIVE failures.
-        urlopen = ScriptedUrlopen(outcomes=[True, False, True])
+        # start() succeeds; the babysitter's 1st tunnel probe fails and every
+        # later one succeeds - never two CONSECUTIVE failures.
+        urlopen = ScriptedUrlopen(outcomes=[True])
+        probe = ScriptedProbe(outcomes=[False, True])
 
         provider = PortForwardK8sProvider(namespace="eidf230ns")
         endpoint = None
@@ -553,6 +664,8 @@ class PortForwardBabysitterTests(unittest.TestCase):
                 with patch("subprocess.run", side_effect=kubectl.run), \
                      patch("subprocess.Popen", side_effect=fake_popen), \
                      patch("urllib.request.urlopen", side_effect=urlopen), \
+                     patch.object(_PortForwardSandbox, "_probe_tunnel",
+                                  lambda self, timeout: probe()), \
                      patch.dict(os.environ, env):
                     endpoint = provider.acquire("some/image:latest", label="task-no-restart")
 
@@ -582,7 +695,8 @@ class PortForwardBabysitterTests(unittest.TestCase):
             popen_instances.append(p)
             return p
 
-        urlopen = ScriptedUrlopen(outcomes=[True])
+        urlopen = ScriptedUrlopen(outcomes=[True])  # start() readiness probe
+        probe = ScriptedProbe(outcomes=[True])      # babysitter tunnel probe
 
         provider = PortForwardK8sProvider(namespace="eidf230ns")
         endpoint = None
@@ -600,6 +714,8 @@ class PortForwardBabysitterTests(unittest.TestCase):
                 with patch("subprocess.run", side_effect=kubectl.run), \
                      patch("subprocess.Popen", side_effect=fake_popen), \
                      patch("urllib.request.urlopen", side_effect=urlopen), \
+                     patch.object(_PortForwardSandbox, "_probe_tunnel",
+                                  lambda self, timeout: probe()), \
                      patch.dict(os.environ, env):
                     endpoint = provider.acquire("some/image:latest", label="task-pod-gone")
                     sandbox = endpoint.handle
@@ -607,7 +723,7 @@ class PortForwardBabysitterTests(unittest.TestCase):
                     # Now the pod is gone AND the tunnel is broken - both
                     # the babysitter's own probe and its _pod_alive() guard
                     # must see this.
-                    urlopen.outcomes = [False]
+                    probe.outcomes = [False]
                     kubectl.phase = "Failed"
 
                     self.assertTrue(
@@ -642,7 +758,8 @@ class PortForwardBabysitterTests(unittest.TestCase):
             popen_instances.append(p)
             return p
 
-        urlopen = ScriptedUrlopen(outcomes=[True])
+        urlopen = ScriptedUrlopen(outcomes=[True])  # start() readiness probe
+        probe = ScriptedProbe(outcomes=[True])      # babysitter tunnel probe
 
         provider = PortForwardK8sProvider(namespace="eidf230ns")
         endpoint = None
@@ -662,11 +779,13 @@ class PortForwardBabysitterTests(unittest.TestCase):
                 with patch("subprocess.run", side_effect=kubectl.run), \
                      patch("subprocess.Popen", side_effect=fake_popen), \
                      patch("urllib.request.urlopen", side_effect=urlopen), \
+                     patch.object(_PortForwardSandbox, "_probe_tunnel",
+                                  lambda self, timeout: probe()), \
                      patch.dict(os.environ, env):
                     endpoint = provider.acquire("some/image:latest", label="task-stop-race")
                     sandbox = endpoint.handle
 
-                    urlopen.outcomes = [False]  # every subsequent probe fails
+                    probe.outcomes = [False]  # every subsequent probe fails
                     # Wait for the babysitter to have logged the running-phase
                     # drop (i.e. it is now inside its ~1s pre-restart backoff
                     # sleep) before calling stop() - this is the race window
@@ -703,7 +822,8 @@ class PortForwardBabysitterTests(unittest.TestCase):
             popen_instances.append(p)
             return p
 
-        urlopen = ScriptedUrlopen(outcomes=[True])
+        urlopen = ScriptedUrlopen(outcomes=[True])  # start() readiness probe
+        probe = ScriptedProbe(outcomes=[True])      # babysitter tunnel probe
 
         provider = PortForwardK8sProvider(namespace="eidf230ns")
         endpoint = None
@@ -721,6 +841,8 @@ class PortForwardBabysitterTests(unittest.TestCase):
                 with patch("subprocess.run", side_effect=kubectl.run), \
                      patch("subprocess.Popen", side_effect=fake_popen), \
                      patch("urllib.request.urlopen", side_effect=urlopen), \
+                     patch.object(_PortForwardSandbox, "_probe_tunnel",
+                                  lambda self, timeout: probe()), \
                      patch.dict(os.environ, env):
                     # start()'s internal "not ready yet" retry uses a fixed
                     # (non-configurable) 3s pause before re-probing - real
@@ -729,7 +851,7 @@ class PortForwardBabysitterTests(unittest.TestCase):
 
                     # Now drive a babysitter (post-startup, "running" phase)
                     # drop the same way test 1 does.
-                    urlopen.outcomes = [False]
+                    probe.outcomes = [False]
                     self.assertTrue(_wait_until(
                         lambda: Path(journal_path).exists() and any(
                             json.loads(l).get("event") == "pf_drop"
@@ -801,6 +923,90 @@ class PortForwardBabysitterTests(unittest.TestCase):
         finally:
             if endpoint is not None:
                 provider.release(endpoint)
+
+
+class TunnelProbeTests(unittest.TestCase):
+    """_probe_tunnel must answer "is the tunnel up", not "is the server idle".
+
+    swe-rex blocks its own event loop for the duration of every command, so an
+    HTTP probe reports a healthy tunnel as dead whenever the agent is doing
+    real work -- and the restart that follows kills the request in flight.
+    """
+
+    def _sandbox(self, port):
+        sb = _PortForwardSandbox.__new__(_PortForwardSandbox)
+        sb.local_port = port
+        sb.token = "tok"
+        return sb
+
+    @contextmanager
+    def _listener(self, mode):
+        """A stand-in for the local end of `kubectl port-forward`.
+
+        mode "hold":  accept and keep the connection open, saying nothing.
+                      This is a working tunnel to a server that is busy.
+        mode "close": accept and immediately close, which is what kubectl does
+                      when it cannot forward ("pod is not running").
+        """
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        held = []
+        stop = threading.Event()
+
+        def serve():
+            srv.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except (socket.timeout, OSError):
+                    continue
+                if mode == "close":
+                    conn.close()
+                else:
+                    held.append(conn)
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        try:
+            yield srv.getsockname()[1]
+        finally:
+            stop.set()
+            t.join(2)
+            for c in held:
+                c.close()
+            srv.close()
+
+    def test_busy_server_with_a_live_tunnel_is_healthy(self):
+        """The regression that matters: an established, silent connection is
+        a working tunnel. Probing this with HTTP times out and looks dead."""
+        sb_port_ctx = self._listener("hold")
+        with sb_port_ctx as port:
+            sb = self._sandbox(port)
+            self.assertTrue(sb._probe_tunnel(5))
+            # And the point of the change: the old HTTP probe calls this exact
+            # same healthy tunnel dead, because nothing answers it.
+            self.assertFalse(sb._probe_server(2))
+
+    def test_forward_that_closes_immediately_is_dead(self):
+        with self._listener("close") as port:
+            self.assertFalse(self._sandbox(port)._probe_tunnel(5))
+
+    def test_nothing_listening_is_dead(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        self.assertFalse(self._sandbox(port)._probe_tunnel(1))
+
+    def test_healthy_probe_returns_promptly(self):
+        """It waits for an EOF that never comes, so the healthy path costs the
+        settle window -- a fifth of the timeout, capped at 1s -- not the whole
+        timeout. A babysitter that stalls 30s per probe is its own problem."""
+        with self._listener("hold") as port:
+            t0 = time.time()
+            self._sandbox(port)._probe_tunnel(30)
+            self.assertLess(time.time() - t0, 3.0)
 
 
 class SharedExecSupportTests(unittest.TestCase):

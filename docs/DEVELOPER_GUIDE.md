@@ -395,12 +395,13 @@ non-driver callers are unaffected.
 |---|---|---|
 | `TEASBENCH_PF_EVENTS` | unset = journalling off | path to the drop journal (the driver sets `$RUN_DIR/portforward-events.jsonl`) |
 | `TEASBENCH_PF_LOG_DIR` | unset = `kubectl port-forward` stderr to `DEVNULL`, as before | directory for per-sandbox `kubectl port-forward` stdout+stderr (the driver sets `$RUN_DIR/portforward/`) |
-| `TEASBENCH_PF_PROBE_INTERVAL` | `15` | seconds between `/is_alive` probes in the babysitter |
-| `TEASBENCH_PF_PROBE_TIMEOUT` | `5` | per-probe HTTP timeout, seconds |
-| `TEASBENCH_PF_PROBE_FAILURES` | `2` | consecutive probe failures before the babysitter restarts the tunnel |
+| `TEASBENCH_PF_PROBE_INTERVAL` | `15` | seconds between tunnel probes in the babysitter |
+| `TEASBENCH_PF_PROBE_TIMEOUT` | `5` | per-probe TCP connect timeout, seconds |
+| `TEASBENCH_PF_PROBE_FAILURES` | `3` | consecutive probe failures before the babysitter restarts the tunnel. The probe tests the tunnel, not the swe-rex server (see `_probe_tunnel`), so a failure is real rather than a busy server — but a restart destroys any in-flight request, so it stays deliberately reluctant |
 | `TEASBENCH_PF_MAX_RESTARTS` | `20` | cap on babysitter restarts per sandbox before giving up (emits `pf_unrecoverable`) |
 | `TEASBENCH_PF_BACKOFF_MAX` | `30` | cap, in seconds, on the exponential backoff between restarts |
 | `SWEREX_NUM_RETRIES` | `3` | transport-level retries per swe-rex request, once `patch_swerex_retries.py` is applied. The babysitter restarts a dropped tunnel almost immediately, but only a retry re-sends the request that died with it; `0` restores stock swe-rex behaviour |
+| — | — | The babysitter probe is `_probe_tunnel` (TCP connect), not `_probe_server` (`/is_alive`). swe-rex blocks its event loop for the duration of every command, so an HTTP probe cannot tell a dead tunnel from a busy server; `patch_swerex_nonblocking.py` fixes the blocking, and the split probe means a run is not relying on that patch having been applied. |
 
 The driver sets `TEASBENCH_PF_EVENTS` and `TEASBENCH_PF_LOG_DIR` for every
 run; the probe/restart/backoff knobs are exposed for tuning but have no

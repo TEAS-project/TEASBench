@@ -55,7 +55,7 @@ PUSH=1
 # Driver-level retry knobs (CONTRACT.md "Environment variables"): env only,
 # not CLI flags, since they tune section [3]'s internal retry loop rather
 # than anything a one-off invocation needs to override per-run.
-MAX_ATTEMPTS="${MAX_ATTEMPTS:-6}"
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-50}"
 RETRY_TIMEOUTS="${RETRY_TIMEOUTS:-1}"
 
 # No --resume flag here (there used to be one: it set $RESUME and nothing
@@ -381,7 +381,7 @@ echo "  engine ready"
 # so one slow response under load doesn't trigger a needless restart.
 PROBE_INTERVAL="${TEASBENCH_PF_PROBE_INTERVAL:-15}"
 PROBE_TIMEOUT="${TEASBENCH_PF_PROBE_TIMEOUT:-5}"
-PROBE_FAILURES="${TEASBENCH_PF_PROBE_FAILURES:-2}"
+PROBE_FAILURES="${TEASBENCH_PF_PROBE_FAILURES:-3}"
 (
     consecutive_failures=0
     while kill -0 $$ 2>/dev/null; do

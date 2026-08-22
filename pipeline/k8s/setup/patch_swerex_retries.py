@@ -165,18 +165,19 @@ OLD_MANAGER_INIT_RE = re.compile(
 NEW_MANAGER_INIT = '''{i}def __init__(self):  # {marker}
 {i}    self.last_processed_request_id = None
 {i}    self.last_processed_response = None
-{i}    self._in_flight_request_id = None
-{i}    self._in_flight_done = None
+{i}    # Keyed by request id, not a single slot: two different requests in
+{i}    # flight at once would otherwise overwrite each other's entry, and the
+{i}    # first one's waiter would then never be woken.
+{i}    self._in_flight = {{}}
 
 {i}def mark_in_flight(self, request_id):
 {i}    import asyncio as _asyncio
-{i}    self._in_flight_request_id = request_id
-{i}    self._in_flight_done = _asyncio.Event()
+{i}    self._in_flight[request_id] = _asyncio.Event()
 
 {i}def clear_in_flight(self, request_id):
-{i}    if request_id is not None and request_id == self._in_flight_request_id:
-{i}        self._in_flight_done.set()
-{i}        self._in_flight_request_id = None
+{i}    event = self._in_flight.pop(request_id, None)
+{i}    if event is not None:
+{i}        event.set()
 
 {i}async def wait_for_in_flight(self, request_id):
 {i}    """Await the in-flight request with this id and return its response.
@@ -184,9 +185,10 @@ NEW_MANAGER_INIT = '''{i}def __init__(self):  # {marker}
 {i}    None if it is not in flight, or if it finished without recording a
 {i}    response (it raised) -- the caller should then execute it.
 {i}    """
-{i}    if request_id is None or request_id != self._in_flight_request_id:
+{i}    event = self._in_flight.get(request_id)
+{i}    if event is None:
 {i}        return None
-{i}    await self._in_flight_done.wait()
+{i}    await event.wait()
 {i}    return self.get_response(request_id)'''
 
 OLD_MIDDLEWARE = '''    request_id = request.headers.get("X-Request-ID")

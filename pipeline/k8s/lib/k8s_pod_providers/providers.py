@@ -52,10 +52,13 @@ tunnel to babysit or journal):
                                     DEVNULL as before; else a directory to
                                     append per-sandbox port-forward
                                     stdout+stderr into
-    TEASBENCH_PF_PROBE_INTERVAL    default "15" (seconds between /is_alive
-                                    probes in the tunnel babysitter)
-    TEASBENCH_PF_PROBE_TIMEOUT     default "5" (per-probe HTTP timeout)
-    TEASBENCH_PF_PROBE_FAILURES    default "2" (consecutive probe
+    TEASBENCH_PF_PROBE_INTERVAL    default "15" (seconds between tunnel
+                                    probes in the babysitter)
+    TEASBENCH_PF_PROBE_TIMEOUT     default "5" (per-probe connect timeout;
+                                    a fifth of it, capped to 1s, is how
+                                    long _probe_tunnel waits for the EOF
+                                    that means the forward failed)
+    TEASBENCH_PF_PROBE_FAILURES    default "3" (consecutive probe
                                     failures before the babysitter
                                     restarts the tunnel)
     TEASBENCH_PF_MAX_RESTARTS      default "20" (cap on babysitter
@@ -121,18 +124,34 @@ def _resource_limits():
     }
 
 
-def _swerex_server_patch_source():
-    """Source of the swe-rex patch script, to run inside the sandbox pod.
+# Patches the sandbox pod applies to its freshly pip-installed swe-rex, as
+# (script, argv) pairs. Both fix server-side behaviour, so both have to run in
+# the pod rather than on the login node:
+#
+#   patch_swerex_retries      a retried request must not execute twice
+#   patch_swerex_nonblocking  a running command must not stop the server
+#                             answering /is_alive, or the babysitter kills the
+#                             tunnel out from under that very command
+#
+# Read from the same files the login node uses, so the two ends cannot drift.
+_SWEREX_POD_PATCHES = (
+    ("patch_swerex_retries.py", "--require server"),
+    ("patch_swerex_nonblocking.py", ""),
+)
 
-    The pod pip-installs swe-rex at startup, so the server half of the patch
-    (in-flight duplicate requests await the original instead of executing a
-    second time) has to be applied there rather than on the login node. Read
-    from the one file that also patches the client side, so the two halves
-    cannot drift apart. The script no-ops on the half that does not apply.
+
+def _swerex_pod_patch_steps():
+    """Shell to apply every pod-side swe-rex patch, one heredoc per script.
+
+    The delimiter is quoted, so each script passes through the shell untouched.
     """
-    path = (Path(__file__).resolve().parents[2]
-            / "setup" / "patch_swerex_retries.py")
-    return path.read_text(encoding="utf-8")
+    setup_dir = Path(__file__).resolve().parents[2] / "setup"
+    steps = []
+    for i, (name, argv) in enumerate(_SWEREX_POD_PATCHES):
+        eof = f"TEASBENCH_SWEREX_PATCH_EOF_{i}"
+        source = (setup_dir / name).read_text(encoding="utf-8")
+        steps.append(f"python3 - {argv} <<'{eof}'\n{source}\n{eof}\n")
+    return "".join(steps)
 
 
 def _sandbox_job_spec(namespace, queue, image, token, port):
@@ -161,26 +180,15 @@ def _sandbox_job_spec(namespace, queue, image, token, port):
                         "image": image,
                         "command": ["/bin/bash", "-c"],
                         "args": [
-                            # The heredoc delimiter is quoted, so the patch
-                            # source passes through the shell untouched. `set
-                            # -e` means a failed patch fails the pod at
-                            # startup rather than silently leaving retries
-                            # unsafe -- a loud failure before any task runs,
-                            # which the port-forward preflight also checks
-                            # for.
+                            # `set -e` means a failed patch fails the pod at
+                            # startup rather than silently leaving the server
+                            # in a state the driver assumes it is not -- a loud
+                            # failure before any task runs, which the
+                            # real-image preflight gate also checks for.
                             "set -e; "
                             "git config --global --add safe.directory '*'; "
                             f"python3 -m pip install --quiet --no-input '{swerex_spec}'\n"
-                            # --require server: a pod has no client to
-                            # patch. aiohttp is not a swe-rex dependency and
-                            # only the login node installs it, so importing
-                            # the client module here raises ModuleNotFoundError
-                            # -- which must not be treated as a failure, or
-                            # `set -e` takes the pod down before it serves.
-                            "python3 - --require server "
-                            "<<'TEASBENCH_SWEREX_PATCH_EOF'\n"
-                            f"{_swerex_server_patch_source()}\n"
-                            "TEASBENCH_SWEREX_PATCH_EOF\n"
+                            f"{_swerex_pod_patch_steps()}"
                             f"exec python3 -m swerex --port {port} --auth-token {token}"
                         ],
                         "ports": [{"containerPort": port}],
@@ -531,7 +539,7 @@ class _PortForwardSandbox:
                          local_port=self.local_port,
                          pid=getattr(self.pf_proc, "pid", None))
                 time.sleep(3)
-            if self._probe(probe_timeout_s):
+            if self._probe_server(probe_timeout_s):
                 _journal(self.label, "acquire", job=self.job_name, pod=self.pod_name,
                          local_port=self.local_port)
                 _journal(self.label, "pf_start", job=self.job_name, pod=self.pod_name,
@@ -573,12 +581,14 @@ class _PortForwardSandbox:
             start_new_session=True,
         )
 
-    def _probe(self, timeout):
-        """Check swe-rex's /is_alive endpoint through the tunnel. This is
-        the only reliable signal that the tunnel is actually forwarding
-        traffic - `proc.poll()` alone (the old check) only tells you the
-        local kubectl process hasn't exited, which is not the same thing
-        (see class docstring)."""
+    def _probe_server(self, timeout):
+        """Is the swe-rex *server* up and answering, through the tunnel?
+
+        Used once, at startup, to decide when the sandbox is ready to hand to
+        SWE-agent -- which needs the server itself, not merely a tunnel to a
+        pod that is still pip-installing. Do NOT use this for liveness while a
+        task is running: see _probe_tunnel.
+        """
         try:
             req = urllib.request.Request(
                 f"http://127.0.0.1:{self.local_port}/is_alive",
@@ -587,6 +597,52 @@ class _PortForwardSandbox:
             with urllib.request.urlopen(req, timeout=timeout):
                 return True
         except Exception:
+            return False
+
+    def _probe_tunnel(self, timeout):
+        """Is the *tunnel* up? Deliberately not an HTTP request.
+
+        swe-rex runs its shell synchronously inside its own event loop --
+        pexpect's blocking .expect() in run_in_session, subprocess.run() in
+        execute, neither offloaded to a thread. So for as long as the agent's
+        command runs, which for a test suite is minutes, the server answers
+        nothing at all: /is_alive does not time out because the tunnel is
+        broken, it times out because the server is busy doing what we asked.
+
+        Probing with HTTP therefore reports a healthy tunnel as dead, and the
+        restart that follows tears down the connection carrying that very
+        command -- the babysitter manufacturing the drop it exists to detect.
+        The signature is a floor on the drop interval at exactly
+        probe_interval x probe_failures: real faults do not arrive on a
+        schedule, and none of those drops was ever unrecoverable.
+
+        A TCP connect asks the question this thread is actually responsible
+        for. kubectl accepts locally first and only then opens the stream out
+        through the API server and kubelet into the pod's netns; if the pod is
+        gone that fails and kubectl closes the connection straight back at us.
+        So connect, then look for an immediate EOF:
+
+          cannot connect      -> kubectl is not listening: dead
+          connects, then EOF  -> kubectl could not forward: dead
+          connects, stays up  -> the relay is established and idle: healthy
+
+        Silence is the healthy answer, which is why this waits for a read that
+        should never arrive rather than for one that should.
+        """
+        settle = min(1.0, max(0.2, float(timeout) / 5.0))
+        try:
+            with socket.create_connection(("127.0.0.1", self.local_port),
+                                          timeout=timeout) as sock:
+                sock.settimeout(settle)
+                try:
+                    # b"" means the peer closed: the forward failed. Any bytes
+                    # at all mean something is talking, which is also fine.
+                    return bool(sock.recv(1))
+                except socket.timeout:
+                    return True
+                except OSError:
+                    return False
+        except OSError:
             return False
 
     def _pod_alive(self):
@@ -617,7 +673,7 @@ class _PortForwardSandbox:
     def _keep_pf_alive(self):
         probe_interval = _env_float("TEASBENCH_PF_PROBE_INTERVAL", 15)
         probe_timeout = _env_float("TEASBENCH_PF_PROBE_TIMEOUT", 5)
-        max_failures = _env_int("TEASBENCH_PF_PROBE_FAILURES", 2)
+        max_failures = _env_int("TEASBENCH_PF_PROBE_FAILURES", 3)
         max_restarts = _env_int("TEASBENCH_PF_MAX_RESTARTS", 20)
         backoff_max = _env_float("TEASBENCH_PF_BACKOFF_MAX", 30)
 
@@ -637,7 +693,7 @@ class _PortForwardSandbox:
             if exited:
                 reason = "process_exited"
             else:
-                if self._probe(probe_timeout):
+                if self._probe_tunnel(probe_timeout):
                     consecutive_failures = 0
                     continue
                 consecutive_failures += 1

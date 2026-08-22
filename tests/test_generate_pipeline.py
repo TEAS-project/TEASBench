@@ -457,7 +457,7 @@ class LoginNodeDriverGenerationTests(unittest.TestCase):
         for driver in self.drivers:
             with self.subTest(driver=driver.name):
                 body = driver.read_text()
-                self.assertIn('MAX_ATTEMPTS="${MAX_ATTEMPTS:-6}"', body)
+                self.assertIn('MAX_ATTEMPTS="${MAX_ATTEMPTS:-50}"', body)
                 self.assertIn("PREV_RETRY_COUNT", body)
                 self.assertIn(
                     'if [ -n "$PREV_RETRY_COUNT" ] && '
