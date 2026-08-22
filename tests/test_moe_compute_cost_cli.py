@@ -9,8 +9,8 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "postprocessing" / "moe_cost_metrics" / "compute_cost.py"
 
 
-def make_run(root: Path) -> Path:
-    run = root / "moe" / "vastai" / "sglang" / "gpt-oss-120b" / "gsm8k_256samples" / "b200x1" / "batch-size-1" / "20260101-0000"
+def make_run(root: Path, gpu: str = "b200", timestamp: str = "20260101-0000") -> Path:
+    run = root / "moe" / "vastai" / "sglang" / "gpt-oss-120b" / "gsm8k_256samples" / f"{gpu}x1" / "batch-size-1" / timestamp
     run.mkdir(parents=True)
     (run / "metrics.json").write_text(json.dumps({"performance": {"e2e_s": 10.0, "ttft": 0.1, "tpot": 0.002}}))
     (run / "metadata.json").write_text(json.dumps({"system_environment": {"inference_engine_version": "test"}}))
@@ -37,6 +37,38 @@ def make_batched_run(root: Path) -> Path:
 
 
 class MoeComputeCostCliTests(unittest.TestCase):
+
+    def test_buy_defaults_resolve_per_hardware_tier_in_one_invocation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dc_run = make_run(root, "b200")
+            ws_run = make_run(root, "gb10")
+
+            result = subprocess.run([
+                sys.executable, str(SCRIPT), "--root", str(root / "moe"),
+            ], check=True, cwd=REPO, text=True, capture_output=True)
+
+            dc = json.loads((dc_run / "cost.json").read_text())["buy"]
+            ws = json.loads((ws_run / "cost.json").read_text())["buy"]
+            self.assertEqual((dc["base_lifetime_hours"], dc["utilisation"], dc["lifetime_hours"]), (43800.0, 0.9, 39420.0))
+            self.assertEqual((ws["base_lifetime_hours"], ws["utilisation"], ws["lifetime_hours"]), (26280.0, 0.4, 10512.0))
+            self.assertIn("b200 [datacentre]", result.stdout)
+            self.assertIn("gb10 [workstation]", result.stdout)
+
+    def test_partial_cli_override_keeps_each_tier_lifetime_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dc_run = make_run(root, "b200")
+            ws_run = make_run(root, "gb10")
+
+            subprocess.run([
+                sys.executable, str(SCRIPT), "--root", str(root / "moe"), "--utilisation", "0.25",
+            ], check=True, cwd=REPO, text=True, capture_output=True)
+
+            dc = json.loads((dc_run / "cost.json").read_text())["buy"]
+            ws = json.loads((ws_run / "cost.json").read_text())["buy"]
+            self.assertEqual((dc["base_lifetime_hours"], dc["utilisation"], dc["lifetime_hours"]), (43800.0, 0.25, 10950.0))
+            self.assertEqual((ws["base_lifetime_hours"], ws["utilisation"], ws["lifetime_hours"]), (26280.0, 0.25, 6570.0))
 
     def test_cost_per_output_token_uses_decode_batch_size(self):
         with tempfile.TemporaryDirectory() as td:
@@ -252,6 +284,19 @@ class MoeComputeCostCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("--utilisation must be in (0, 1]", result.stderr)
 
+    def test_skipped_leaf_removes_its_stale_sidecar(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = make_run(root)
+            (run / "metrics.json").write_text(json.dumps({"performance": {}}))
+            stale = run / "cost.json"
+            stale.write_text(json.dumps({"sentinel": "stale"}))
+
+            subprocess.run([
+                sys.executable, str(SCRIPT), "--root", str(root / "moe"),
+            ], check=True, cwd=REPO, text=True, capture_output=True)
+
+            self.assertFalse(stale.exists())
 
 if __name__ == "__main__":
     unittest.main()

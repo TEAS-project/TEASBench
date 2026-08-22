@@ -7,8 +7,10 @@ from postprocessing.moe_cost_metrics import compute_cost, compute_sparsity_metri
 from postprocessing.moe_cost_metrics import hardware_catalog
 from postprocessing.moe_cost_metrics.hardware_catalog import (
     CPU_SPECS,
+    BUY_TCO_DEFAULTS_BY_TIER,
     GPU_HOST_CPU,
     GPU_SPECS,
+    GPU_TIER,
     MEM_BW_DICT,
     MEM_GB_DICT,
     PEAK_FLOPS_DICT,
@@ -18,6 +20,7 @@ from postprocessing.moe_cost_metrics.hardware_catalog import (
     host_cpu_power_w,
     mem_capacity_gb,
     peak_bw_gb_s,
+    resolve_buy_tco_assumptions,
 )
 
 DOC = (
@@ -90,6 +93,30 @@ def _num(cell):
 
 
 class HardwareCatalogTests(unittest.TestCase):
+
+    def test_buy_tco_tiers_cover_every_priced_accelerator(self):
+        self.assertEqual(set(GPU_TIER), set(GPU_SPECS))
+        self.assertEqual(set(GPU_TIER.values()), set(BUY_TCO_DEFAULTS_BY_TIER))
+        self.assertEqual(GPU_TIER["gb10"], "workstation")
+        self.assertEqual(GPU_TIER["blackhole-p150b"], "workstation")
+        self.assertEqual(GPU_TIER["cs3"], "datacentre")
+
+    def test_buy_tco_defaults_and_independent_overrides(self):
+        dc = resolve_buy_tco_assumptions("b200")
+        ws = resolve_buy_tco_assumptions("gb10")
+        self.assertEqual((dc["base_lifetime_hours"], dc["utilisation"], dc["lifetime_hours"]), (43800.0, 0.9, 39420.0))
+        self.assertEqual((ws["base_lifetime_hours"], ws["utilisation"], ws["lifetime_hours"]), (26280.0, 0.4, 10512.0))
+        partial = resolve_buy_tco_assumptions("gb10", utilisation=0.25)
+        self.assertEqual((partial["base_lifetime_hours"], partial["utilisation"], partial["lifetime_hours"]), (26280.0, 0.25, 6570.0))
+        full = resolve_buy_tco_assumptions("gb10", base_lifetime_hours=1000, utilisation=0.25)
+        self.assertEqual((full["base_lifetime_hours"], full["utilisation"], full["lifetime_hours"]), (1000.0, 0.25, 250.0))
+
+    def test_buy_tco_resolution_fails_closed(self):
+        with self.assertRaises(KeyError):
+            resolve_buy_tco_assumptions("no-such-gpu")
+        for kwargs in ({"base_lifetime_hours": 0}, {"utilisation": 0}, {"utilisation": 1.1}):
+            with self.assertRaises(ValueError):
+                resolve_buy_tco_assumptions("b200", **kwargs)
 
     def test_bandwidth_matches_the_documented_figure(self):
         for card, bw in DOCUMENTED_BW.items():
