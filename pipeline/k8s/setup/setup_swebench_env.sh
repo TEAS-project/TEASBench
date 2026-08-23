@@ -21,6 +21,23 @@
 #                           result can be traced to the exact code that produced
 #                           it.
 #
+# Options:
+#
+#     --prefix DIR             install root (default ~/teasbench-env)
+#     --namespace NS           Kubernetes namespace the driver operates in
+#     --git-token-secret NAME  k8s secret (key 'token') holding the
+#                              results-repo GIT_TOKEN
+#     --agentcap-ref REF       AgentCAP branch, tag or SHA
+#     --agentcap-repo URL      AgentCAP remote
+#     --python BIN             interpreter used to create the venv
+#     --force                  delete $PREFIX and rebuild from scratch
+#
+# The namespace and the secret name are asked for interactively when neither a
+# flag nor the environment supplies them. A shell with env.sh sourced already
+# exports both, so a re-run offers the current value as the prompt default
+# rather than taking it silently -- otherwise re-running this script, which is
+# how you are meant to re-point at a different namespace, could not change it.
+#
 # Idempotent: every step checks first and does nothing if already satisfied.
 # Re-run it after changing a branch, or with --force to rebuild from scratch.
 set -uo pipefail
@@ -65,6 +82,10 @@ FORCE=0
 # step below only fires when neither an env var nor a flag supplied one.
 TEASBENCH_K8S_NAMESPACE="${TEASBENCH_K8S_NAMESPACE:-}"
 GIT_TOKEN_K8S_SECRET="${GIT_TOKEN_K8S_SECRET:-}"
+# Where each came from, which step 7 needs to distinguish: an explicit flag is
+# authoritative, an inherited environment value is only a default.
+NAMESPACE_FROM_FLAG=0
+GIT_TOKEN_SECRET_FROM_FLAG=0
 
 TEASBENCH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
@@ -74,10 +95,12 @@ while [[ $# -gt 0 ]]; do
         --agentcap-ref)       AGENTCAP_REF="$2"; shift 2 ;;
         --agentcap-repo)      AGENTCAP_REPO="$2"; shift 2 ;;
         --python)             PYTHON="$2"; shift 2 ;;
-        --namespace)          TEASBENCH_K8S_NAMESPACE="$2"; shift 2 ;;
-        --git-token-secret)   GIT_TOKEN_K8S_SECRET="$2"; shift 2 ;;
+        --namespace)          TEASBENCH_K8S_NAMESPACE="$2"; NAMESPACE_FROM_FLAG=1; shift 2 ;;
+        --git-token-secret)   GIT_TOKEN_K8S_SECRET="$2"; GIT_TOKEN_SECRET_FROM_FLAG=1; shift 2 ;;
         --force)              FORCE=1; shift ;;
-        -h|--help)            sed -n '2,26p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        # Every leading comment line, so the header can grow without a line
+        # range here going stale (it used to, and would simply truncate).
+        -h|--help)            awk 'NR==1 {next} /^#/ {print; next} {exit}' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -148,6 +171,9 @@ step() { printf '\n\033[1m[%s]\033[0m %s\n' "$1" "$2"; }
 ok()   { echo "  ok      $1"; }
 did()  { echo "  done    $1"; }
 die()  { echo "  ERROR   $1" >&2; exit 1; }
+# Is there someone to answer a prompt? A function rather than an inline
+# `[ -t 0 ]` so the settings logic below can be exercised both ways in tests.
+interactive() { [ -t 0 ]; }
 
 echo "=============================================================="
 echo "TEASBench SWE-bench environment setup"
@@ -417,27 +443,51 @@ step 7 "Kubernetes namespace and results-push secret"
 DEFAULT_NAMESPACE="eidf230ns"
 DEFAULT_GIT_TOKEN_SECRET="teas-develop-results-private-ap"
 
-if [ -n "$TEASBENCH_K8S_NAMESPACE" ]; then
-    ok "namespace: $TEASBENCH_K8S_NAMESPACE"
-elif [ -t 0 ]; then
-    read -r -p "  EIDF k8s namespace [$DEFAULT_NAMESPACE]: " TEASBENCH_K8S_NAMESPACE
-    TEASBENCH_K8S_NAMESPACE="${TEASBENCH_K8S_NAMESPACE:-$DEFAULT_NAMESPACE}"
-    did "namespace: $TEASBENCH_K8S_NAMESPACE"
-else
-    TEASBENCH_K8S_NAMESPACE="$DEFAULT_NAMESPACE"
-    echo "  note    non-interactive; defaulting namespace to $TEASBENCH_K8S_NAMESPACE"
-fi
+# Resolve one setting into $RESOLVED, and always report where its value came
+# from.
+#
+# An inherited environment value is a default, not an answer. env.sh exports
+# both of these and is normally sourced in the working shell (see README), so
+# treating "already set" as "already decided" made a re-run silently unable to
+# change either -- exactly what the note above says a re-run is for. It
+# reported success while ignoring the operator. Interactively we therefore ask
+# regardless, offering the inherited value as the default so Enter keeps it.
+#
+# A value given on the command line is a deliberate answer and is never
+# re-asked; non-interactively there is nobody to ask, so the value stands and
+# the source is named instead.
+#
+#   $1 current value   $2 1 if set by a CLI flag   $3 built-in default
+#   $4 prompt text     $5 short label              $6 flag name
+resolve_setting() {
+    local current="$1" from_flag="$2" fallback="$3" prompt="$4" label="$5" flag="$6" reply
+    if [ "$from_flag" -eq 1 ]; then
+        RESOLVED="$current"
+        ok "$label: $RESOLVED (given with $flag)"
+    elif [ -n "$current" ] && ! interactive; then
+        RESOLVED="$current"
+        ok "$label: $RESOLVED (inherited from the environment; pass $flag to change)"
+    elif [ -n "$current" ]; then
+        read -r -p "  $prompt [$current]: " reply
+        RESOLVED="${reply:-$current}"
+        did "$label: $RESOLVED (default inherited from the environment)"
+    elif interactive; then
+        read -r -p "  $prompt [$fallback]: " reply
+        RESOLVED="${reply:-$fallback}"
+        did "$label: $RESOLVED"
+    else
+        RESOLVED="$fallback"
+        echo "  note    non-interactive; defaulting $label to $RESOLVED"
+    fi
+}
 
-if [ -n "$GIT_TOKEN_K8S_SECRET" ]; then
-    ok "GIT_TOKEN secret: $GIT_TOKEN_K8S_SECRET"
-elif [ -t 0 ]; then
-    read -r -p "  k8s secret holding the results-repo GIT_TOKEN (key 'token') [$DEFAULT_GIT_TOKEN_SECRET]: " GIT_TOKEN_K8S_SECRET
-    GIT_TOKEN_K8S_SECRET="${GIT_TOKEN_K8S_SECRET:-$DEFAULT_GIT_TOKEN_SECRET}"
-    did "GIT_TOKEN secret: $GIT_TOKEN_K8S_SECRET"
-else
-    GIT_TOKEN_K8S_SECRET="$DEFAULT_GIT_TOKEN_SECRET"
-    echo "  note    non-interactive; defaulting GIT_TOKEN secret to $GIT_TOKEN_K8S_SECRET"
-fi
+resolve_setting "$TEASBENCH_K8S_NAMESPACE" "$NAMESPACE_FROM_FLAG" "$DEFAULT_NAMESPACE" \
+    "EIDF k8s namespace" "namespace" "--namespace"
+TEASBENCH_K8S_NAMESPACE="$RESOLVED"
+
+resolve_setting "$GIT_TOKEN_K8S_SECRET" "$GIT_TOKEN_SECRET_FROM_FLAG" "$DEFAULT_GIT_TOKEN_SECRET" \
+    "k8s secret holding the results-repo GIT_TOKEN (key 'token')" "GIT_TOKEN secret" "--git-token-secret"
+GIT_TOKEN_K8S_SECRET="$RESOLVED"
 
 # ------------------------------------------------------------- versions ----
 # Recorded now, at the moment the environment is built, so a run's metadata
