@@ -550,6 +550,11 @@ variables_defaults:
     value:
   extra_setup:
     value:
+  # Path (relative to pipeline/) of a script to run inside the engine
+  # container before launch_server. Empty for every row that needs no such
+  # patch; see the gpt-oss/sglang rule below.
+  engine_pre_launch_script:
+    value:
   service_account:
     value:
   teas_env_exports:
@@ -1446,6 +1451,28 @@ rules:
       tool_call_parser: "openai"
       enable_auto_tool_choice: true
       enable_prompt_tokens_details: true
+
+# --- swe-bench-lite: sglang gpt-oss parser fix ----------------------------
+# Setting --tool-call-parser gpt-oss above is necessary but not sufficient:
+# sglang's own gpt-oss detector drops a large fraction of the model's tool
+# calls, either stranding the call's JSON arguments in reasoning_content or
+# returning a message with no content and no tool_calls at all. SWE-agent
+# counts both as "no tool call" and aborts the task after three in a row, so
+# the agent stops early with no patch and the run measures the parser rather
+# than the model. vLLM's equivalent parser does not have the defect, which is
+# why only the sglang rule carries this.
+#
+# Scoped to orchestrator k8s because the fix edits sglang's source in place at
+# the path used by the official lmsysorg image; the Vast.ai path installs
+# sglang differently and would fail the check. gpt-oss only, matching the
+# parser rules above -- the defect is in the harmony format handling.
+  - match:
+      benchmark: ["swe-bench-lite"]
+      orchestrator: ["k8s"]
+      inference_engine: ["sglang"]
+      model: ["gpt-oss-120b", "gpt-oss-20b"]
+    engine_pre_launch_script:
+      value: "k8s/setup/patch_sglang_gptoss.py"
 
 # --- swe-bench-lite: K8s engine-only Job launch flags ---------------------
 # Memory fraction is deliberately NOT tuned per GPU: both engines take the one

@@ -50,6 +50,12 @@ spec:
 
             @agentic_env_setup@
 
+            # Patch the engine's own install before it starts, where a stock
+            # engine has a defect that would corrupt the measurement. Empty
+            # for every row that has no such patch; see
+            # engine_pre_launch_script in pipeline/configs/config.yaml.
+            @engine_pre_launch@
+
             # Binding to the container's loopback is fine: `kubectl port-forward`
             # forwards into the pod's own network namespace, so 127.0.0.1 here is
             # reachable from the driver. (A k8s Service would need 0.0.0.0; this
