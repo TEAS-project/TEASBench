@@ -408,6 +408,46 @@ run; the probe/restart/backoff knobs are exposed for tuning but have no
 driver-side overrides today, so they take these defaults unless set in the
 shell that launches the driver script.
 
+#### Why the babysitter probe is a TCP connect
+
+Recorded here because the code comments state only the principle: the evidence
+was measured on one run and does not belong in a docstring, but without it the
+change looks like a preference.
+
+The babysitter used to probe swe-rex's `/is_alive` through the tunnel. swe-rex
+runs the sandbox shell synchronously inside its own event loop — blocking
+`pexpect .expect()` in `run_in_session`, `subprocess.run()` in `execute`, and
+nothing offloaded to a thread — so for as long as an agent command runs, which
+for a test suite is minutes, the server answers nothing at all. The probe was
+therefore reporting a perfectly healthy tunnel as dead, and the restart that
+followed tore down the connection carrying that very command. The agent saw
+`ServerDisconnectedError`, then `Runtime is no longer alive`, and the task was
+lost along with everything it had already done.
+
+What identifies this as self-inflicted rather than a flaky network:
+
+| observation | value |
+|---|---|
+| tunnel age at first running-phase drop | **exactly 40.0s** = 2 × (15s interval + 5s timeout) |
+| minimum gap between consecutive drops | 23.3s (median 48.2s) |
+| tasks with `CommandTimeoutError` that also had a running-phase drop | **47 of 47** |
+| tasks with a drop but no `CommandTimeoutError` | 28 |
+| `probe_failed` share of all drops | 782 of 1268 |
+| `pf_unrecoverable` events | **0** — no tunnel was ever genuinely dead |
+
+Real faults do not arrive on a schedule. A hard floor at exactly the probe
+detection window is the fingerprint. Reproduced in isolation: during a single
+10s command, three of four `/is_alive` probes timed out; with
+`patch_swerex_nonblocking.py` applied, none did.
+
+Hence the split. `_probe_tunnel` answers the question the babysitter is
+responsible for — is the relay up — with a TCP connect, where silence means
+established and an immediate EOF means `kubectl` could not forward.
+`_probe_server` keeps `/is_alive` for the one question it answers well, asked
+once at startup: is the sandbox ready to hand to SWE-agent. Fixing the blocking
+alone would not be enough, because a run must not depend on that patch having
+been applied.
+
 ### The shared rule engine
 
 Both platforms build their commands from the **same** `pipeline/configs/config.yaml`
