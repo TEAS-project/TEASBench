@@ -63,6 +63,12 @@ echo "Cloning results repo $RESULTS_REPO"
 # makes it a partial clone so blobs for the repo's whole accumulated history of prior
 # runs are never downloaded -- sparse-checkout alone only stops them being written to
 # the working tree, not fetched.
+# The results repo's .lfsconfig points at gitlab.eidf.ac.uk and some of its leaves are
+# LFS-tracked. The sparse checkout below keeps those paths out of the working tree so the
+# smudge filter never runs; GIT_LFS_SKIP_SMUDGE is a guard for the case where the cone ever
+# widens. GIT_TERMINAL_PROMPT=0 stops an unattended run blocking on a credential prompt for
+# that GitLab host, which the GitHub token in $RESULTS_REPO_URL cannot satisfy anyway.
+export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
 git clone --quiet --branch main --single-branch --depth 1 --filter=blob:none --no-checkout "$RESULTS_REPO_URL" "$RESULTS_REPO"
 git -C "$RESULTS_REPO" sparse-checkout init --cone
 git -C "$RESULTS_REPO" checkout --quiet main
@@ -155,7 +161,11 @@ push_results() {
     # conflict and the rebase is a trivial replay of an add-only commit.
     local pushed=0
     for attempt in 1 2 3 4 5 6; do
-        if git push -q "$RESULTS_REPO_URL" HEAD:main; then pushed=1; break; fi
+        # lfs.locksverify=false: git-lfs's pre-push hook calls the locking API even
+        # when nothing being pushed is LFS-tracked -- one more chance to be asked
+        # for GitLab credentials. Only the lock check is disabled (not --no-verify),
+        # so the hook's upload path still works if a leaf here ever becomes tracked.
+        if git -c lfs.locksverify=false push -q "$RESULTS_REPO_URL" HEAD:main; then pushed=1; break; fi
         echo "push attempt $attempt rejected; rebasing onto origin/main"
         git pull --rebase -q "$RESULTS_REPO_URL" main || break
         sleep $(( (RANDOM % 20) + 5 ))
