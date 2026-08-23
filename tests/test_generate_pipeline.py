@@ -447,6 +447,29 @@ class LoginNodeDriverGenerationTests(unittest.TestCase):
                                 body.index("[2] Starting the engine"),
                                 "preflight must gate the run before the GPU job")
 
+    def test_run_inputs_are_snapshotted_before_anything_can_fail(self):
+        """This script and the engine manifest are what a failed run has to be
+        reconstructed from, so they are copied into $RUN_DIR as soon as it
+        exists. Doing it at publish time instead put them out of reach of
+        exactly the runs that need them: section [5] is gated on the
+        completeness gate passing, on --push, and on the results-repo clone
+        succeeding, and a run that trips any of those keeps nothing."""
+        for driver in self.drivers:
+            with self.subTest(driver=driver.name):
+                body = driver.read_text()
+                for cp in ('cp "${BASH_SOURCE[0]}" "$RUN_DIR/"',
+                           'cp "$ENGINE_MANIFEST" "$RUN_DIR/"'):
+                    self.assertEqual(body.count(cp), 1,
+                                     f"expected exactly one {cp}")
+                    at = body.index(cp)
+                    self.assertGreater(at, body.index('mkdir -p "$RUN_DIR"'),
+                                       "cannot copy before the directory exists")
+                    for section in ("[2] Starting the engine",
+                                    "[3] Completeness gate",
+                                    "[5] Results"):
+                        self.assertLess(at, body.index(section),
+                                        f"snapshot must precede {section}")
+
     def test_benign_teas_warning_is_annotated_without_hiding_the_exit_status(self):
         """AgentCAP prints a TEAS-writer warning on every attempt of this path
         that cannot succeed and does not matter -- the driver writes the leaf

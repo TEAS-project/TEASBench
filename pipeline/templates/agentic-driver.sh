@@ -103,6 +103,18 @@ LOG_FILE="$RUN_DIR/$(basename "${BASH_SOURCE[0]}" .sh).log"
 echo "logging all output to $LOG_FILE"
 exec &> "$LOG_FILE"
 
+# Snapshot the two inputs that define this run -- this script and the engine
+# Job it submits -- now, rather than at publish time in section [5]. A run
+# that fails the completeness gate, or dies anywhere before [5], never
+# reaches the publish block, and those are exactly the runs someone has to
+# reconstruct afterwards from what is left in $RUN_DIR. Both files are small
+# and neither changes during the run. Failure to copy is reported and then
+# ignored: a missing debugging aid must not be what stops a run.
+cp "${BASH_SOURCE[0]}" "$RUN_DIR/" 2>/dev/null \
+    || echo "WARNING: could not copy the driver script into $RUN_DIR"
+cp "$ENGINE_MANIFEST" "$RUN_DIR/" 2>/dev/null \
+    || echo "WARNING: could not copy $ENGINE_MANIFEST into $RUN_DIR"
+
 # One run per output dir. flock is present on the EIDF login nodes; where it is
 # not (macOS, minimal images) carry on rather than aborting -- an absent flock
 # previously reported "another driver is already active", which is both wrong
@@ -790,9 +802,9 @@ if [ $PUSH -eq 1 ]; then
                  "$RUN_DIR"/results.jsonl \
                  "$RUN_DIR"/completeness.json "$RUN_DIR"/portforward-events.jsonl \
                  "$RUN_DIR"/*.log
-	cp "$ENGINE_MANIFEST" "$RUN_DIR/" 2>/dev/null
+        # Both are already in $RUN_DIR from the start of the run; this is
+        # the copy that publishes them.
         cp "$ENGINE_MANIFEST" "$DEST/" 2>/dev/null
-        cp "${BASH_SOURCE[0]}" "$RUN_DIR/" 2>/dev/null
         cp "${BASH_SOURCE[0]}" "$DEST/" 2>/dev/null
         shopt -u nullglob
         export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
