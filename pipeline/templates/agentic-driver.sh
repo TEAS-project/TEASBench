@@ -513,7 +513,31 @@ while :; do
     # tee -a, not tee: plain tee would truncate client.log on every attempt,
     # and section [5] below pushes *.log wholesale -- attempt 1's log would
     # simply be gone by the time anything reads it.
-    @agentic_client_command@ $RESUME_FLAG 2>&1 | tee -a "$RUN_DIR/client.log"
+    #
+    # The awk annotates one specific warning AgentCAP prints on every attempt
+    # of this path. Its TEAS writer looks for official reports under
+    # logs/run_evaluation/*/*/*/report.json; SWEBenchK8sEvaluator writes
+    # eval_k8s/<iid>/report.json instead, so it finds none, falls back to
+    # demanding eval_details.evaluator == "swebench", and loses again because
+    # cli.py stamps the raw "swebench-k8s". It cannot succeed here, and it is
+    # not meant to: section [3] below relocates the reports and writes the leaf
+    # itself. Left bare, six identical warnings make a good run read as a
+    # failed one. Deliberately annotated rather than suppressed -- and
+    # deliberately NOT fixed by relocating the reports earlier, which would
+    # make AgentCAP's writer succeed mid-run and emit a leaf from a run that
+    # has not passed the completeness gate yet.
+    #
+    # The awk stays out of PIPESTATUS[0]'s way: it is downstream of the client,
+    # so RC below is still the client's own exit status.
+    @agentic_client_command@ $RESUME_FLAG 2>&1 \
+        | awk '{ print; fflush() }
+               /^WARNING: TEAS output writing failed: SWE-bench quality is not available/ {
+                   print "NOTE: expected on the swebench-k8s path; not a run failure."
+                   print "      The TEAS leaf is written after the completeness gate by"
+                   print "      swebench_run_audit teas-output, which relocates the reports first."
+                   fflush()
+               }' \
+        | tee -a "$RUN_DIR/client.log"
     RC=${PIPESTATUS[0]}
     echo "  agent_cap exit: $RC (attempt $ATTEMPT/$MAX_ATTEMPTS)"
 

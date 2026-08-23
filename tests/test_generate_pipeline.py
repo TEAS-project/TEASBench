@@ -447,6 +447,37 @@ class LoginNodeDriverGenerationTests(unittest.TestCase):
                                 body.index("[2] Starting the engine"),
                                 "preflight must gate the run before the GPU job")
 
+    def test_benign_teas_warning_is_annotated_without_hiding_the_exit_status(self):
+        """AgentCAP prints a TEAS-writer warning on every attempt of this path
+        that cannot succeed and does not matter -- the driver writes the leaf
+        itself after the gate. Six bare warnings make a good run read as a
+        failed one, so the driver annotates them. The filter must not swallow
+        the client's exit status, which drives the whole retry loop."""
+        for driver in self.drivers:
+            with self.subTest(driver=driver.name):
+                body = driver.read_text()
+                start = body.index("| awk '")
+                block = body[start:body.index("| tee -a", start)]
+                self.assertIn("NOTE: expected on the swebench-k8s path", block)
+                # RC must still be read from the client, not from awk or tee.
+                self.assertIn("RC=${PIPESTATUS[0]}", body)
+
+                # Behavioural: the rendered filter annotates the warning and
+                # leaves the upstream exit status intact.
+                harness = (
+                    'f() { printf "A\\n'
+                    'WARNING: TEAS output writing failed: SWE-bench quality is not available x\\n'
+                    'B\\n"; return 7; }\n'
+                    'f 2>&1 \\\n  ' + block + '| cat\n'
+                    'echo "RC=${PIPESTATUS[0]}"\n')
+                proc = subprocess.run(["bash", "-c", harness],
+                                      capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("NOTE: expected on the swebench-k8s path", proc.stdout)
+                self.assertIn("RC=7", proc.stdout,
+                              "the annotation filter must not mask the client's exit code")
+                self.assertIn("B", proc.stdout, "non-matching lines must pass through")
+
     def test_retry_loop_keeps_going_and_stops_on_no_progress(self):
         """With MAX_ATTEMPTS at 2 the loop gets exactly one retry, which
         clears only part of the infrastructure backlog and leaves the rest to
