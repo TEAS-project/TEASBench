@@ -45,6 +45,17 @@ SWEREX_SPEC="${SWEREX_SPEC:-swe-rex>=1.4.0}"
 # (agent_cap/runner/unified_runner.py, `from swebench.harness.test_spec.python
 # import MAP_REPO_VERSION_TO_SPECS`).
 SWEBENCH_SPEC="${SWEBENCH_SPEC:-swebench>=2.0,<5}"
+# Nothing here imports ghapi. It is pinned to stop pip reaching the right
+# answer by the wrong route: swebench requires `ghapi` unpinned, so installing
+# swebench first pulls ghapi 2.x, which drags in fastspec, fasttransport and
+# fastcore 2.x. SWE-agent then pins `ghapi>=1.0.0,<2`, so pip downgrades ghapi
+# to 1.1.1 and fastcore to 1.14.5 (ghapi 1.1.1 caps it below 2), leaving
+# fastspec and fasttransport installed as orphans whose own fastcore
+# requirement can no longer be satisfied. The end state runs fine, but every
+# setup ends in a wall of pip dependency-conflict errors that read like a
+# broken environment. Installed ahead of swebench (see the loop order below),
+# ghapi 2.x is never fetched and the orphans never appear.
+GHAPI_SPEC="${GHAPI_SPEC:-ghapi<2}"
 PYTHON="${PYTHON:-python3}"
 FORCE=0
 # Namespace the driver operates in, and the k8s secret it reads GIT_TOKEN from
@@ -215,7 +226,12 @@ version_satisfies() {
     "$PY" "$TEASBENCH_ROOT/pipeline/k8s/lib/version_check.py" "$1" "$2" > /dev/null 2>&1
 }
 
-for spec in "$SWEREX_SPEC" "$SWEBENCH_SPEC"; do
+# $GHAPI_SPEC must precede $SWEBENCH_SPEC: it is a constraint on one of
+# swebench's own dependencies, and pip's default --upgrade-strategy leaves an
+# already-satisfying ghapi alone. Installed afterwards it would still reach
+# the same versions, but only by first installing the 2.x tree this exists to
+# avoid.
+for spec in "$SWEREX_SPEC" "$GHAPI_SPEC" "$SWEBENCH_SPEC"; do
     mod=$(echo "$spec" | sed 's/[><=].*//' | tr -d ' ')
     imp=$(echo "$mod" | tr '-' '_'); [ "$imp" = "swe_rex" ] && imp=swerex
     if "$PY" -c "import $imp" 2>/dev/null && version_satisfies "$mod" "$spec"; then
