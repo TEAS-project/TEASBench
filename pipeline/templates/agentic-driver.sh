@@ -759,14 +759,37 @@ if [ $PUSH -eq 1 ]; then
         # actually excludes it. detailed-results_*.jsonl/output-data*.jsonl
         # are added because they never used to be published at all, so the
         # results repo's task-completeness audit had nothing to verify a run
-        # against. completeness.json and portforward-events.jsonl are this
-        # branch's own evidence for exactly the failure mode it exists to
-        # catch (see the completeness gate and _journal_engine() above).
-        cp "$RUN_DIR"/metrics_*.json "$RUN_DIR"/metadata_*.json \
-           "$RUN_DIR"/detailed-results_*.jsonl "$RUN_DIR"/output-data*.jsonl \
-           "$RUN_DIR"/results.jsonl \
-           "$RUN_DIR"/completeness.json "$RUN_DIR"/portforward-events.jsonl \
-           "$RUN_DIR"/*.log "$DEST/" 2>/dev/null
+        # against. completeness.json is this branch's own evidence for exactly
+        # the failure mode it exists to catch (see the completeness gate).
+        #
+        # NO_PUBLISH is then applied to the basename of every candidate. It
+        # keeps the engine's stdout, the port-forward chatter and AgentCAP's
+        # internal per-task rows out of the results repo: those are
+        # operational telemetry rather than results, and they stay in
+        # $RUN_DIR either way. Filtering by name rather than narrowing the
+        # globs keeps client.log -- and any *.log a later step adds --
+        # published, and leaves one place to change.
+        NO_PUBLISH=(engine.log engine-portforward.log
+                    portforward-events.jsonl
+                    results.jsonl)
+        _publish() {
+            local src base deny
+            for src in "$@"; do
+                base=${src##*/}
+                for deny in "${NO_PUBLISH[@]}"; do
+                    [ "$base" = "$deny" ] && continue 2
+                done
+                cp "$src" "$DEST/" 2>/dev/null
+            done
+        }
+        # Re-publishing over an earlier push of the same run would otherwise
+        # leave a denied file sitting in the clone, which `git add -A` keeps.
+        for _stale in "${NO_PUBLISH[@]}"; do rm -f "$DEST/$_stale"; done
+        _publish "$RUN_DIR"/metrics_*.json "$RUN_DIR"/metadata_*.json \
+                 "$RUN_DIR"/detailed-results_*.jsonl "$RUN_DIR"/output-data*.jsonl \
+                 "$RUN_DIR"/results.jsonl \
+                 "$RUN_DIR"/completeness.json "$RUN_DIR"/portforward-events.jsonl \
+                 "$RUN_DIR"/*.log
 	cp "$ENGINE_MANIFEST" "$RUN_DIR/" 2>/dev/null
         cp "$ENGINE_MANIFEST" "$DEST/" 2>/dev/null
         cp "${BASH_SOURCE[0]}" "$RUN_DIR/" 2>/dev/null
