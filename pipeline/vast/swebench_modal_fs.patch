@@ -1,0 +1,32 @@
+diff --git a/swebench/harness/modal_eval/run_evaluation_modal.py b/swebench/harness/modal_eval/run_evaluation_modal.py
+index e302970..ed1433f 100644
+--- a/swebench/harness/modal_eval/run_evaluation_modal.py
++++ b/swebench/harness/modal_eval/run_evaluation_modal.py
+@@ -26,7 +26,7 @@ REMOTE_SANDBOX_ENTRYPOINT_PATH = f"/root/{SANDBOX_ENTRYPOINT}.py"
+ 
+ app = modal.App("swebench-evaluation")
+ 
+-swebench_image = modal.Image.debian_slim().pip_install("swebench", "tenacity")
++swebench_image = modal.Image.debian_slim().pip_install("swebench", "tenacity").add_local_python_source("swebench")
+ 
+ from swebench.harness.constants import (
+     APPLY_PATCH_FAIL,
+@@ -62,9 +62,6 @@ class ModalSandboxRuntime:
+         self.verbose = verbose
+         self._stream_tasks = []
+ 
+-        # Hack for pylint
+-        self.write_file("/sys/fs/cgroup/cpu/cpu.shares", "2048")
+-
+     @tenacity.retry(
+         stop=tenacity.stop_after_attempt(7),
+         wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
+@@ -114,7 +111,7 @@ class ModalSandboxRuntime:
+             pass
+ 
+     def write_file(self, file_path: str, content: str):
+-        self.sandbox.open(file_path, "w").write(content)
++        self.sandbox.filesystem.write_text(content, file_path)
+ 
+     def exec(self, command: str) -> tuple[str, int]:
+         """

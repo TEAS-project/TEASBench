@@ -83,7 +83,20 @@ RESULTS_REPO="TEAS_Development_Results_Private"
 RESULTS_REPO_USER="TEAS-project"
 RESULTS_REPO_URL="https://oauth2:$GIT_TOKEN@github.com/$RESULTS_REPO_USER/$RESULTS_REPO.git"
 echo "Cloning results repo $RESULTS_REPO"
-git clone "$RESULTS_REPO_URL"
+# Shallow, single-branch, no-checkout up front, then a cone-mode sparse-checkout that
+# push_results (below) grows by one directory per row it publishes. --filter=blob:none
+# makes it a partial clone so blobs for the repo's whole accumulated history of prior
+# runs are never downloaded -- sparse-checkout alone only stops them being written to
+# the working tree, not fetched.
+# The results repo's .lfsconfig points at gitlab.eidf.ac.uk and some of its leaves are
+# LFS-tracked. The sparse checkout below keeps those paths out of the working tree so the
+# smudge filter never runs; GIT_LFS_SKIP_SMUDGE is a guard for the case where the cone ever
+# widens. GIT_TERMINAL_PROMPT=0 stops an unattended run blocking on a credential prompt for
+# that GitLab host, which the GitHub token in $RESULTS_REPO_URL cannot satisfy anyway.
+export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
+git clone --quiet --branch main --single-branch --depth 1 --filter=blob:none --no-checkout "$RESULTS_REPO_URL" "$RESULTS_REPO"
+git -C "$RESULTS_REPO" sparse-checkout init --cone
+git -C "$RESULTS_REPO" checkout --quiet main
 
 # Get AgentCAP commit hash for reproducibility (AgentCAP is git-cloned into /opt/AgentCAP at
 # image build time -- see pipeline/vast/{sglang,vllm}/Dockerfile.agentic -- so its .git dir is
@@ -193,9 +206,12 @@ push_results() {
       '{teasbench_commit: $teasbench_commit, agentcap_commit: $agentcap_commit, benchmark: $benchmark, model: $model, num_tasks: $num_tasks, concurrency: $concurrency, sandbox_provider: (if $sandbox_provider == "" then null else $sandbox_provider end), timings: ($timings | add)}' \
       > "$output_dir/provenance.json"
 
-    # Pull to refresh before committing and pushing in case there have been any pushes from elsewhere since the last pull.
+    # All git work for this row happens in the clone.
     cd "$BASE_DIR/$RESULTS_REPO"
-    git pull "$RESULTS_REPO_URL" main
+
+    # Bring this row's subdirectory into the sparse-checkout scope -- a brand-new
+    # directory not yet in scope silently fails to stage with a plain `git add`.
+    git sparse-checkout add "$run_subdir"
 
     shopt -s nullglob
     ADD_FILES=(
@@ -209,7 +225,22 @@ push_results() {
         git add -f "${ADD_FILES[@]}"
     fi
     git commit -m "auto: ${r[inference_engine]}-${r[model]}-${r[benchmark]}-nt${r[num_tasks]}-${r[gpu]}x${r[num_gpu]}"
-    git push "$RESULTS_REPO_URL"
+    # Push first and only reconcile if another instance got there first: fetching up
+    # front costs a round trip per CSV row even when nothing has changed. Every row
+    # writes its own timestamped directory, so a rejected push is never a real
+    # conflict and the rebase is a trivial replay of an add-only commit.
+    local pushed=0
+    for attempt in 1 2 3 4 5 6; do
+        # lfs.locksverify=false: git-lfs's pre-push hook calls the locking API even
+        # when nothing being pushed is LFS-tracked -- one more chance to be asked
+        # for GitLab credentials. Only the lock check is disabled (not --no-verify),
+        # so the hook's upload path still works if a leaf here ever becomes tracked.
+        if git -c lfs.locksverify=false push -q "$RESULTS_REPO_URL" HEAD:main; then pushed=1; break; fi
+        echo "push attempt $attempt rejected; rebasing onto origin/main"
+        git pull --rebase -q "$RESULTS_REPO_URL" main || break
+        sleep $(( (RANDOM % 20) + 5 ))
+    done
+    [ $pushed -eq 1 ]
 }
 
 # These are the headers we always need to be present in the CSV, otherwise we can't run the
@@ -378,6 +409,7 @@ while IFS=',' read -r -a VALUES; do
     if [[ "$benchmark" == "swe-bench-lite" ]]; then
         export SWEBENCH_HARNESS_MODAL=1
         export MODAL_TOKEN_ID MODAL_TOKEN_SECRET
+        env -u MODAL_TOKEN_ID -u MODAL_TOKEN_SECRET modal token set --token-id "$MODAL_TOKEN_ID" --token-secret "$MODAL_TOKEN_SECRET"
         sandbox_provider_for_provenance="modal"
     else
         sandbox_provider_for_provenance=""

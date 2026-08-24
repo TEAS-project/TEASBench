@@ -231,6 +231,53 @@ GPU_KEY_FALLBACK = {
 }
 
 
+# Deployment tier is an owned-hardware property, so it lives beside the price/power catalog
+# consumed by both cost producers.  A missing entry is not silently treated as datacentre:
+# choosing the wrong lifetime/utilisation pair changes every buy metric for that accelerator.
+GPU_TIER = {
+    "a100": "datacentre",
+    "h100": "datacentre",
+    "h200": "datacentre",
+    "b200": "datacentre",
+    "b300": "datacentre",
+    "mi355x": "datacentre",
+    "gb10": "workstation",
+    "blackhole-p150b": "workstation",
+    "cs3": "datacentre",
+}
+
+# Published buy-TCO defaults.  `base_lifetime_hours` is the calendar lifetime before the
+# utilisation discount; the effective amortisation window is their product.  CLI overrides are
+# resolved per run by resolve_buy_tco_assumptions, after the accelerator key is known.
+BUY_TCO_DEFAULTS_BY_TIER = {
+    "datacentre": {"base_lifetime_hours": 5 * 365 * 24, "utilisation": 0.9},
+    "workstation": {"base_lifetime_hours": 3 * 365 * 24, "utilisation": 0.4},
+}
+
+
+def resolve_buy_tco_assumptions(
+    gpu_key: str,
+    *,
+    base_lifetime_hours: float | None = None,
+    utilisation: float | None = None,
+) -> dict[str, float | str]:
+    """Resolve tier defaults plus independent explicit CLI overrides for one accelerator."""
+    tier = GPU_TIER[gpu_key]
+    defaults = BUY_TCO_DEFAULTS_BY_TIER[tier]
+    base = defaults["base_lifetime_hours"] if base_lifetime_hours is None else base_lifetime_hours
+    util = defaults["utilisation"] if utilisation is None else utilisation
+    if not isinstance(base, (int, float)) or isinstance(base, bool) or base <= 0:
+        raise ValueError("buy lifetime hours must be greater than zero")
+    if not isinstance(util, (int, float)) or isinstance(util, bool) or not (0.0 < util <= 1.0):
+        raise ValueError("utilisation must be in (0, 1]")
+    return {
+        "hardware_tier": tier,
+        "base_lifetime_hours": float(base),
+        "utilisation": float(util),
+        "lifetime_hours": float(base) * float(util),
+    }
+
+
 GPU_SPECS: dict[str, dict] = {
     "a100": {
         "price_per_unit_usd": 15000.0,
@@ -280,14 +327,14 @@ GPU_SPECS: dict[str, dict] = {
         "tdp_w": 300,
         "tdp_source": "https://docs.tenstorrent.com/aibs/blackhole/",
     },
-    # Cerebras publishes no CS-3 list price. The Next Platform reports the Galaxy-1
-    # contract at $100M / 32 nodes including Cerebras operations and calls $2.5M per
-    # node its best estimate. This is therefore an analyst estimate, not a vendor quote.
-    # Both it and the 23 kW figure cover one complete integrated CS-3 system, so the
-    # normal 1.2x host/chassis uplift must not be added a second time.
+    # Cerebras publishes no CS-3 list price. The $1.2M per-system figure was privately
+    # communicated by the hardware developer (Cerebras); there is no public source, so
+    # price_source carries a provenance label rather than a URL. Both it and the 23 kW
+    # figure cover one complete integrated CS-3 system, so the normal 1.2x host/chassis
+    # uplift must not be added a second time.
     "cs3": {
-        "price_per_unit_usd": 2500000.0,
-        "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
+        "price_per_unit_usd": 1200000.0,
+        "price_source": "privately communicated by the hardware developer (Cerebras); no public source",
         "tdp_w": 23000,
         "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
         "capital_scale": 1.0,
@@ -301,7 +348,7 @@ CPU_SPECS: dict[str, dict] = {
     "cs3-integrated-host": {
         "model": "Included in complete Cerebras CS-3 system",
         "price_per_unit_usd": 0.0,
-        "price_source": "https://www.nextplatform.com/ai/2024/03/14/cerebras-goes-hyperscale-with-third-gen-waferscale-supercomputers/1642584",
+        "price_source": "privately communicated by the hardware developer (Cerebras); no public source",
         "tdp_w": 0,
         "tdp_source": "https://www.cerebras.ai/blog/cerebras-cs-3-vs-nvidia-b200-2024-ai-accelerators-compared",
     },

@@ -741,6 +741,26 @@ rules:
       image:
         cuda_variant: "-cu130"
 
+  # The x2 controlled-variation anchors and the separately served alternate
+  # builds used the official version-only image tags on both A100x2 and
+  # H100x2. Freeze those exact tags for study rows instead of inheriting a
+  # hardware-wide image variant.
+  - match:
+      study_block:
+        - "E1"
+        - "E2"
+        - "E3"
+        - "E4"
+        - "E5"
+        - "E6"
+    image:
+      cuda_variant: null
+
+  - match:
+      compatibility_preflight: true
+    client_flags:
+      output_dir: "/dev/shm/batch-size-default/compatibility-preflight/$timestamp"
+
 ###########################################
 # Rules based on model and inference engine
 ###########################################
@@ -1539,4 +1559,3 @@ rules:
     teas_env_exports:
       value: |
         export TEAS_BACKEND="swebench-modal"
-

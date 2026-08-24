@@ -16,7 +16,7 @@ TEASBench is continuously evolving to track new and emergent workloads and hardw
 
 The benchmarks in this release cover two workload classes / families that jointly characterise contemporary production traffic while stressing inference systems in distinct ways. The first consists of **basic tasks** (single-turn chat) on relatively short input and output contexts. Secondly, to track the state of the art we include a workload based on **reasoning and agentic** workflows. The long outputs, multi-turn structure, and tool-calling traces in this workload yield latency and cost profiles unlike traditional inference workloads. 
 
-The TEAS benchmarks use mostly Mixture of Experts (MoE) models as they represent the majority of state-of-the-art open-source LLMs, as well as a small dense model (`qwen3-4b`) as a low memory requirement control that enables comparison across a wide range of devices. These are served using vLLM or SGLang on a range of GPUs including NVIDIA A100, H100, H200, B200, B300, GB10, AMD MI355X (as well as custom engines for emerging hardware, see [§10](#10-support-for-emerging-hardware)).
+The TEAS benchmarks use mostly Mixture of Experts (MoE) models as they represent the majority of state-of-the-art open-source LLMs, as well as a small dense model (`qwen3-4b`) as a low memory requirement control that enables comparison across a wide range of devices. These are served using vLLM or SGLang on a range of GPUs including NVIDIA A100, H100, H200, B200, B300, GB10, AMD MI355X (as well as custom engines for emerging hardware, see [§9](#9-support-for-emerging-hardware)).
 
 | Family/workload | Models | Benchmark Datasets |
 |---|---|---|
@@ -77,9 +77,9 @@ On EIDF and other clusters that do not grant pods role-based access control (RBA
 
 ### Vast.ai only
 
-- `vastai` CLI installed and authenticated (`vastai login`)
-- The container images built and pushed ([§6.1](#61-vastai-setup))
-- Instance secrets set in the Vast.ai console ([§6.2](#62-generate-and-launch))
+- `vastai` CLI installed and authenticated ([§5.2](#52-vastai-setup))
+- Instance secrets set in the Vast.ai console ([§5.2](#52-vastai-setup))
+- The container images built and pushed if using non-default ([§5.2](#56-building-one-of-the-images))
 
 ---
 
@@ -525,130 +525,147 @@ matters is that every stage ran and wrote its outputs.
 
 ## 5. Running MoE benchmarks on Vast.ai
 
-Most of the engine driving the benchmarks is built into the container images we use
-in the Vast.ai pipeline.
+On the Vast.ai cloud provider, the pipelines are provided in two parts:
 
-### 5.1 Vast.ai setup
+1) Local Python scripts to set up and submit jobs, very similarly to Kubernetes/EIDF runs.
+2) Container images to be run in Vast.ai instances containing the software required to perform the benchmarks.
 
-On Vast.ai itself, either through the command line interface or the web console,
-you will need to set the following environment variables to be injected into any
-instances you create:
+These containers are derived from the same official vLLM and SGLang images used on the Kubernetes pipeline, but we add
+the extra software and scripting needed to automate benchmark runs and result pushes to GitHub. We also bake the same
+resolution logic for environment and MoE/Agent-CAP server/client launch commands into the images, to ensure that a
+Vast.ai run will have the same setup. Once a container instance is running on a GPU node, it will run through the set of
+benchmarks it is provided with, one-by-one, and push the results to GitHub. Runtime parameters (namely which benchmarks
+are to be run) are passed to the instance via environment variables passed through the Vast.ai CLI. Similarly, Vast.ai
+must be set up to provide API keys and GitHub PATs to the environment within instances, as required by the specific
+benchmarks being run.
 
-- `GIT_TOKEN`, a GitHub personal access token with read access to the TEASBench repository. This is used to push new results to 
-  the repository inside the instance.
-- `HF_TOKEN`, a Hugging Face token used to download the models inside the instance.
-- `OPENAI_API_KEY`, an OpenAI API key used for accessing OpenAI services when judging `arena-hard` benchmark results.
+### 5.1 Local prerequisites
 
-### 5.2 Local prerequisites
-
-Aside from the prerequisites listed above, you will need to install the Vast.ai CLI and authenticate it: https://docs.vast.ai/cli/.
+For Vast.ai, you will need an account with credit and an API key with instances read/write permissions. You can follow
+the [Vast.ai documentation](https://docs.vast.ai/cli/) to create the key, install the CLI, and log in.
 The Vast.ai pipeline uses the CLI to search for offers and launch instances; from that point on, a benchmark run will manage itself.
 
-### 5.3 Generate launch scripts
+Otherwise, you will not need any extra Python packages beyond those required to run the generation scripts as described
+above: `pyyaml` and `pandas`.
 
-The scripts to launch Vast.ai instances are created in a similar fashion to the K8s Job YAMLs. `--site vastai`
-selects the Vast.ai site profile, whose orchestrator makes the generator produce launch scripts rather than Job
-YAMLs. For example, the following command generates
-Vast.ai scripts in the `out/` directory for the MoE experiments described in `moe-experiments-vastai.csv`:
+### 5.2 Vast.ai setup
+
+To allow the various tools in the TEASBench pipeline to access external services, you will need to set up some
+environment variables in your Vast.ai account. These are injected into any instance you launch, and are used by the
+TEASBench pipeline to access GitHub, HuggingFace, OpenAI, and other services. You can add these through the web
+interface or via the CLI
+
+You will also need to set up the following environment variables within your Vast.ai account:
+- `GIT_TOKEN` — a GitHub personal access token with repo write access, to push results to the results repository.
+- `HF_TOKEN` — a HuggingFace token, to download models from the Hugging Face Hub.
+- `OPENAI_API_KEY` — an OpenAI API key, providing a judge.
+
+If you are running the agentic benchmarks, you will additionally need these three environment variables:
+- `GEMINI_API_KEY` — a Gemini API key, providing a judge.
+- `MODAL_TOKEN_ID` — a Modal API token ID, providing access to Modal sandboxes for SWE-Bench.
+- `MODAL_TOKEN_SECRET` — a Modal API token secret, providing access to Modal sandboxes for SWE-Bench.
+
+If you wish to reproduce the full set of TEASBench results, then you will also need to set the following for
+MCP-Atlas runs in order to enable the GitHub and Brave tool servers:
+- `GITHUB_TOKEN` — a GitHub personal access token with repo read access
+- `BRAVE_API_KEY` — a Brave API key, providing access to the Brave tool server
+
+In summary:
+
+| Environment variable                   | Purpose                           | Required by       |
+|----------------------------------------|-----------------------------------|-------------------|
+| `GIT_TOKEN`                            | Push results to repo              | everything        |
+| `HF_TOKEN`                             | Download models from Hugging Face | everything        |
+| `OPENAI_API_KEY`                       | Judge result accuracy             | `arena-hard`      |
+| `GEMINI_API_KEY`                       | Judge result accuracy             | `imo-answerbench` |
+| `OPENROUTER_API_KEY`                   | Judge result accuracy             | `mcp-atlas`       |
+| `GITHUB_TOKEN`, `BRAVE_API_KEY`        | Tool server API keys (see below)  | `mcp-atlas`       |
+| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | Run Modal sandboxes               | `swe-bench-lite`  |
+
+You can set these on Vast.ai either through the command line interface or the web console. Vast.ai then automatically
+exports them as environment variables in instances for the TEASBench pipeline to use for service access during benchmark
+runs.
+
+With regard to MCP-Atlas tool servers, `GITHUB_TOKEN` and `BRAVE_API_KEY` are not strictly required; without them, the
+benchmark will progress with the tools that do not require API keys. However, as the original TEASBench results included
+these two tools, any reproduction should also provide them.
+
+### 5.3 Vast.ai workflow
+
+The same workflow is used for both MoE/basic and agentic benchmark suites.
+
+When running on Vast.ai using the TEASBench-provided images at `ghcr.io/teas-project`, you will generally
+follow these steps:
+
+1. Prepare an experiment CSV file describing the benchmarks you want to run, examples of which can be found in the root
+   `experiments/` directory. Each CSV can describe MoE/basic or agentic benchmarks.
+2. Run the pipeline `generate.py` script locally:
+   ```bash
+    python3 generate.py --csv_file <path to experiment CSV> --site vastai
+   ```
+   You may optionally provide a `--target_dir` argument to specify where the output should be generated.
+   Depending on the contents of the CSV, one or more bash scripts will be created, each corresponding to one
+   engine/GPU/numGPU combination from the CSV. The `generate.py` output will tell you these scripts' names and how many
+   rows from the original CSV have been included in each.
+3. Run the generated bash script(s), for example the very simple
+   ```bash
+   bash ./vast_agentic_mcp-atlas_sglang_H100x2.sh
+   ```
+   would have been generated to run the agentic MCP-Atlas with SGLang on 2 H100 GPUs. Vast.ai will be called to provide
+   a list of offers matching the hardware needed by the given script (in this example H100x1), sorting them in order of
+   increasing price.
+4. You will prompted to enter the offer number of your choice. Do so, and Vast.ai will reserve the instance and launch
+   the container, passing to it a base64 encoding of the relevant rows from the original CSV file. The container will
+   run the benchmarks, pushing results to GitHub as it goes. You can monitor the progress of the benchmarks through the
+   logs on the CLI or on the Vast.ai web interface.
+5. In normal operation, once all benchmarks from the corresponding rows of the original CSV have completed, the instance
+   will shut itself down.
+
+### 5.4 Manually terminating a run
+
+Normally, a Vast.ai instance will restart if it ends for any reason. In order to get around this and not restart (and so
+re-run the benchmarks indefinitely), the benchmarking script will call the Vast.ai API to shut down its own instance.
+If multiple attempts to reach Vast.ai's API endpoint fail, the instance will run `sleep infinity`. You may wish to check
+any long running instances to ensure they are still working have not gone to sleep. If they have done so, end the
+instance manually; your results should still have been pushed to the remote repository.
+
+### 5.5 Differences from a Kubernetes cluster run
+
+There are some architectural differences to note between the pipeline site types for agentic benchmarks:
+
+- MCP-Atlas runs tool servers in a sidecar pod on Kubernetes clusters. Vast.ai runs simply run them in the background on
+  the same container.
+- SWE-Bench sandboxes and grading are carried in Kubernetes pods and exec pods on Kubernetes clusters. On Vast.ai, Modal
+  is used; this is swe-rex native.
+
+### 5.6 Building one of the images
+
+Four container images are provided via the GitHub Container Registry:
+
+| Image name                            | Dockerfile                  | Purpose                          |
+|---------------------------------------|-----------------------------|----------------------------------|
+| `ghcr.io/teas-project/vllm-bench`     | `vllm/Dockerfile`           | Basic/MoE benchmarks with vLLM   |
+| `ghcr.io/teas-project/sglang-bench`   | `sglang/Dockerfile`         | Basic/MoE benchmarks with SGLang |
+| `ghcr.io/teas-project/vllm-agentic`   | `vllm/Dockerfile.agentic`   | Agentic benchmarks with vLLM     |
+| `ghcr.io/teas-project/sglang-agentic` | `sglang/Dockerfile.agentic` | Agentic benchmarks with SGLang   |
+
+The general method to build an image is to run in the base `TEASBench` directory e.g. with Podman:
 
 ```bash
-cd pipeline
-python3 generate.py \
-    --csv_file=../experiments/moe-experiments-vastai.csv \
-    --target_dir=./out \
-    --site vastai
+podman build --platform=linux/amd64 --build-arg TEASBENCH_COMMIT=$(git rev-parse --short HEAD) -t ghcr.io/teas-project/vllm-bench:latest -f pipeline/vast/vllm/Dockerfile pipeline/
 ```
 
-This produces one script per (engine, GPU, num_gpu) triplet, e.g.
-`vast_sglang_H200x8.sh`, with the relevant rows from the original CSV file base64 encoded within.
+The images include components of the pipeline templating code, required to ensure that the benchmark server and client
+commands run exactly as they do in Kubernetes/EIDF runs.
 
-### 5.4 Launch benchmarks
-
-Run a generated script to launch a Vast.ai instance running one of the TEASBench images. This will
-automatically run the benchmarks described in the original CSV file corresponding to this
-script's (engine, GPU, num_gpu) triplet and push results to GitHub.
-
-The scripts take no arguments. For example, to launch the example script generated just above,
-for a `sglang` engine on a `H200` instance with 8 GPUs, run:
-
-```bash
-bash out/vast_sglang_H200x8.sh
-```
-
-The script will show current offers from Vast.ai matching the requested GPU type and number,
-prompting you to select one of the offer IDs. The offers shown are sorted by price, cheapest first.
-
-Selecting an offer will launch the instance, printing its ID to the terminal.
-
-The running instance can be monitored through the Vast.ai web console or CLI. The benchmarks will run
-sequentially, pushing results to GitHub as they complete. Once all are complete, the instance will
-automatically destroy itself.
+If you wish to build your own images, you should change the tag `-t` option to reflect the container registry you wish
+to use.
 
 ---
 
-## 6. Running agentic benchmarks on Vast.ai
+## 6. Troubleshooting
 
-The process for running agentic benchmarks on Vast.ai is broadly similar to the MoE benchmarks, with some
-additional environment variables required for certain benchmarks. The process is outlined here.
-
-### 6.1 Vast.ai setup
-
-As with the MoE benchmarks, some environment variables within the container must be provided
-through the Vast.ai interface so they can be picked up and used within the instance. Exactly
-which are required depend on the benchmark(s) being run. Use the following table:
-
-| Environment variable                                  | Purpose                          | Needed for benchmark?          |
-|-------------------------------------------------------|----------------------------------|--------------------------------|
-| `GIT_TOKEN`                                           | Push results to repo             | everything                     |
-| `HF_TOKEN`                                            | Download models from Hugging Face | everything                     |
-| `GEMINI_API_KEY`                                      | Judge                            | `imo-answerbench`              |
-| `OPENROUTER_API_KEY`                                  | Judge                            | `mcp-atlas`                    |
-| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`                | Run Modal sandboxes              | `swe-bench-lite`               |
-| `GITHUB_TOKEN`, `BRAVE_API_KEY`, `ALCHEMY_API_KEY`, … | Tool server API keys (see below) | `mcp-atlas`                    |
-
-For `mcp-atlas`, any tool server API key in the [mcp-atlas `env.template`](https://github.com/scaleapi/mcp-atlas/blob/main/env.template)
-is picked up from a same-named environment variable, set whichever you have, using the template as a guide.
-
-### 6.2 Generate and launch
-
-Running an agentic benchmark suite is otherwise identical to the MoE benchmark process.
-Provide a CSV file identical to those used for K8s runs and use the `generate.py` script
-with `--site vastai` to generate bash scripts:
-
-```bash
-cd pipeline
-python3 generate.py \
-    --csv_file=../experiments/swe-bench-lite-vastai.csv \
-    --target_dir=./out \
-    --site vastai
-```
-
-Then, run one of the generated bash scripts:
-
-```bash
-bash out/vast_agentic_swe-bench-lite_sglang_H200x1.sh
-```
-
-This will use the Vast.ai CLI to find and list appropriate offers and prompt you to select one.
-The appropriate benchmark container will run on the instance you select, pushing benchmark results
-to GitHub as they complete.
-
-### 6.3 What differs from a K8s cluster
-
-Due to the way agents run, there are some differences in how they are executed on Vast.ai instances vs a K8s cluster.
-The following table summarises those differences:
-
-|                       | K8s cluster       | Vast.ai                            |
-|-----------------------|-------------------|------------------------------------|
-| MCP Atlas tool server | sidecar container | background process, same container |
-| SWE-bench sandboxes   | Kubernetes pods   | Modal                              |
-| SWE-bench grading     | exec pods         | Modal                              |
-
----
-
-## 7. Troubleshooting
-
-### 7.1 SWE-bench Lite permissions (if using InClusterK8sProvider) 
+### 6.1 SWE-bench Lite permissions (if using InClusterK8sProvider) 
 
 If sandbox creation fails with a `kubectl` permissions error, either apply
 `pipeline/k8s/rbac/teasbench-runner-rbac.yaml`, or switch to the login-node fallback by
@@ -656,7 +673,7 @@ pointing the run at `PortForwardK8sProvider` instead of `InClusterK8sProvider`
 that provider uses *your* kubectl credentials via port-forwarding rather than
 the pod's ServiceAccount. Confirm it works first with [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac).
 
-### 7.2 MCP Atlas scores lower than expected
+### 6.2 MCP Atlas scores lower than expected
 
 **Check the credential log first.** Tool servers with blank API keys still start
 and fail only at tool-call time, so missing credentials look like poor model
@@ -673,7 +690,7 @@ both platforms, because the server set *is* the benchmark definition.
 
 ---
 
-## 8. Where results go
+## 7. Where results go
 
 ```
 <family>/<platform>/<engine>/<model>/<dataset-or-benchmark>/<gpu_type>x<num_gpu>/batch-size-<default-or-1>/<timestamp>/
@@ -701,7 +718,7 @@ root.
 
 ---
 
-## 9. Common tasks
+## 8. Common tasks
 
 **Smoke test before a real sweep**
 
@@ -740,7 +757,7 @@ Edit the relevant
 python3 -m pytest tests/ -q
 ```
 
-## 10. Support for emerging hardware 
+## 9. Support for emerging hardware 
 
 ### Tenstorrent 
 

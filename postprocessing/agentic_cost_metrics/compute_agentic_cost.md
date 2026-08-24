@@ -161,10 +161,11 @@ All rent + buy flags are identical to `../moe/compute_cost.py`. See [`../moe/com
 | Buy | `--buy-num-cpus gpu=N` | Change CPU count per platform |
 | Buy | `--buy-cpu-price cpu_key=usd` | Override CPU price |
 | Buy | `--buy-cpu-tdp cpu_key=W` | Override CPU TDP |
-| Buy | `--buy-lifetime-hours` | Default 26280 (3 yr) |
+| Buy | `--buy-lifetime-hours` | Tier default: 43800 datacentre / 26280 workstation; explicit value overrides both |
+| Buy | `--utilisation` / `--utilization` | Tier default: 0.9 datacentre / 0.4 workstation; explicit value overrides both |
 | Buy | `--buy-electricity-usd-per-kwh` | Default 0.15 |
 | Buy | `--buy-scale-other-capital` | Default 1.2 (MoE-CAP) |
-| Buy | `--buy-cost-mode` | Which mode is mirrored at `buy.cost` top level: `active-resource` (default) or `reserved-worker`; both nested modes are always reported |
+| Buy | `--buy-cost-mode` | Which mode is mirrored at `buy.cost` top level when active-resource timing is evidenced: `active-resource` (default) or `reserved-worker` |
 
 ---
 
@@ -286,6 +287,8 @@ Sidecar JSON written to the same directory as the metrics file:
 
 A `rent` or `buy` block is **omitted** (not zeroed) when prices/specs are missing for that GPU.
 
+Every pass replaces the prior sidecar using only current evidence. Missing TTFT or TPOT preserves E2E-based rent and reserved-worker buy costs but omits prefill, LLM-active, tool-wait, and active-resource fields; missing output-token count preserves per-task costs but omits per-token costs. The exact old sidecar is removed only when no E2E statistic remains costable. `--dry-run` reports the write or removal without changing files.
+
 ---
 
 ## 7. Example run
@@ -330,7 +333,7 @@ p99_tool_wait  = 475.37 − 55.83 = 419.54 s       (88% of p99 wall time)
 | p50 | 0.01605 | 4.63 |
 | p99 | 0.34993 | 101.02 |
 
-**Buy** (defaults: 26,280 h lifetime, $0.15/kWh, scale=1.2)
+**Buy — historical example** (former global 3-year/100% utilisation basis, $0.15/kWh, scale=1.2; current runs use the tier defaults in the options table above, so the rates and results below are not current defaults)
 - GPU effective rate = $1.580/h (= $1.370 amort + $0.210 energy)
 - CPU effective rate = $0.525/h (= $0.458 amort + $0.068 energy)
 
@@ -355,5 +358,5 @@ Reserved-worker upper bound:
 1. **p99 uses avg counts.** `p99_num_requests` / `p99_output_tokens` are not in the metrics file, so `p99_llm_active_s_est` uses average counts with p99 per-event rates. For long-tail tasks (more turns, more tokens) the real p99 LLM-active is larger and `p99_tool_wait_s_est` is correspondingly over-estimated. Treat p99 tool-wait (and thus p99 CPU cost) as an **upper bound**.
 2. **Two buy accounting modes are reported.** `active_resource` is the default attribution mode for multiplexed/continuous-batching serving; `reserved_worker` is a conservative upper bound for single-task workers. Do not mix GPU-full-e2e with CPU-tool-wait as a single metric.
 3. **Per-task wall time and concurrency.** With concurrency > 1, active-resource attribution is usually the cleaner per-task view because idle GPU time during tool waits can be used by other requests. The reserved-worker mode intentionally ignores that multiplexing and treats the full worker as occupied.
-4. **All the MoE caveats still apply** — utilization, `scale_other_capital = 1.2`, electricity price, 3-year lifetime, GPU/CPU MSRPs vs. realized deals. See [`../moe/compute_cost.md`](../moe/compute_cost.md) §7.
+4. **All the MoE caveats still apply** — tier-specific utilisation and lifetime, `scale_other_capital = 1.2`, electricity price, and GPU/CPU estimates versus realised deals. See [`../moe/compute_cost.md`](../moe/compute_cost.md) §7.
 5. **`avg_total_output_tokens` is per-task, not per-LLM-call.** All per-1M-token figures are amortized over the full per-task output budget.

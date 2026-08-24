@@ -5,7 +5,7 @@ import os
 import pathlib
 import pandas as pd
 from utils import (HF_MODEL_MAP, available_sites, benchmark_family, get_run_name,
-                   k8s_friendlify, load_site, local_model_path)
+                   k8s_friendlify, load_site, local_model_path, study_fields)
 from template import Template as yaml_template
 
 def write_yaml_files(target_dir, file_name, file_content):
@@ -36,6 +36,7 @@ def build_params(row, site_override=None, expect_orchestrator=None):
     # is (MoE rows use 'dataset' instead, and leave this empty).
     p.setdefault("benchmark", None)
     benchmark_family(p)  # fail fast, with the offending row's own message
+    study_fields(p)      # validates study rows (moe-only, pinned engine_version)
 
     # 'platform' names the site profile this row runs under -- configs/sites/
     # <platform>.yaml. --site overrides it for every row; otherwise a row's own

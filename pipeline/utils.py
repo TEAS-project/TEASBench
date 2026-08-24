@@ -10,6 +10,7 @@ load_site() below.
 
 import functools
 import os
+import re
 
 import yaml
 
@@ -149,6 +150,86 @@ MCP_ENABLED_SERVERS = (
     "wikipedia"
 )
 
+# Identity stamped into every leaf of the controlled repeatability /
+# engine-build study. Rows opt in via a 'study_block' CSV column (E1..E6);
+# see experiments/replication-study-eidf.csv and
+# pipeline/k8s/helpers/run_study_block.sh. The x2 suffix separates this fresh
+# six-block design from earlier development pilots that reused E1 on x1
+# hardware; study_id + block_id must never pool those populations.
+STUDY_ID = "controlled-variation-2026-x2"
+
+# Exact within-block order for the frozen six-block x2 study. Each pair lists
+# (engine, dataset, first build, second build); expansion below assigns orders
+# 1..12. Keeping this independent of the CSV makes malformed or ad-hoc study
+# rows fail generation instead of silently acquiring study provenance.
+STUDY_PAIR_PLANS = {
+    "e1": (
+        ("vllm", "gsm8k", "0.16.0", "0.21.0"),
+        ("vllm", "arena-hard", "0.16.0", "0.21.0"),
+        ("vllm", "longbench_v1", "0.16.0", "0.21.0"),
+        ("sglang", "gsm8k", "0.5.9", "0.5.12.post1"),
+        ("sglang", "arena-hard", "0.5.9", "0.5.12.post1"),
+        ("sglang", "longbench_v1", "0.5.9", "0.5.12.post1"),
+    ),
+    "e2": (
+        ("sglang", "arena-hard", "0.5.12.post1", "0.5.9"),
+        ("sglang", "longbench_v1", "0.5.12.post1", "0.5.9"),
+        ("sglang", "gsm8k", "0.5.12.post1", "0.5.9"),
+        ("vllm", "arena-hard", "0.21.0", "0.16.0"),
+        ("vllm", "longbench_v1", "0.21.0", "0.16.0"),
+        ("vllm", "gsm8k", "0.21.0", "0.16.0"),
+    ),
+    "e3": (
+        ("vllm", "longbench_v1", "0.21.0", "0.16.0"),
+        ("vllm", "gsm8k", "0.21.0", "0.16.0"),
+        ("vllm", "arena-hard", "0.21.0", "0.16.0"),
+        ("sglang", "longbench_v1", "0.5.12.post1", "0.5.9"),
+        ("sglang", "gsm8k", "0.5.12.post1", "0.5.9"),
+        ("sglang", "arena-hard", "0.5.12.post1", "0.5.9"),
+    ),
+    "e4": (
+        ("sglang", "gsm8k", "0.5.9", "0.5.12.post1"),
+        ("sglang", "longbench_v1", "0.5.9", "0.5.12.post1"),
+        ("sglang", "arena-hard", "0.5.9", "0.5.12.post1"),
+        ("vllm", "gsm8k", "0.16.0", "0.21.0"),
+        ("vllm", "longbench_v1", "0.16.0", "0.21.0"),
+        ("vllm", "arena-hard", "0.16.0", "0.21.0"),
+    ),
+    "e5": (
+        ("vllm", "longbench_v1", "0.21.0", "0.16.0"),
+        ("vllm", "arena-hard", "0.21.0", "0.16.0"),
+        ("vllm", "gsm8k", "0.21.0", "0.16.0"),
+        ("sglang", "longbench_v1", "0.5.12.post1", "0.5.9"),
+        ("sglang", "arena-hard", "0.5.12.post1", "0.5.9"),
+        ("sglang", "gsm8k", "0.5.12.post1", "0.5.9"),
+    ),
+    "e6": (
+        ("sglang", "arena-hard", "0.5.9", "0.5.12.post1"),
+        ("sglang", "gsm8k", "0.5.9", "0.5.12.post1"),
+        ("sglang", "longbench_v1", "0.5.9", "0.5.12.post1"),
+        ("vllm", "arena-hard", "0.16.0", "0.21.0"),
+        ("vllm", "gsm8k", "0.16.0", "0.21.0"),
+        ("vllm", "longbench_v1", "0.16.0", "0.21.0"),
+    ),
+}
+
+
+def _study_coordinates():
+    coordinates = {}
+    for block, pairs in STUDY_PAIR_PLANS.items():
+        leaves = []
+        for engine, dataset, first, second in pairs:
+            leaves.extend(((engine, first, dataset), (engine, second, dataset)))
+        coordinates[block] = dict(enumerate(leaves, 1))
+    return coordinates
+
+
+STUDY_COORDINATES = _study_coordinates()
+STUDY_HARDWARE = {
+    "e1": "A100", "e2": "A100", "e3": "A100",
+    "e4": "H100", "e5": "H100", "e6": "H100",
+}
+
 # Pipeline families, declared per row in the leading CSV 'family' column.
 # "moe" is the basic server+client benchmark family (gsm8k, arena-hard,
 # longbench_v1); "agentic" is AGENTIC_BENCHMARKS above. The values match the
@@ -250,10 +331,111 @@ def local_model_path(model: str, site: dict):
     return f"{root}/{HF_MODEL_MAP[model]}" if root else ""
 
 
+def study_fields(p: dict):
+    """Return a validated frozen-study (block, version), or None.
+
+    Every study coordinate is allowlisted here, independently of the CSV.
+    Study-only fields without a block are rejected too, so a direct generator
+    call cannot smuggle an arbitrary image version into an ordinary run.
+    """
+    block = p.get("study_block")
+    if block is None or block == "":
+        stray = [key for key in ("engine_version", "study_order", "moe_cap_ref")
+                 if p.get(key) not in (None, "")]
+        if stray:
+            raise ValueError(
+                f"study-only fields {stray} require a valid study_block")
+        return None
+    if p.get("family") != "moe":
+        raise ValueError("study_block is only supported for family 'moe' rows")
+    if not re.fullmatch(r"E[1-6]", str(block)):
+        raise ValueError(f"study_block {block!r}: expected E1..E6")
+    block = str(block).lower()
+    version = p.get("engine_version")
+    if version is None or str(version).strip() == "":
+        raise ValueError(
+            f"study row (block {block}) has no engine_version; study rows "
+            "must pin the build explicitly")
+    def decimal_integer(key):
+        value = p.get(key)
+        if not re.fullmatch(r"[0-9]+", str(value)):
+            raise ValueError(f"study row {block}: {key} must be a decimal integer")
+        parsed = int(str(value), 10)
+        if str(value) != str(parsed):
+            raise ValueError(f"study row {block}: {key} must use canonical decimal form")
+        return parsed
+
+    order = decimal_integer("study_order")
+    num_samples = decimal_integer("num_samples")
+    num_gpu = decimal_integer("num_gpu")
+    fixed = {
+        "model": "gpt-oss-120b",
+        "num_samples": 256,
+        "gpu": STUDY_HARDWARE[block],
+        "num_gpu": 2,
+        "batch_size": "default",
+    }
+    actual = {
+        "model": p.get("model"),
+        "num_samples": num_samples,
+        "gpu": p.get("gpu"),
+        "num_gpu": num_gpu,
+        "batch_size": p.get("batch_size"),
+    }
+    if actual != fixed:
+        raise ValueError(f"study row {block}/{order}: frozen fields {fixed}, got {actual}")
+    expected = STUDY_COORDINATES[block].get(order)
+    coordinate = (p.get("inference_engine"), str(version), p.get("dataset"))
+    if expected is None or coordinate != expected:
+        raise ValueError(
+            f"study row {block}/{order}: expected {expected}, got {coordinate}")
+    return block, str(version)
+
+
+def study_version_token(version: str):
+    """Dot-free engine version for k8s names: '0.5.12.post1' -> '0512p1'."""
+    return str(version).replace(".", "").replace("post", "p")
+
+
+def compatibility_preflight_fields(p: dict):
+    """Return (engine, version) for one of the four excluded E1 preflights."""
+    marker = p.get("compatibility_preflight")
+    if marker in (None, "", False):
+        return None
+    if marker is not True and str(marker).lower() != "true":
+        raise ValueError("compatibility_preflight must be true when specified")
+    study = study_fields(p)
+    order = int(str(p["study_order"]), 10)
+    if (study is None or study[0] != "e1" or p.get("dataset") != "longbench_v1"
+            or order not in (5, 6, 11, 12)):
+        raise ValueError(
+            "compatibility_preflight is limited to the four E1 LongBench A100x2 recipes")
+    return p["inference_engine"], study[1]
+
+
 def get_run_name(p: dict):
     if benchmark_family(p) == "agentic":
         return (f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}"
                 f"_{p['benchmark']}_nt{p['num_tasks']}_{p['gpu']}x{p['num_gpu']}")
+
+    preflight = compatibility_preflight_fields(p)
+    if preflight:
+        engine, version = preflight
+        return (f"preflight_{engine}_{study_version_token(version)}"
+                f"_{MODEL_SHORT_NAME_MAP[p['model']]}"
+                f"_{DATASET_SHORT_NAME_MAP[p['dataset']]}"
+                f"_{p['gpu']}x{p['num_gpu']}")
+
+    study = study_fields(p)
+    if study:
+        block, version = study
+        # No ns/bsd segments (frozen at 256 samples, batch-default) so the
+        # job name + generateName suffix stays under the 63-char label limit.
+        return (f"study_{block}_{p['inference_engine']}"
+                f"_{study_version_token(version)}"
+                f"_{MODEL_SHORT_NAME_MAP[p['model']]}"
+                f"_{DATASET_SHORT_NAME_MAP[p['dataset']]}"
+                f"_{p['gpu']}x{p['num_gpu']}")
 
     name = f"{p['inference_engine']}_{MODEL_SHORT_NAME_MAP[p['model']]}_{DATASET_SHORT_NAME_MAP[p['dataset']]}_ns{p['num_samples']}_{p['gpu']}x{p['num_gpu']}"
 
@@ -292,6 +474,13 @@ def results_repo_dir(p: dict):
     if p['output_length'] != None:
         dir += f"_output{p['output_length']}"
 
+    # Study ingestion marker: .../batch-size-default/study-e1/<timestamp>.
+    # A directory level, not a timestamp suffix — downstream parsers treat
+    # everything below batch-size as the run id but need a PURE timestamp dir.
+    study = study_fields(p)
+    if compatibility_preflight_fields(p):
+        dir += "/compatibility-preflight"
+    elif study:
+        dir += f"/study-{study[0]}"
+
     return dir
-
-

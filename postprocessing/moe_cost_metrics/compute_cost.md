@@ -7,7 +7,7 @@ Computes two cost metrics per benchmark run, for both **rent** and **buy**:
 
 Following [MoE-CAP, arXiv 2412.07067 v6](https://arxiv.org/html/2412.07067v6) (Eqs. 1-3) for the buy model; rent uses the live per-GPU hourly price you look up on vast.ai (or any other provider). Built-in purchase prices are curated current/recent-average market estimates: public pricing for datacenter accelerators is inconsistent across vendors and TEASBench releases should prefer an explicit curated estimate over treating any single blog/OEM listing as canonical.
 
-> **User-facing change notice.** Buy-cost runs now print a short assumptions note. If a TEASBench release needs reproducible buy-cost assumptions, check in or publish explicit price tables and run with `--buy-gpu-prices-json`, `--buy-cpu-prices-json`, and an explicit `--utilisation` value. Existing commands remain compatible: default `--utilisation 1.0` preserves the previous calendar-lifetime assumption, while the output now records `base_lifetime_hours`, effective `lifetime_hours`, and `utilisation`.
+> **User-facing change notice.** Buy-cost runs print their resolved assumptions per accelerator. Published defaults are tier-specific: datacentre hardware uses a 5-year calendar life at 90% average utilisation, while workstation hardware uses 3 years at 40%. An explicit `--buy-lifetime-hours` or `--utilisation` value overrides that dimension for every discovered accelerator, and the output records `base_lifetime_hours`, effective `lifetime_hours`, and `utilisation`.
 
 Required Installation:
 ```bash
@@ -16,7 +16,7 @@ cd MoE-CAP
 pip install -e .
 ```
 
-The script writes one sidecar JSON next to each `metrics_*.json` / `metrics.json` file in the input tree.
+The script writes one sidecar JSON next to each `metrics_*.json` / `metrics.json` file in the input tree. If a metrics leaf lacks a required cost input and must be skipped, its exact old cost sidecar is removed; `--dry-run` reports the removal without changing files.
 
 ---
 
@@ -106,9 +106,9 @@ This is the key sanity check for hardware comparisons. A newer accelerator can h
 
 `scale_other_capital` (default **1.2**, from MoE-CAP) inflates the GPU+CPU bill-of-materials to approximate motherboard + DRAM + SSD overhead.
 
-`lifetime_hours` default **26,280** = 3 yr × 365 × 24 calendar hours.
+`base_lifetime_hours` defaults by hardware tier: **43,800** (5 years) for datacentre hardware and **26,280** (3 years) for workstation hardware.
 
-`utilisation` default **1.0**. Set it to fleet-average hardware utilisation, e.g. `--utilisation 0.6`; the script uses `effective_lifetime_hours = lifetime_hours × utilisation` so users do not need to pre-compute effective lifetime hours manually.
+`utilisation` also defaults by tier: **0.9** for datacentre hardware and **0.4** for workstation hardware. The script uses `effective_lifetime_hours = base_lifetime_hours × utilisation`; an explicit CLI value applies across tiers.
 
 `electricity_$_per_kWh` default **0.15** (MoE-CAP default).
 
@@ -150,8 +150,8 @@ Missing prices for some GPU types → that GPU's `rent` block is omitted; `buy` 
 | `--buy-cpu-price` | `cpu_key=usd` | Override a CPU's purchase price |
 | `--buy-cpu-prices-json` | path | JSON `{"xeon-8468": 7214}` or `{"xeon-8468": {"price_per_unit_usd": 7214, "price_source": "..."}}` |
 | `--buy-cpu-tdp` | `cpu_key=W` | Override a CPU's TDP |
-| `--buy-lifetime-hours` | float | Calendar lifetime hours; default 26280 (3 yr) |
-| `--utilisation` / `--utilization` | float | Average utilisation in `(0, 1]`; effective lifetime = lifetime × utilisation |
+| `--buy-lifetime-hours` | float | Override calendar lifetime hours across tiers; default 43800 datacentre / 26280 workstation |
+| `--utilisation` / `--utilization` | float | Override average utilisation across tiers in `(0, 1]`; default 0.9 datacentre / 0.4 workstation |
 | `--buy-electricity-usd-per-kwh` | float | Default 0.15 |
 | `--buy-scale-other-capital` | float | Default 1.2 (MoE-CAP) |
 
@@ -369,10 +369,10 @@ python3 compute_cost.py ... --dry-run | head
 
 The buy figures are a **theoretical lower bound** under the MoE-CAP simplification. They will look optimistic vs. cloud rent if you don't adjust:
 
-1. **Utilisation.** Defaults assume 24×7 use over `lifetime_hours` (`--utilisation 1.0`). Real fleets see 40-70%; set `--utilisation 0.4`–`0.7` to make the capital amortization explicit instead of manually pre-computing effective lifetime hours. At 50% utilisation your effective capital $/h roughly doubles.
+1. **Utilisation.** Published defaults assume 90% average utilisation for datacentre hardware and 40% for workstation hardware. Set `--utilisation` explicitly to model a different duty cycle across every tier; capital $/h scales inversely with the selected value.
 2. **Capital scaling = 1.2** covers only motherboard / DRAM / SSD. Real DC TCO adds chassis, NICs, switches, PDUs, cooling (PUE ~1.5-2.0), rack space, ops staff, financing. Industry rule-of-thumb: server TCO ≈ 2-3× BoM. Override with `--buy-scale-other-capital 2.5` (or higher).
 3. **Electricity $0.15/kWh** is mid-tier. Industrial rates can be $0.05-0.10/kWh, but multiply by PUE.
-4. **3-year lifetime** is conservative; hyperscalers depreciate 5-6 yr now.
+4. **Lifetime depends on deployment class.** Published datacentre figures use 5 years, while workstation figures use 3 years; `--buy-lifetime-hours` explicitly overrides both.
 5. **GPU/CPU prices** are curated current/recent-average market estimates with linked public anchors. Hyperscaler / OEM volume deals can be substantially lower; "list" pricing for new datacenter GPUs is also rarely public (NVIDIA does not publish DC GPU prices on nvidia.com). For each TEASBench release, prefer checking in a release-specific JSON table via `--buy-gpu-prices-json` / `--buy-cpu-prices-json` when the built-ins are stale.
 6. **Single-card prices for GB200/GB300/HGX boards are nominal** — those parts are almost always sold as 4-/8-GPU boards or full systems. The per-GPU number is derived from system price ÷ GPU count where indicated.
 

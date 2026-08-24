@@ -19,6 +19,7 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.labels['job-name']
+          @study_job_uid_env@
           - name: k8s_node_name
             valueFrom:
               fieldRef:
@@ -37,9 +38,10 @@ spec:
         args:
           - |
             job_start_time=$(date +%s)
+            @study_initialization@
 
             timestamp=$( date +%Y%m%d-%H%M )
-            RUN_DIR=/dev/shm/$timestamp
+            RUN_DIR=@run_dir@
             mkdir -p $RUN_DIR
             
             exec &> $RUN_DIR/stdout_stderr.log
@@ -52,6 +54,7 @@ spec:
             apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" -y install git
             git clone  https://github.com/Auto-CAP/MoE-CAP.git /dev/shm/MoE-CAP
             cd /dev/shm/MoE-CAP
+            @moe_cap_pin@
             MOE_CAP_COMMIT=$(git rev-parse --short HEAD)
             pip install -e .
             pip install gputil
@@ -90,6 +93,7 @@ spec:
                 server_init_end_time=$(date +%s)
                 server_init_duration=$((server_init_end_time - server_init_start_time))
                 echo "Server is ready!"
+                @study_server_ready@
                 echo "Server initialisation took $server_init_duration seconds"
                 jq -n --arg server_init_duration $server_init_duration '{server_initialisation: $server_init_duration}'  >> $RUN_DIR/timings.json
                 echo "Starting to run benchmark (sending http requests)..."
@@ -106,6 +110,7 @@ spec:
                 CLIENT_SUCCESS=$?  # not 100% robust, could be failed redirection
 
                 if [ "$CLIENT_SUCCESS" == 0 ]; then
+                    @study_client_success@
                     echo "Benchmark run finished"
                     client_end_time=$(date +%s)
                     client_duration=$((client_end_time - client_start_time))
@@ -154,6 +159,7 @@ spec:
 
             # Add commit IDs of MoE-CAP and TEASBench to metadata.json (on the PVC copy)
             jq --arg moe_cap_commit $MOE_CAP_COMMIT '.system_environment += {"teasbench_commit": "@teasbench_commit@", "moe_cap_commit": $moe_cap_commit}' $PVC_RUN_OUTPUT_DIR/metadata.json > tmp.json && mv tmp.json $PVC_RUN_OUTPUT_DIR/metadata.json
+            @study_metadata_enrichment@
 
             job_end_time=$(date +%s)
             job_duration=$((job_end_time - job_start_time))
@@ -167,13 +173,26 @@ spec:
             # never a git working tree. All git work happens in a throwaway clone in /dev/shm so
             # that a fresh checkout can never collide with another job's untracked archive files,
             # and concurrent pushes are handled by retrying with a rebase rather than by locking.
+            # --filter=blob:none makes it a partial clone so blobs for the repo's whole
+            # accumulated history of prior runs are never downloaded -- sparse-checkout alone
+            # only stops them being written to the working tree, not fetched.
             GIT_TOKEN="${GIT_TOKEN%$'\n'}"   # remove trailing newline that causes issues
             REPO_URL="https://oauth2:${GIT_TOKEN}@github.com/TEAS-project/@results_repo@.git"
             CLONE=/dev/shm/@results_repo@
             PUBLISH_SUBDIR="@output_repo_dir@/$timestamp"
 
+            # The results repo's .lfsconfig points at gitlab.eidf.ac.uk and some of its
+            # leaves are LFS-tracked. The sparse checkout below keeps those paths out of
+            # the working tree so the smudge filter never runs; GIT_LFS_SKIP_SMUDGE is a
+            # guard for the case where the cone ever widens. GIT_TERMINAL_PROMPT=0 stops
+            # an unattended run blocking on a credential prompt for that GitLab host,
+            # which the GitHub token in $REPO_URL cannot satisfy anyway.
+            export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
             rm -rf "$CLONE"
-            if ! git clone --quiet "$REPO_URL" "$CLONE"; then
+            if ! { git clone --quiet --branch main --single-branch --depth 1 --filter=blob:none --no-checkout "$REPO_URL" "$CLONE" \
+                   && git -C "$CLONE" sparse-checkout init --cone \
+                   && git -C "$CLONE" checkout --quiet main \
+                   && git -C "$CLONE" sparse-checkout add "$PUBLISH_SUBDIR"; }; then
                 echo "RESULTS PUBLISH FAILED: could not clone results repo; data is in $PVC_RUN_OUTPUT_DIR"
             else
                 git -C "$CLONE" config user.email "autopush@eidf"
@@ -203,24 +222,33 @@ spec:
                 if git -C "$CLONE" diff --cached --quiet; then
                     echo "RESULTS PUBLISH FAILED: nothing staged for $PUBLISH_SUBDIR; data is in $PVC_RUN_OUTPUT_DIR"
                 else
-                    git -C "$CLONE" commit -q -m "auto: @name_k8s@"
-                    PUSHED=0
-                    for attempt in 1 2 3 4 5 6; do
-                        if git -C "$CLONE" push -q "$REPO_URL" HEAD:main; then PUSHED=1; break; fi
-                        echo "push attempt $attempt rejected; rebasing onto origin/main"
-                        git -C "$CLONE" pull --rebase -q "$REPO_URL" main || break
-                        sleep $(( (RANDOM % 20) + 5 ))
-                    done
-                    if [ $PUSHED -eq 1 ]; then
-                        echo "RESULTS PUBLISHED to $PUBLISH_SUBDIR"
+                    if git -C "$CLONE" commit -q -m "auto: @name_k8s@"; then
+                        PUSHED=0
+                        for attempt in 1 2 3 4 5 6; do
+                            # lfs.locksverify=false: git-lfs's pre-push hook calls the locking API even
+                            # when nothing being pushed is LFS-tracked -- one more chance to be asked
+                            # for GitLab credentials. Only the lock check is disabled (not --no-verify),
+                            # so the hook's upload path still works if a leaf here ever becomes tracked.
+                            if git -C "$CLONE" -c lfs.locksverify=false push -q "$REPO_URL" HEAD:main; then PUSHED=1; break; fi
+                            echo "push attempt $attempt rejected; rebasing onto origin/main"
+                            git -C "$CLONE" pull --rebase -q "$REPO_URL" main || break
+                            sleep $(( (RANDOM % 20) + 5 ))
+                        done
+                        if [ $PUSHED -eq 1 ]; then
+                            @study_publish_success@
+                            echo "RESULTS PUBLISHED to $PUBLISH_SUBDIR"
+                        else
+                            echo "RESULTS PUBLISH FAILED after retries; data is in $PVC_RUN_OUTPUT_DIR"
+                        fi
                     else
-                        echo "RESULTS PUBLISH FAILED after retries; data is in $PVC_RUN_OUTPUT_DIR"
+                        echo "RESULTS PUBLISH FAILED: git commit failed; data is in $PVC_RUN_OUTPUT_DIR"
                     fi
                 fi
                 rm -rf "$CLONE"
             fi
 
             echo "Finalising container"
+            @study_terminal_validation@
         ports:
           - containerPort: 30000 
         resources:

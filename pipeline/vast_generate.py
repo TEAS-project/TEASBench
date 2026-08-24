@@ -137,6 +137,11 @@ def generate_vast_scripts(csv_file, target_dir, private_image: bool = False):
     df = pd.read_csv(csv_file)
     all_columns = list(df.columns)
 
+    # Study columns are EIDF-only: this path bakes the engine into the image
+    # and would silently ignore engine_version.
+    if {"study_block", "engine_version"} & set(all_columns):
+        raise ValueError("replication-study CSVs cannot be generated with --vast")
+
     # Split by pipeline family first, from each row's explicit `family` column.
     # The two families use different images, run different scripts inside the
     # container (run_benchmarks.sh vs run_agentic_benchmarks.sh, selected by the

@@ -4,7 +4,10 @@ import yaml
 import os
 import re
 import subprocess
-from utils import needs_login_node_driver, swe_bench_lite_on_k8s, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, site_of, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
+from utils import (needs_login_node_driver, swe_bench_lite_on_k8s, get_run_name,
+                   k8s_friendlify, results_repo_dir, benchmark_family, site_of,
+                   compatibility_preflight_fields, study_fields, STUDY_ID,
+                   TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR)
 
 DEFINED_SENTINEL = "<defined>"
 
@@ -253,10 +256,119 @@ class Template:
         # Construct Image Name: base + version + variant
         img_cfg = self.resolve_generic_variable("image", config, matching_rules, parameters)
         img_version = self.resolve_generic_variable("inference_engine_version", config, matching_rules, parameters)
+        # Per-row engine_version (study rows) beats the config default: the
+        # build is the experimental treatment there.
+        if parameters.get("engine_version"):
+            img_version = parameters["engine_version"]
         cuda_variant = img_cfg.get("cuda_variant", "") if isinstance(img_cfg, dict) else ""
         image_name = f"{img_cfg['base']}:v{img_version}{cuda_variant if cuda_variant else ''}"
+        image_tag = f"{img_cfg['base']}:v{img_version}"
+
+        # Study rows pin MoE-CAP; a failed checkout fails the run rather than
+        # silently running latest main.
+        moe_cap_ref = parameters.get("moe_cap_ref")
+        moe_cap_pin = ""
+        if moe_cap_ref:
+            moe_cap_pin = (f"git checkout --quiet --detach {moe_cap_ref}"
+                           " || { echo 'ERROR: MoE-CAP pin failed'; exit 1; }")
+
+        # Study leaves record their identity, the realised environment
+        # (node, GPU UUIDs, pip freeze) and the judge-baseline content hash.
+        study_enrichment = ""
+        study_initialization = ""
+        study_job_uid_env = ""
+        study_server_ready = ""
+        study_client_success = ""
+        study_publish_success = ""
+        study_terminal_validation = ""
+        run_dir = "/dev/shm/$timestamp"
+        study = study_fields(parameters)
+        preflight = compatibility_preflight_fields(parameters)
+        if study:
+            block, version = study
+            order = int(parameters["study_order"])
+            study_initialization = (
+                "STUDY_SERVER_OK=0\n"
+                "STUDY_CLIENT_OK=0\n"
+                "STUDY_ENRICH_OK=0\n"
+                "STUDY_PUBLISH_OK=0\n"
+                f'STUDY_PREFLIGHT={1 if preflight else 0}\n'
+                f'STUDY_ID="{STUDY_ID}"\n'
+                f'STUDY_BLOCK="{block}"\n'
+                f'STUDY_ORDER="{order}"\n'
+                f'STUDY_DATASET="{parameters["dataset"]}"\n'
+                f'STUDY_ENGINE="{parameters["inference_engine"]}"\n'
+                f'STUDY_ENGINE_VERSION="{version}"\n'
+                f'STUDY_GPU="{parameters["gpu"]}"\n'
+                f'STUDY_GPU_PRODUCT="{parameters["gpu_product"]}"\n'
+                f'STUDY_IMAGE_TAG="{image_tag}"\n'
+                f'PREFLIGHT_MOE_CAP_REF="{parameters.get("moe_cap_ref", "")}"\n'
+                f'TEASBENCH_COMMIT="{parameters["_teasbench_commit"]}"'
+            )
+            study_job_uid_env = (
+                "- name: k8s_job_uid\n"
+                "  valueFrom:\n"
+                "    fieldRef:\n"
+                "      fieldPath: metadata.labels"
+                "['batch.kubernetes.io/controller-uid']"
+            )
+            study_server_ready = "STUDY_SERVER_OK=1"
+            study_client_success = "STUDY_CLIENT_OK=1"
+            study_publish_success = "STUDY_PUBLISH_OK=1"
+            with open("k8s/helpers/study_terminal_validate.sh", "r") as handle:
+                terminal_lines = handle.read().splitlines()
+            study_terminal_validation = "\n".join(terminal_lines[1:])
+            enrichment_prefix = (
+                "GPU_UUIDS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader"
+                " | paste -sd, -)\n"
+                "BASELINE_SHA=$(sha256sum $PVC_RUN_OUTPUT_DIR/gpt-4-0613.jsonl"
+                " 2>/dev/null | cut -d' ' -f1)\n"
+                "pip freeze > $PVC_RUN_OUTPUT_DIR/pip_freeze.txt\n")
+            if preflight:
+                run_dir = "/dev/shm/batch-size-default/compatibility-preflight/$timestamp"
+                study_enrichment = enrichment_prefix + (
+                    "LAUNCH_YAML=$(find $PVC_RUN_OUTPUT_DIR -maxdepth 1 -type f "
+                    "\\( -name '*.yaml' -o -name '*.yml' \\) | head -1)\n"
+                    "IMAGE_REF=$(sed -nE 's/^[[:space:]]*image:[[:space:]]*"
+                    "(.+@sha256:[0-9a-f]{64})[[:space:]]*$/\\1/p' $LAUNCH_YAML)\n"
+                    "jq --arg gpu_uuids \"$GPU_UUIDS\" --arg node \"$k8s_node_name\" "
+                    "--arg job \"$k8s_job_name\" --arg uid \"$k8s_job_uid\" "
+                    "--arg image_ref \"$IMAGE_REF\" "
+                    "'.compatibility_preflight = {dataset: \"longbench_v1\", "
+                    "num_samples: 256, batch_size: \"default\", gpu: \"A100\", "
+                    "num_gpu: 2, node: $node, job_name: $job, job_uid: $uid, "
+                    "gpu_uuids: ($gpu_uuids | split(\",\") | map(select(length > 0))), "
+                    "image_ref: $image_ref}' "
+                    "$PVC_RUN_OUTPUT_DIR/metadata.json > tmp_study.json "
+                    "&& mv tmp_study.json $PVC_RUN_OUTPUT_DIR/metadata.json "
+                    "&& STUDY_ENRICH_OK=1")
+            else:
+                study_enrichment = enrichment_prefix + (
+                    "jq --arg gpu_uuids \"$GPU_UUIDS\" --arg node \"$k8s_node_name\" "
+                    "--arg gpu_product \"$STUDY_GPU_PRODUCT\" "
+                    "--arg bsha \"$BASELINE_SHA\" --arg job \"$k8s_job_name\" "
+                    "--arg uid \"$k8s_job_uid\" "
+                    f"'.study = {{study_id: \"{STUDY_ID}\", block_id: \"{block}\", "
+                    f"planned_order: {order}, engine_version: \"{version}\", "
+                    f"dataset: \"{parameters['dataset']}\", num_samples: 256, "
+                    f"gpu: \"{parameters['gpu']}\", num_gpu: 2, batch_size: \"default\", "
+                    "node: $node, job_name: $job, job_uid: $uid, gpu_uuids: $gpu_uuids, "
+                    "gpu_product: $gpu_product, "
+                    "arena_baseline_sha256: $bsha}' "
+                    "$PVC_RUN_OUTPUT_DIR/metadata.json > tmp_study.json "
+                    "&& mv tmp_study.json $PVC_RUN_OUTPUT_DIR/metadata.json "
+                    "&& STUDY_ENRICH_OK=1")
 
         replacements = {
+            "@moe_cap_pin@": moe_cap_pin,
+            "@study_metadata_enrichment@": study_enrichment,
+            "@study_initialization@": study_initialization,
+            "@study_job_uid_env@": study_job_uid_env,
+            "@study_server_ready@": study_server_ready,
+            "@study_client_success@": study_client_success,
+            "@study_publish_success@": study_publish_success,
+            "@study_terminal_validation@": study_terminal_validation,
+            "@run_dir@": run_dir,
             "@image_name@": image_name,
             "@extra_container_env@": extra_env,
             "@download_arena_hard_baseline_answers@": arena_dl,
@@ -391,13 +503,19 @@ class Template:
 
     def get(self, parameters: dict, results_repo: str,
             extra: dict = None, template_override: str = None):
+        parameters = dict(parameters)
         with open("configs/config.yaml", "r") as f:
             config = yaml.safe_load(f)
 
         rules = config.get("rules", [])
         matching_rules = self.get_matching_rules(rules, parameters)
 
-        teasbench_commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+        rev_parse = ['git', 'rev-parse']
+        if not compatibility_preflight_fields(parameters):
+            rev_parse.append('--short')
+        rev_parse.append('HEAD')
+        teasbench_commit = subprocess.check_output(rev_parse).decode('ascii').strip()
+        parameters["_teasbench_commit"] = teasbench_commit
 
         # Site values: everything about the target cluster that the job
         # manifests would otherwise hardcode. Sourced from configs/sites/
