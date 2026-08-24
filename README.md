@@ -71,7 +71,7 @@ bash pipeline/k8s/setup/setup_swebench_env.sh
   This installs `agent_cap`, `swe-rex` and `swebench` into a Python venv, clones SWE-agent and applies
   and verifies AgentCAP's streaming patch, then writes `env.sh` (environment setup) and `versions.json` (recorded into each run's metadata). 
   
-On EIDF and other clusters that do not grant pods role-based access control (RBAC), SWE-bench Lite benchmarks are launched not as an unattended K8s Job but using a bash driver script on the login node that can be run interactively or backgrounded - see [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac) and [§4.7](#47-swe-bench-lite-on-a-k8s-cluster). 
+On EIDF and other clusters that do not grant pods role-based access control (RBAC), SWE-bench Lite benchmarks are launched not as an unattended K8s Job but using a bash driver script on the login node that can be run interactively or backgrounded - see [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac) and [§4.7](#47-swe-bench-lite-on-a-k8s-cluster). Note only one driver script (i.e. one SWE-bench run) should be run at any given time within a K8s namespace.
 
 > On EIDF and other clusters that do not grant pods RBAC, SWE-bench experiments are run using TEASBench's `PortForwardK8sProvider` mechanism described in [§4.6](#46-preflight-check-for-portforwardk8sprovider-mode-clusters-without-pod-rbac) and [§4.7](#47-swe-bench-lite-on-a-k8s-cluster). On clusters that permit RBAC the alternative `InClusterK8sProvider` mechanism is available - see [§4.5](#45-preflight-check-for-inclusterk8sprovider-mode-clusters-that-grant-pod-rbac), however this has not been tested. 
 
@@ -277,36 +277,7 @@ python3 pipeline/k8s/preflight/preflight_portforward.py --namespace <namespace>
 It drives the **real** `PortForwardK8sProvider` OS port allocation, the
 `kubectl port-forward` spawn, the readiness poll, the tunnel-babysitter thread
 and cleanup on release, plus the `kubectl cp` / `kubectl exec` path the
-SWE-bench evaluator uses. Only the sandbox container's payload is substituted
-(busybox serving an `is_alive` file instead of a multi-GB image pip-installing
-swe-rex), because what is under test is the tunnel mechanism, not swe-rex.
-
-The check most worth reading is this one — it doesn't just wait and hope, it
-kills the tunnel and checks that the babysitter actually puts it back:
-
-```
-  [3b] fault injection: killing kubectl port-forward mid-task
-        killed kubectl port-forward pid 84213 (local port 41235)
-        waiting up to 90s for the babysitter to notice and respawn the tunnel
-        on the SAME local port (41235)...
-  PASS  tunnel recovered on the same local port (41235) after 6s
-  PASS  babysitter journalled a pf_drop/running row for this drop
-```
-
-It kills the local `kubectl port-forward` process out from under a live
-sandbox and checks two things recover, reported separately so a failure says
-which half broke: the tunnel itself, back up on the **same** local port
-(SWE-agent is handed that port once at launch and has no way to learn a new
-one), and a `pf_drop` / `phase: "running"` row in the drop journal for the
-drop — that exact row is what makes a task eligible for retry (see the
-developer guide, §5, for the journal schema and the retry classifier). A
-killed local process isn't quite the production failure that motivated the
-babysitter rewrite — a dropped `kubectl` is not the same as an apiserver-side
-stream reset that leaves `kubectl` running but silently stops forwarding —
-but it's the closest fault this preflight can inject from outside the
-cluster, and it exercises a recovery path that used to be entirely
-unverified outside of production. It runs by default and adds ~90s; skip it
-with `--no-fault-injection` when you only want the faster checks.
+SWE-bench evaluator uses.
 
 A `kubectl port-forward` that dies quietly mid-task is the failure the
 babysitter thread exists to prevent, and the one that would otherwise surface as
@@ -392,13 +363,14 @@ enough to publish, pushes the results, and **deletes the engine Job on exit**;
 success, failure or Ctrl-C. This means an aborted run cannot leave GPUs
 allocated. You never start an engine or submit the engine manifest by hand.
 
-Useful flags: `--no-push`, `--namespace`, `--output-root`.
+> **Run one driver at a time per namespace.** On the `PortForwardK8sProvider`
+> path, do not start a second SWE-bench run in the same namespace while one is
+> already going. The driver cleans up sandbox Jobs by label
+> (`app=teasbench-sandbox`), which is namespace-wide and carries nothing
+> identifying which run owns them — so one run's cleanup, whether on exit,
+> Ctrl-C or between retry attempts, deletes the other run's **live** sandboxes.
 
-There is no `--resume` flag: an earlier version parsed one but never acted on
-it, and since `$TIMESTAMP` is recomputed on every invocation there was never a
-previous run directory for it to resume into. Resuming a run that lost tasks
-to a dropped tunnel now happens automatically, inside the script — see
-"Retrying dropped sandbox tunnels" below.
+Useful flags: `--no-push`, `--namespace`, `--output-root`.
 
 The driver contains **no install paths of its own**: `TEASBENCH_ROOT`,
 `AGENTCAP_DIR`, `SWEAGENT_DIR` and the interpreter all come from `env.sh`, and it
@@ -408,69 +380,10 @@ than editing anything generated.
 
 #### Retrying dropped sandbox tunnels
 
-A dropped `kubectl port-forward` tunnel to a sandbox kills the task using it
-— but used to leave the run looking like a clean success anyway: a row still
-landed in `results.jsonl` with an empty patch, and the script exited 0. The
-driver now runs the client in a bounded retry loop instead of once, controlled
-by two env vars (set them before invoking the script; they are not CLI flags,
-since they tune the internal loop rather than anything a one-off run needs to
-override):
+An incidental dropped `kubectl port-forward` tunnel to a sandbox kills the task using it. To compensate for this, the runs the client in a bounded retry loop controlled by`MAX_ATTEMPTS`, which defaults to `50` - deliberately far above what a healthy run needs: the loop is meant to end when the retry list is empty, and a no-progress guard stops it as soon as an attempt fails to shrink that list. 
 
-| Env var | Default | Meaning |
-|---|---|---|
-| `MAX_ATTEMPTS` | `50` | backstop on total client invocations, including the first. Deliberately far above what a healthy run needs: the loop is meant to end when the retry list is empty, and the no-progress guard stops it as soon as an attempt fails to shrink that list, so this only bites if something is retryable but never succeeding |
-| `RETRY_TIMEOUTS` | `1` | also retry tasks killed by the outer per-task `timeout` (`sweagent_rc == 124`), once each |
-| `SKIP_PREFLIGHT` | `0` | set to `1` to bypass the real-image sandbox preflight in step `[1b]`. That gate pulls a real SWE-bench instance image and proves a sandbox pod actually serves swe-rex before any GPU is claimed — it is the only check that exercises the pod command, which otherwise fails invisibly until every task has burned its 600s sandbox timeout |
-
-After each attempt — while attempts remain and the engine is still serving
-`/v1/models` — `swebench_run_audit retry-list` decides which tasks to re-run:
-only ones with positive evidence of an infrastructure failure (a tunnel drop
-seen by the babysitter after it was already up, a `k8s sidecar failed:`
-error, a tunnel-drop signature in the SWE-agent logs, or, with
-`RETRY_TIMEOUTS=1`, a first-time outer timeout). A task the agent itself gave
-up on — ran out of cost, format, or context budget, or finished and submitted
-nothing — is never retried; doing so would give it a second sample and bias
-accuracy upward. `swebench_run_audit prune` then archives `results.jsonl` and
-clears the retried tasks' stream stats and trajectory files so a retry
-can't inherit an earlier attempt's numbers or patch, and the loop re-invokes
-the client with AgentCAP's own `--resume`. Full retry/do-not-retry rules are
-in the developer guide, §5.
-
-Retrying a whole task is the fallback, not the first line of defence: a tunnel
-drop should not cost the task in the first place. swe-rex already ships
-everything needed for that — `RemoteRuntime._request` has a retry loop, and
-every request carries an `X-Request-ID` the server treats as an idempotency
-key — but `num_retries` defaults to `0` and no caller overrides it, so the
-first `ServerDisconnectedError` is fatal even though the babysitter restores
-the tunnel in a millisecond or two. `pipeline/k8s/setup/patch_swerex_retries.py` turns
-the retries on, and makes the server register a request as in-flight *before*
-running it so a retry that arrives mid-execution waits for the original
-instead of putting a second command on the same shell. The client half is
-applied on the login node by `setup_swebench_env.sh`; the server half is
-applied inside each sandbox pod, which pip-installs swe-rex at startup.
-
-| Env var | Default | Meaning |
-|---|---|---|
-| `SWEREX_NUM_RETRIES` | `3` | transport-level retries per swe-rex request. `0` restores stock behaviour |
-
-The other half of the problem was the babysitter itself. swe-rex runs the
-sandbox shell synchronously inside its own event loop — blocking `pexpect`
-in `run_in_session`, `subprocess.run` in `execute`, neither offloaded — so
-while an agent command runs, which for a test suite is minutes, the server
-answers nothing at all. Probing `/is_alive` therefore reported a healthy
-tunnel as dead, and the restart that followed tore down the connection
-carrying that very command: the babysitter manufacturing the drop it exists
-to detect, on a schedule set by its own probe cadence.
-
-Both ends are now fixed. `PortForwardK8sProvider._probe_tunnel` tests the
-tunnel rather than the application — a TCP connect, where silence is the
-healthy answer and an immediate EOF means kubectl could not forward — while
-`_probe_server` keeps the `/is_alive` check for the one place it belongs,
-deciding at startup that the sandbox is ready to hand over. And
-`pipeline/k8s/setup/patch_swerex_nonblocking.py` runs each blocking shell
-operation in a worker thread so the server stays responsive, serialised by a
-single lock so that unblocking the loop cannot introduce a race the blocking
-was previously preventing.
+After each attempt and while attempts remain the driver decides which tasks to retry. Only tasks with positive evidence of an infrastructure failure - a tunnel drop seen by the babysitter after it was already up, a `k8s sidecar failed:`
+error, a tunnel-drop signature in the SWE-agent logs - are retried. A task the agent itself gave up on — ran out of cost, format, or context budget, or finished and submitted nothing — is never retried; doing so would give it a second sample and bias accuracy upward. 
 
 #### Completeness gate
 
@@ -478,9 +391,7 @@ Before pushing anything, the driver runs `swebench_run_audit report`, which
 writes `$RUN_DIR/completeness.json` and exits non-zero if any task is still
 infrastructure-incomplete after the retry loop, or if `predictions.json` /
 `eval_k8s_results.json` are short of the number of patched tasks in
-`results.jsonl`. This is the check the evidence run that motivated all of
-this would have failed: it exited 0 with `status: "completed"` and
-`acc: 0.200` while 55 of 100 tasks had silently produced no patch.
+`results.jsonl`. 
 
 **A failed gate means nothing is published.** The script exits 1 without
 pushing — the engine Job is still torn down first, since the `EXIT` trap runs
