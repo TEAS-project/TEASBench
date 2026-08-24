@@ -448,67 +448,6 @@ once at startup: is the sandbox ready to hand to SWE-agent. Fixing the blocking
 alone would not be enough, because a run must not depend on that patch having
 been applied.
 
-### Patching the engine before it launches
-
-`agentic-engine.yaml` has one hook, `@engine_pre_launch@`, that runs between
-the environment setup and `launch_server`. It is filled from the
-`engine_pre_launch_script` variable — empty for every row that does not set
-it, so the rendered manifest is unchanged for engines that need nothing.
-
-The script is embedded base64-encoded on a single line, not as a heredoc.
-`Template.get()` re-indents any multi-line replacement to the placeholder's
-YAML indentation, which is right for shell and fatal for Python: a uniformly
-indented module is an `IndentationError` on its first statement. One line also
-puts the payload beyond the reach of shell quoting.
-
-Only one row type uses it today.
-
-#### `patch_sglang_gptoss.py` — sglang's gpt-oss tool-call parser
-
-Passing `--tool-call-parser gpt-oss` is necessary and not sufficient. sglang's
-gpt-oss detector loses a large share of the model's tool calls in three ways,
-all of which reach the client as "no tool call": the extraction pattern
-insists on a `<|constrain|>json` marker the model often omits or varies; tool
-calls emitted on the *analysis* channel are not detected at all, and the
-partial-analysis streamer leaks their JSON arguments into `reasoning_content`;
-and arguments that fail to parse drop the whole call rather than being
-forwarded verbatim. SWE-agent counts each as a format error and aborts a task
-after three consecutive ones, so tasks end early with no patch.
-
-Measured over two otherwise identical SWE-bench Lite runs of the same weights
-— same tasks, same agent, same driver, differing only in engine:
-
-| | sglang | vLLM |
-|---|---|---|
-| LM responses | 2166 | 7817 |
-| returned with no tool call | **709 (32.7%)** | 116 (1.5%) |
-| …carrying the tool call's JSON in `reasoning_content` | **430** | **0** |
-| …with no content and no reasoning, but ~100 completion tokens billed | 170 | 71 |
-| tasks ending `exit_format` | **84 of 100** | 23 of 100 |
-| tasks producing a patch | 65 | 82 |
-
-vLLM's equivalent parser shows none of the stranded-arguments failure, which
-is why the fix is scoped to sglang. It is scoped to gpt-oss because the defect
-is in harmony-format handling, and to `orchestrator: k8s` because it edits
-sglang's source in place at the path the official `lmsysorg` image uses.
-
-**Applying it changes what an sglang number means.** A run without it measures
-the parser as much as the model, so sglang results either side of this change
-are not the same quantity and should not be pooled.
-
-**Verification.** The five anchors were applied cleanly to the genuine sglang
-v0.5.12.post1 sources for both files -- the pinned version -- and the results
-re-parsed as valid Python. They apply to v0.5.9 as well: `harmony_parser.py`
-is byte-identical between the two, and `gpt_oss_detector.py` differs only by a
-`get_structural_tag_name` method appended in v0.5.12.post1, which no anchor
-touches. `tests/test_engine_pre_launch.py` pins the script's mechanics and the
-generation wiring, but it cannot know what is inside whatever image the
-pipeline points at — **re-verify against the real sources when
-`swebench_k8s_engine_image` is bumped**. At run time the guard is the script's
-own exit status: a missing anchor exits 2, and the engine container runs under
-`set -e`, so the pod fails at startup rather than serving a parser the patch
-silently did not fix.
-
 ### The shared rule engine
 
 Both platforms build their commands from the **same** `pipeline/configs/config.yaml`

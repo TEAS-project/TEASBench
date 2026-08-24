@@ -1,31 +1,12 @@
 #!/bin/python3
 
-import base64
 import yaml
 import os
 import re
 import subprocess
-from pathlib import Path
 from utils import needs_login_node_driver, swe_bench_lite_on_k8s, get_run_name, k8s_friendlify, results_repo_dir, benchmark_family, site_of, TEAS_GPU_NAME_MAP, PVC_ARCHIVE_DIR
 
 DEFINED_SENTINEL = "<defined>"
-
-
-def engine_pre_launch_block(script_path):
-    """Shell that runs an in-container patch script before the engine starts.
-
-    The script is base64'd rather than heredoc'd because get() re-indents
-    multi-line replacements to match the placeholder's YAML indentation. That
-    is right for shell and fatal for Python: a uniformly indented module is an
-    IndentationError on its first statement. One line also puts the payload
-    beyond the reach of shell quoting. It stays a single line because the
-    re-indent only rewrites newlines, and there are none inside it.
-    """
-    name = Path(script_path).name
-    payload = base64.b64encode(Path(script_path).read_bytes()).decode("ascii")
-    return (f'echo "Applying {name} to the engine install..."\n'
-            f'echo {payload} | base64 -d > /tmp/{name}\n'
-            f'python3 /tmp/{name}\n')
 
 class Template:
     def __init__(self):
@@ -339,12 +320,6 @@ class Template:
             agentcap_ref = self.resolve_generic_variable(f"{group}_ref", config, matching_rules, parameters)
             agentic_engine_version = self.resolve_generic_variable(f"{group}_inference_engine_version", config, matching_rules, parameters)
 
-        # Rendered only by templates/agentic-engine.yaml, which exists only on
-        # the login-node-driver path -- so a row on another path resolving a
-        # script here still renders nothing.
-        pre_launch_script = self.resolve_generic_variable("engine_pre_launch_script", config, matching_rules, parameters)
-        engine_pre_launch = engine_pre_launch_block(pre_launch_script) if pre_launch_script else ""
-
         sidecar_containers = self.resolve_generic_variable("sidecar_containers", config, matching_rules, parameters)
         sidecar_wait = self.resolve_generic_variable("sidecar_wait", config, matching_rules, parameters)
         extra_setup = self.resolve_generic_variable("extra_setup", config, matching_rules, parameters)
@@ -368,7 +343,6 @@ class Template:
             "@agentic_server_command@": server_cmd,
             "@agentic_client_command@": client_cmd,
             "@agentic_env_setup@": env_setup,
-            "@engine_pre_launch@": engine_pre_launch,
             "@agentcap_repo@": agentcap_repo,
             "@agentcap_ref@": agentcap_ref,
             "@agentic_engine_version@": str(agentic_engine_version),
