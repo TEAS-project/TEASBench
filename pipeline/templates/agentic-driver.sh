@@ -522,6 +522,17 @@ while :; do
     else
         echo "[3] Running the benchmark -- attempt $ATTEMPT/$MAX_ATTEMPTS"
     fi
+    # Stamp the attempt boundary into the drop journal. swebench_run_audit's
+    # rule 1 reads the journal for evidence that a task lost its tunnel, and
+    # without a boundary it reads the WHOLE run: one recovered drop in attempt
+    # 1 then keeps that task classified infrastructure-incomplete however
+    # cleanly it re-runs, because rule 1 fires ahead of the no_evidence
+    # fallback. The loop stops on "no progress" with the run still gated.
+    # python (not date) because the journal's ts is a float epoch and BSD date
+    # has no %N; this costs one interpreter start per attempt.
+    python -c 'import json,sys,time; print(json.dumps({"ts": time.time(), "event": "attempt_start", "attempt": int(sys.argv[1])}))' \
+        "$ATTEMPT" >> "$TEASBENCH_PF_EVENTS" 2>/dev/null \
+        || echo "  WARNING: could not stamp the attempt marker into the drop journal"
     # tee -a, not tee: plain tee would truncate client.log on every attempt,
     # and section [5] below pushes *.log wholesale -- attempt 1's log would
     # simply be gone by the time anything reads it.
@@ -552,6 +563,14 @@ while :; do
         | tee -a "$RUN_DIR/client.log"
     RC=${PIPESTATUS[0]}
     echo "  agent_cap exit: $RC (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+
+    # Sample engine-vs-agent health now, because `prune` below deletes
+    # task_<id>/sweagent_traj/ and task_<id>/stream_stats.jsonl for every task
+    # it retries -- one pass at the end of the run would only ever see each
+    # task's final attempt. Advisory only: it never gates anything, and its
+    # own failure must not end the run.
+    python -m swebench_run_audit stack-health "$RUN_DIR" --attempt "$ATTEMPT" \
+        || echo "  WARNING: stack-health sampling failed (attempt $ATTEMPT)"
 
     [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ] && break
 
@@ -783,7 +802,8 @@ if [ $PUSH -eq 1 ]; then
         # published, and leaves one place to change.
         NO_PUBLISH=(engine.log engine-portforward.log
                     portforward-events.jsonl
-                    results.jsonl)
+                    results.jsonl
+                    stack-health.json)
         _publish() {
             local src base deny
             for src in "$@"; do

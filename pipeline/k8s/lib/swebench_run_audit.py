@@ -63,6 +63,7 @@ fixture directories without going through the CLI.
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -188,8 +189,39 @@ def load_journal(run_dir):
     return list(read_jsonl(Path(run_dir) / "portforward-events.jsonl"))
 
 
+ATTEMPT_MARKER_EVENT = "attempt_start"
+
+
+def _numeric(value):
+    """value as a float if it is a real number, else None (bool is not)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def journal_attempt_window(events):
+    """`ts` of the last attempt_start marker, or None if there is none.
+
+    agentic-driver.sh stamps one marker into the journal at the top of every
+    attempt, so this module can scope drop evidence to the attempt whose
+    verdict is actually being decided. Runs recorded before the marker
+    existed have none; those must keep the original whole-run behaviour
+    rather than be silently re-judged, because their verdicts are already
+    published.
+    """
+    start = None
+    for ev in events:
+        if ev.get("event") != ATTEMPT_MARKER_EVENT:
+            continue
+        ts = _numeric(ev.get("ts"))
+        if ts is not None:
+            start = ts
+    return start
+
+
 def journal_running_drop_labels(run_dir):
-    """task_ids (journal `label`) with >=1 pf_drop while phase == "running".
+    """task_ids (journal `label`) with >=1 pf_drop while phase == "running",
+    counting only drops in the current attempt.
 
     Phase is load-bearing (CONTRACT.md "Drop journal format"):
     `_PortForwardSandbox.start()` already restarts the tunnel while the
@@ -198,13 +230,35 @@ def journal_running_drop_labels(run_dir):
     "startup" and must NOT make a task eligible for retry. Only a drop the
     babysitter itself observed, after `/is_alive` first succeeded (phase
     "running"), is real infrastructure evidence.
+
+    The attempt window is load-bearing for the same reason. The journal
+    spans the whole run, so without one a single recovered drop in attempt 1
+    keeps its task in this set for every later attempt: rule 1 in
+    classify_task() fires ahead of the `no_evidence` fallback, so the task
+    stays infrastructure-incomplete however cleanly it re-runs. That both
+    masks the genuine-failure verdict such a task has earned and stalls the
+    driver's retry loop on tasks that can never clear -- the loop stops on
+    "no progress" with the run still gated as incomplete.
+
+    A drop event carrying no usable `ts` cannot be placed in any window, so
+    it is ignored once a window exists. Ignoring rather than including it is
+    deliberate: counting unplaceable evidence would reinstate exactly the
+    stale-evidence bug this window exists to close. Every event the
+    port-forward provider writes carries a ts.
     """
+    events = load_journal(run_dir)
+    since = journal_attempt_window(events)
     labels = set()
-    for ev in load_journal(run_dir):
-        if ev.get("event") == "pf_drop" and ev.get("phase") == "running":
-            label = ev.get("label")
-            if isinstance(label, str):
-                labels.add(label)
+    for ev in events:
+        if ev.get("event") != "pf_drop" or ev.get("phase") != "running":
+            continue
+        if since is not None:
+            ts = _numeric(ev.get("ts"))
+            if ts is None or ts < since:
+                continue
+        label = ev.get("label")
+        if isinstance(label, str):
+            labels.add(label)
     return labels
 
 
@@ -542,6 +596,218 @@ def cmd_prune(args):
     if summary["missing_task_dirs"]:
         print(f"  task dir already absent for {len(summary['missing_task_dirs'])} task(s) (ok): "
               + ", ".join(summary["missing_task_dirs"]))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# stack-health
+# ---------------------------------------------------------------------------
+#
+# What the engine did to the agent's ability to act, as opposed to what the
+# agent did with it. A serving stack that mangles tool calls produces the same
+# empty patch as a model that could not solve the task, and the results alone
+# cannot tell those apart -- which matters, because TEASBench deliberately does
+# NOT patch engine defects (see the revert of the sglang gpt-oss parser fix):
+# an engine that degrades a model's realised capability is part of what the
+# benchmark measures. Measuring it is the whole point; hiding it is not.
+#
+# Sampled per attempt, before `prune`, because prune deletes
+# task_<id>/sweagent_traj/ and task_<id>/stream_stats.jsonl for every task it
+# retries. A single pass at the end of a run would only ever see each task's
+# final attempt.
+
+STACK_HEALTH_FILE = "stack-health.json"
+STACK_HEALTH_SCHEMA = 1
+
+# SWE-agent logs one of these per response it could not parse a tool call from
+# (`Requerying model after FunctionCallingFormatError`). Engine-agnostic: it
+# says the harness got no usable tool call, not why.
+_FORMAT_ERROR_MARKER = "FunctionCallingFormatError"
+
+# Tool-call payload sitting in the reasoning channel instead of tool_calls --
+# the harmony-format failure the sglang gpt-oss parser produced. Matched
+# against the reasoning body only.
+_STRANDED_HINTS = ('{"command"', '{"path"', "functions.", "<|constrain|>",
+                   "<|channel|>", '{"file_text"', '{"old_str"')
+
+_MESSAGE_RE = re.compile(r"Message\((?P<body>.{0,4000}?)\)\)\]", re.S)
+_REASONING_RE = re.compile(
+    r"reasoning_content=(?P<q>['\"])(?P<body>.{0,4000}?)(?<!\\)(?P=q)", re.S)
+
+
+def unwrap_log(text):
+    """Undo the fixed-column hard wrap SWE-agent's console logger applies.
+
+    The logger pads every line to a fixed width and continues on the next line
+    with a deep indent, breaking Python reprs mid-token
+    (`accepted_pr` / `ediction_tokens=None`). Rejoining therefore strips the
+    trailing pad and concatenates with no separator.
+
+    This is lossy at wraps that fall on a real space -- "failing test" comes
+    back as "failingtest" -- which is why callers only ever test the result for
+    the presence of punctuation-dense markers, never for prose.
+    """
+    out = []
+    for line in text.splitlines():
+        stripped = line.rstrip()
+        if out and line.startswith("            ") and not stripped.lstrip().startswith(("\U0001f920", "\U0001f916")):
+            out[-1] += stripped.lstrip()
+        else:
+            out.append(stripped)
+    return "\n".join(out)
+
+
+def scrape_stranded_tool_calls(log_text):
+    """(stranded, examined) messages that carried a tool call nowhere useful.
+
+    Best-effort by construction, and the caller must treat it as such: the
+    rejected responses exist nowhere structured. SWE-agent drops them from
+    both `history` and `trajectory`, so the only surviving copy is the
+    litellm response repr in the debug log. That repr is SWE-agent's internal
+    formatting with no stability guarantee, hence (None, 0) rather than a
+    confident zero when nothing parses.
+    """
+    if not log_text or _FORMAT_ERROR_MARKER not in log_text:
+        return 0, 0
+    text = unwrap_log(log_text)
+    stranded = 0
+    examined = 0
+    for msg in _MESSAGE_RE.finditer(text):
+        body = msg.group("body")
+        if "tool_calls=None" not in body and "tool_calls=[]" not in body:
+            continue
+        # Examined counts every tool-call-less message we could read, not just
+        # the ones carrying a reasoning channel. An engine that populates no
+        # reasoning_content at all (vLLM does not) strands nothing by
+        # definition -- scoring that "undetermined" would report a blind spot
+        # where there is actually a clean negative.
+        examined += 1
+        found = _REASONING_RE.search(body)
+        if found and any(hint in found.group("body") for hint in _STRANDED_HINTS):
+            stranded += 1
+    if examined == 0:
+        # The log says responses were rejected, but nothing in it parsed as a
+        # message. Report "could not tell", never "none happened".
+        return None, 0
+    return stranded, examined
+
+
+def _traj_files(task_dir):
+    return sorted(Path(task_dir).glob("sweagent_traj/*/*.traj"))
+
+
+def sample_task_health(task_dir):
+    """Per-task counters for one attempt. Never raises: a task directory in
+    any state at all must not be able to abort the driver's loop."""
+    task_dir = Path(task_dir)
+    out = {"responses": 0, "no_tool_call": 0, "empty_action_steps": 0,
+           "hit_format_limit": False, "stranded": 0, "stranded_examined": 0,
+           "stranded_undetermined": False}
+
+    stats = task_dir / "stream_stats.jsonl"
+    if stats.exists():
+        out["responses"] = sum(1 for _ in read_jsonl(stats))
+
+    log = task_dir / "sweagent_stdout.log"
+    if log.exists():
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            text = ""
+        out["no_tool_call"] = text.count(_FORMAT_ERROR_MARKER)
+        stranded, examined = scrape_stranded_tool_calls(text)
+        if stranded is None:
+            out["stranded_undetermined"] = True
+        else:
+            out["stranded"] = stranded
+            out["stranded_examined"] = examined
+
+    for traj in _traj_files(task_dir):
+        try:
+            data = json.loads(traj.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        exit_status = (data.get("info") or {}).get("exit_status") or ""
+        # Both the bare limit and "submitted (exit_format)" -- the agent can
+        # hit the format limit and still autosubmit a patch, so this is not
+        # the same question as "did the task produce a patch".
+        if "exit_format" in exit_status:
+            out["hit_format_limit"] = True
+        for step in (data.get("trajectory") or []):
+            if not (step.get("action") or "").strip():
+                out["empty_action_steps"] += 1
+    return out
+
+
+def sample_stack_health(run_dir, attempt):
+    """Sample this attempt and merge it into RUN_DIR/stack-health.json."""
+    run_dir = Path(run_dir)
+    totals = {"tasks": 0, "responses": 0, "no_tool_call": 0,
+              "empty_action_steps": 0, "tasks_hit_format_limit": 0,
+              "stranded": 0, "stranded_examined": 0,
+              "tasks_stranded_undetermined": 0}
+    for task_dir in sorted(run_dir.glob("task_*")):
+        if not task_dir.is_dir():
+            continue
+        one = sample_task_health(task_dir)
+        totals["tasks"] += 1
+        totals["responses"] += one["responses"]
+        totals["no_tool_call"] += one["no_tool_call"]
+        totals["empty_action_steps"] += one["empty_action_steps"]
+        totals["tasks_hit_format_limit"] += 1 if one["hit_format_limit"] else 0
+        totals["stranded"] += one["stranded"]
+        totals["stranded_examined"] += one["stranded_examined"]
+        totals["tasks_stranded_undetermined"] += 1 if one["stranded_undetermined"] else 0
+
+    path = run_dir / STACK_HEALTH_FILE
+    doc = _read_json(path) or {}
+    if doc.get("schema") != STACK_HEALTH_SCHEMA:
+        doc = {"schema": STACK_HEALTH_SCHEMA, "attempts": {}}
+    doc.setdefault("attempts", {})
+    # Re-sampling the same attempt overwrites it rather than double-counting;
+    # the driver calls this once per attempt but must be safe to re-run.
+    doc["attempts"][str(attempt)] = totals
+    doc["totals"] = _sum_attempts(doc["attempts"])
+    doc["stranded_detection"] = "best-effort-log-scrape"
+    doc["notes"] = (
+        "no_tool_call counts responses the harness could not parse a tool call "
+        "from, for any engine. stranded is the subset whose payload was found "
+        "in the reasoning channel instead; it is scraped from SWE-agent's "
+        "debug log because rejected responses are kept nowhere structured, so "
+        "treat it as indicative. tasks_stranded_undetermined counts tasks "
+        "whose log had rejections that could not be parsed at all.")
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    return doc
+
+
+def _sum_attempts(attempts):
+    total = {}
+    for one in attempts.values():
+        for key, value in one.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                total[key] = total.get(key, 0) + value
+    return total
+
+
+def cmd_stack_health(args):
+    try:
+        doc = sample_stack_health(args.run_dir, args.attempt)
+    except Exception as exc:
+        # Advisory telemetry must never be what stops a run.
+        print(f"swebench_run_audit stack-health: WARNING: {exc}", file=sys.stderr)
+        return 0
+    one = doc["attempts"][str(args.attempt)]
+    responses = one["responses"]
+    pct = (100.0 * one["no_tool_call"] / responses) if responses else 0.0
+    print(f"swebench_run_audit stack-health: attempt {args.attempt}")
+    print(f"  {one['responses']} response(s) over {one['tasks']} task(s)")
+    print(f"  {one['no_tool_call']} with no parseable tool call ({pct:.1f}%)"
+          + (f", {one['stranded']} stranded in the reasoning channel"
+             if one["stranded_examined"] else ""))
+    print(f"  {one['tasks_hit_format_limit']} task(s) hit the format limit")
+    if one["tasks_stranded_undetermined"]:
+        print(f"  {one['tasks_stranded_undetermined']} task(s): rejections present "
+              "but the log did not parse (stranded count is a floor)")
     return 0
 
 
@@ -961,6 +1227,15 @@ def build_arg_parser():
     p_report.add_argument("--attempts", type=int, required=True, help="how many attempts this run made")
     p_report.add_argument("--out", default=None, help="default: RUN_DIR/completeness.json")
     p_report.set_defaults(func=cmd_report)
+
+    p_health = sub.add_parser(
+        "stack-health",
+        help="sample engine-vs-agent health for one attempt into stack-health.json")
+    p_health.add_argument("run_dir")
+    p_health.add_argument("--attempt", type=int, required=True,
+                          help="attempt number being sampled; re-sampling the "
+                               "same attempt overwrites rather than double-counts")
+    p_health.set_defaults(func=cmd_stack_health)
 
     p_teas = sub.add_parser(
         "teas-output",
