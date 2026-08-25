@@ -42,6 +42,8 @@ can monkeypatch them per-case):
     TEASBENCH_SWEREX_SPEC          default "swe-rex>=1.4.0"
     TEASBENCH_SANDBOX_POD_TIMEOUT  default "1200"
     TEASBENCH_SWEREX_TIMEOUT       default "600"
+    TEASBENCH_RUN_ID               unset = no run label; else a Kubernetes
+                                    label value used to scope cleanup
 
 PortForwardK8sProvider-only (unused by InClusterK8sProvider, which has no
 tunnel to babysit or journal):
@@ -159,20 +161,27 @@ def _sandbox_job_spec(namespace, queue, image, token, port):
     and PortForwardK8sProvider - only how they *connect* to the resulting
     pod differs, not how the pod is provisioned."""
     swerex_spec = os.environ.get("TEASBENCH_SWEREX_SPEC", "swe-rex>=1.4.0")
+    job_labels = {"app": "teasbench-sandbox", "kueue.x-k8s.io/queue-name": queue}
+    pod_labels = {"app": "teasbench-sandbox"}
+    run_id = os.environ.get("TEASBENCH_RUN_ID", "")
+    if run_id:
+        if len(run_id) > 63 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?", run_id):
+            raise ValueError("TEASBENCH_RUN_ID is not a valid Kubernetes label value")
+        job_labels["teasbench.run/id"] = run_id
+        pod_labels["teasbench.run/id"] = run_id
     return {
         "apiVersion": "batch/v1", "kind": "Job",
         "metadata": {
             "generateName": "swe-rex-",
             "namespace": namespace,
-            "labels": {"app": "teasbench-sandbox",
-                       "kueue.x-k8s.io/queue-name": queue},
+            "labels": job_labels,
         },
         "spec": {
             "backoffLimit": 0,
             "ttlSecondsAfterFinished": 600,
             "activeDeadlineSeconds": 6 * 3600,
             "template": {
-                "metadata": {"labels": {"app": "teasbench-sandbox"}},
+                "metadata": {"labels": pod_labels},
                 "spec": {
                     "restartPolicy": "Never",
                     "containers": [{

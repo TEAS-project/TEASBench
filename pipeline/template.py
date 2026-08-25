@@ -422,7 +422,8 @@ class Template:
         if swe_bench_lite_engine:
             image_name = self.resolve_generic_variable(f"{group}_image", config, matching_rules, parameters)
             env_setup = ""
-            agentcap_repo = agentcap_ref = agentic_engine_version = ""
+            agentcap_repo = agentcap_ref = ""
+            agentic_engine_version = self.resolve_generic_variable("swebench_k8s_inference_engine_version", config, matching_rules, parameters)
         else:
             image_name = self.resolve_generic_variable(f"{group}_image", config, matching_rules, parameters)
             env_setup_path = self.resolve_generic_variable(f"{group}_env_setup_script", config, matching_rules, parameters)

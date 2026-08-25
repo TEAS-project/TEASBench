@@ -520,6 +520,10 @@ variables_defaults:
     vllm:
       value: "vllm/vllm-openai:v0.21.0"
 
+  swebench_k8s_inference_engine_version:
+    sglang: "0.5.12.post1"
+    vllm: "0.21.0"
+
   swebench_k8s_engine_server_command:
     sglang:
       base_command: "python3 -m sglang.launch_server"
@@ -1338,7 +1342,8 @@ rules:
       task_indices: "/dev/shm/AgentCAP/benchmarks/swe_bench_lite_curated_100.json"
       sweagent_dir: "/dev/shm/swe_agent"
       sweagent_image_repo: ""
-      sweagent_call_limit: 200
+      # Keep the executed and attested limits bound to one value.
+      sweagent_call_limit: "$SWEAGENT_CALL_LIMIT"
       # No max_turns here, deliberately: confirmed by grepping
       # strategies_sweagent.py that the sweagent strategy never reads
       # self.max_turns (only the built-in single/sequential/supervisor

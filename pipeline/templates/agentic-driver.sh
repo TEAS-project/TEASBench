@@ -57,6 +57,22 @@ PUSH=1
 # than anything a one-off invocation needs to override per-run.
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-50}"
 RETRY_TIMEOUTS="${RETRY_TIMEOUTS:-1}"
+# AgentCAP's SWE strategy enforces the per-task timeout. Make that implicit
+# default explicit and keep the CLI call budget tied to the metadata we publish.
+SWEAGENT_CALL_LIMIT="${SWEAGENT_CALL_LIMIT:-200}"
+SWEAGENT_TASK_TIMEOUT="${SWEAGENT_TASK_TIMEOUT:-3600}"
+for _numeric_setting in MAX_ATTEMPTS SWEAGENT_CALL_LIMIT SWEAGENT_TASK_TIMEOUT; do
+    _numeric_value="${!_numeric_setting}"
+    [[ "$_numeric_value" =~ ^[1-9][0-9]*$ ]] || {
+        echo "ERROR: $_numeric_setting must be a positive decimal integer (got $_numeric_value)" >&2
+        exit 2
+    }
+done
+[[ "$RETRY_TIMEOUTS" =~ ^[01]$ ]] || {
+    echo "ERROR: RETRY_TIMEOUTS must be 0 or 1 (got $RETRY_TIMEOUTS)" >&2
+    exit 2
+}
+unset _numeric_setting _numeric_value
 
 # No --resume flag here (there used to be one: it set $RESUME and nothing
 # ever read it -- `grep -n RESUME` found only the assignment and the parse
@@ -82,6 +98,10 @@ done
 
 TIMESTAMP="$(date +%Y%m%d-%H%M)"
 RUN_DIR="$OUTPUT_ROOT/$RUN_NAME/$TIMESTAMP"
+TEASBENCH_RUN_ID="$(python -c 'import secrets; print(secrets.token_hex(10))')"
+[[ "$TEASBENCH_RUN_ID" =~ ^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$ ]] || { echo "ERROR: TEASBENCH_RUN_ID is not a valid Kubernetes label value" >&2; exit 2; }
+SANDBOX_SELECTOR="app=teasbench-sandbox,teasbench.run/id=$TEASBENCH_RUN_ID"
+export TEASBENCH_RUN_ID
 # Hard-fail here, before anything else (flock, prerequisites, the engine Job):
 # this script only has `set -uo pipefail`, not `-e`, so a failed mkdir would
 # otherwise be silently swallowed and every later write into $RUN_DIR (engine
@@ -173,11 +193,12 @@ cleanup() {
             > /dev/null 2>&1 && echo "  engine job $ENGINE_JOB deleted"
     fi
     # Sandboxes are deleted by the provider per task; leftovers mean a crash.
+    # The run-specific selector cannot match a concurrent benchmark's Jobs.
     local left
-    left=$(kubectl -n "$NAMESPACE" get jobs -l app=teasbench-sandbox --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    left=$(kubectl -n "$NAMESPACE" get jobs -l "$SANDBOX_SELECTOR" --no-headers 2>/dev/null | wc -l | tr -d ' ')
     if [ "${left:-0}" -gt 0 ]; then
         echo "  WARNING: $left sandbox job(s) left behind; deleting"
-        kubectl -n "$NAMESPACE" delete jobs -l app=teasbench-sandbox --wait=false > /dev/null 2>&1
+        kubectl -n "$NAMESPACE" delete jobs -l "$SANDBOX_SELECTOR" --wait=false > /dev/null 2>&1
     fi
     exit $rc
 }
@@ -233,6 +254,8 @@ chk "provider importable"             "PYTHONPATH='$TEASBENCH_ROOT/pipeline/k8s/
 chk "engine manifest present"         "[ -f '$ENGINE_MANIFEST' ]" "Regenerate with pipeline/generate.py."
 chk "AgentCAP checkout ($AGENTCAP_DIR)" "[ -f '$AGENTCAP_DIR/benchmarks/swe_bench_lite_curated_100.json' ]" \
     "Re-run pipeline/k8s/setup/setup_swebench_env.sh."
+chk "evidence stager present"         "[ -f '$TEASBENCH_ROOT/pipeline/scripts/stage_agentic_evidence.py' ]" \
+    "Update the TEASBench checkout and regenerate this driver before running."
 chk "versions file ($VERSIONS_FILE)"  "[ -f '$VERSIONS_FILE' ]" \
     "Re-run pipeline/k8s/setup/setup_swebench_env.sh; run metadata would otherwise omit dependency versions."
 
@@ -440,6 +463,7 @@ export TEASBENCH_K8S_NAMESPACE="$NAMESPACE"
 # Referenced by the generated client command (see the eidf swe-bench rule in
 # pipeline/configs/config.yaml); AGENTCAP_DIR and SWEAGENT_DIR come from env.sh.
 export LLM_URL RUN_DIR SWEAGENT_DIR AGENTCAP_DIR
+export SWEAGENT_CALL_LIMIT SWEAGENT_TASK_TIMEOUT
 # Read by k8s_pod_providers.PortForwardK8sProvider (pipeline/k8s/lib) so the
 # per-task sandbox tunnels journal drops the same way the engine tunnel does
 # above, and so their kubectl port-forward stderr lands somewhere instead of
@@ -460,6 +484,7 @@ export TEAS_ENGINE_VERSION="@agentic_engine_version@"
 export TEAS_GPU_TYPE="@teas_gpu_name@"
 export TEAS_NUM_GPUS="@num_gpu@"
 export TEAS_TP="@num_gpu@"
+export TEAS_CONCURRENCY="@concurrency@"
 export TEAS_MODEL_NAME="@hf_model_path@"
 # Literal, not derived: neither pipeline/templates/agentic.yaml nor
 # pipeline/vast/run_agentic_benchmarks.sh source this from a per-row rule
@@ -621,10 +646,10 @@ while :; do
     # leave swe-rex sandbox Jobs running, holding Kueue quota the next
     # attempt's own sandboxes then have to queue behind. Same sweep
     # cleanup() does on the way out (see above).
-    left=$(kubectl -n "$NAMESPACE" get jobs -l app=teasbench-sandbox --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    left=$(kubectl -n "$NAMESPACE" get jobs -l "$SANDBOX_SELECTOR" --no-headers 2>/dev/null | wc -l | tr -d ' ')
     if [ "${left:-0}" -gt 0 ]; then
         echo "  sweeping $left leaked sandbox job(s) before the resume pass"
-        kubectl -n "$NAMESPACE" delete jobs -l app=teasbench-sandbox --wait=false > /dev/null 2>&1
+        kubectl -n "$NAMESPACE" delete jobs -l "$SANDBOX_SELECTOR" --wait=false > /dev/null 2>&1
     fi
 
     ATTEMPT=$((ATTEMPT + 1))
@@ -683,28 +708,47 @@ echo "[4] Recording dependency versions"
 # Fold the environment's resolved commits/versions into the run's own metadata,
 # so a result in the results repo can be traced to the exact code that produced
 # it without consulting anything outside that directory.
-python - "$RUN_DIR" "$VERSIONS_FILE" <<'PYEOF'
-import json, sys, glob
+if ! python - "$RUN_DIR" "$VERSIONS_FILE" "$SWEAGENT_CALL_LIMIT" "$SWEAGENT_TASK_TIMEOUT" "@inference_engine@" "@agentic_engine_version@" "@hf_model_path@" "@teas_gpu_name@" "@num_gpu@" "@concurrency@" "$ATTEMPT" "$MAX_ATTEMPTS" "$RETRY_TIMEOUTS" <<'PYEOF'
+import json, sys
 from pathlib import Path
 
 run_dir, versions_file = Path(sys.argv[1]), Path(sys.argv[2])
+call_limit, task_timeout = map(int, sys.argv[3:5])
+expected_engine, expected_engine_version, expected_model_name, expected_gpu_type = sys.argv[5:9]
+num_gpus, concurrency, attempts, max_attempts, retry_timeouts = map(int, sys.argv[9:])
+observation_path = run_dir / "runtime-observation.json"
+try:
+    observation = json.loads(observation_path.read_text())
+except Exception as exc:
+    raise SystemExit(f"could not read {observation_path}: {exc}")
+expected_observation_keys = {
+    "schema_version", "publishable", "requested_task_concurrency",
+    "observed_max_task_concurrency",
+}
+if not isinstance(observation, dict) or set(observation) != expected_observation_keys:
+    raise SystemExit(f"unexpected runtime observation schema: {observation_path}")
+if observation["schema_version"] != 1 or observation["publishable"] is not False:
+    raise SystemExit(f"invalid runtime observation policy: {observation_path}")
+if observation["requested_task_concurrency"] != concurrency:
+    raise SystemExit(f"runtime requested concurrency does not match generated value: {observation_path}")
+if observation["observed_max_task_concurrency"] != concurrency:
+    raise SystemExit(f"runtime did not reach requested concurrency: {observation_path}")
 try:
     versions = json.loads(versions_file.read_text())
 except Exception as exc:
-    print(f"  WARNING: could not read {versions_file}: {exc}")
-    sys.exit(0)
+    raise SystemExit(f"could not read {versions_file}: {exc}")
+if not isinstance(versions, dict):
+    raise SystemExit(f"{versions_file} must contain a JSON object")
 
 targets = sorted(run_dir.glob("metadata_*.json"))
-if not targets:
-    print("  WARNING: no metadata_*.json to stamp (did the run reach its output stage?)")
-    sys.exit(0)
+if len(targets) != 1:
+    raise SystemExit(f"expected exactly one metadata_*.json, found {len(targets)}")
 
 for t in targets:
     try:
         meta = json.loads(t.read_text())
     except Exception as exc:
-        print(f"  WARNING: {t.name} unreadable: {exc}")
-        continue
+        raise SystemExit(f"{t.name} unreadable: {exc}")
     meta["dependencies"] = versions
     # Mirror the commits into system_environment too: that is where the MoE
     # runs record teasbench_commit, so aggregation across families stays uniform.
@@ -717,9 +761,41 @@ for t in targets:
             se[key] = commit[:7]
     se["swe_rex_version"] = versions.get("swe_rex")
     se["swebench_version"] = versions.get("swebench")
+    se["sweagent_call_limit"] = call_limit
+    se["sweagent_task_timeout_s"] = task_timeout
+    se["concurrency"] = observation["requested_task_concurrency"]
+    se["observed_max_concurrency"] = observation["observed_max_task_concurrency"]
+    se["benchmark_attempts"] = attempts
+    se["benchmark_max_attempts"] = max_attempts
+    se["retry_timeouts"] = bool(retry_timeouts)
     t.write_text(json.dumps(meta, indent=2) + "\n")
+    recorded = json.loads(t.read_text())["system_environment"]
+    expected = {
+        "sweagent_call_limit": call_limit,
+        "sweagent_task_timeout_s": task_timeout,
+        "benchmark_attempts": attempts,
+        "benchmark_max_attempts": max_attempts,
+        "retry_timeouts": bool(retry_timeouts),
+        "inference_engine": expected_engine,
+        "inference_engine_version": expected_engine_version,
+        "tensor_parallel_size": num_gpus,
+        "concurrency": concurrency,
+        "observed_max_concurrency": concurrency,
+    }
+    if any(recorded.get(key) != value for key, value in expected.items()):
+        raise SystemExit(f"post-write execution-policy validation failed for {t.name}")
+    model = meta.get("model_config", {})
+    hardware = meta.get("hardware", {})
+    if model.get("model_name") != expected_model_name:
+        raise SystemExit(f"post-write model validation failed for {t.name}")
+    if hardware.get("gpu_type") != expected_gpu_type or hardware.get("num_gpus") != num_gpus:
+        raise SystemExit(f"post-write hardware validation failed for {t.name}")
     print(f"  stamped {t.name}")
 PYEOF
+then
+    echo "ERROR: dependency/execution-policy metadata stamping failed; not publishing" >&2
+    exit 1
+fi
 
 echo
 echo "[5] Results"
@@ -742,33 +818,24 @@ if [ $PUSH -eq 1 ]; then
     # into $RUN_DIR/@results_repo@ and left it there, so every run directory
     # ended up holding a full copy of the results repo.
     REPO_CLONE="$RUN_DIR/.results-clone"
+    REPO_URL="https://github.com/TEAS-project/@results_repo@.git"
+    GITHUB_EXTRAHEADER=""
     if [ -n "${GIT_TOKEN:-}" ]; then
-        REPO_URL="https://oauth2:${GIT_TOKEN%$'\n'}@github.com/TEAS-project/@results_repo@.git"
-    else
-        REPO_URL="https://github.com/TEAS-project/@results_repo@.git"
+        GIT_TOKEN="${GIT_TOKEN%$'\n'}"
+        GITHUB_EXTRAHEADER="Authorization: Basic $(printf 'oauth2:%s' "$GIT_TOKEN" | base64 | tr -d '\n')"
     fi
-    # Clone strategy ported from the MoE path (pipeline/templates/template.yaml,
-    # "Publish curated subset to results repo"), which had already solved this
-    # properly. --filter=blob:none + --depth 1 + --single-branch fetch none of
-    # the results repo's accumulated history, and --no-checkout with a cone
-    # sparse-checkout materialises only the subdir being published.
-    #
-    # That also makes the LFS problem structural rather than suppressed. The
-    # repo's .lfsconfig points at gitlab.eidf.ac.uk and some of its *other*
-    # leaves (agentic/vastai/**, moe/vastai/**) are LFS-tracked; nothing this
-    # driver writes is, since agentic/eidf/** matches no pattern. A full
-    # checkout smudges those unrelated files, sending git-lfs to GitLab for
-    # credentials the GitHub token in $REPO_URL cannot supply (different host)
-    # -- verified to fail the clone outright with "smudge filter lfs failed".
-    # A sparse checkout never materialises them, so the filter never runs.
-    # GIT_LFS_SKIP_SMUDGE is kept as a belt-and-braces guard in case the cone
-    # ever widens; GIT_TERMINAL_PROMPT stops a detached run blocking on a
-    # password prompt.
+    _git_github() {
+        if [ -n "$GITHUB_EXTRAHEADER" ]; then
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="$GITHUB_EXTRAHEADER" git "$@"
+        else
+            git "$@"
+        fi
+    }
+    # Sparse checkout avoids smudging unrelated GitLab-hosted LFS objects; the
+    # GitHub-scoped auth header must never be sent to that host.
     rm -rf "$REPO_CLONE"
-    # stderr is dropped because $REPO_URL embeds GIT_TOKEN and git echoes the
-    # URL in some failure messages; the branch below reports the failure.
     if ( export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
-         git clone --quiet --branch main --single-branch --depth 1 \
+         _git_github clone --quiet --branch main --single-branch --depth 1 \
              --filter=blob:none --no-checkout "$REPO_URL" "$REPO_CLONE" \
          && git -C "$REPO_CLONE" sparse-checkout init --cone \
          && git -C "$REPO_CLONE" checkout --quiet main \
@@ -776,33 +843,11 @@ if [ $PUSH -eq 1 ]; then
         DEST="$REPO_CLONE/$RESULTS_SUBDIR"
         mkdir -p "$DEST"
         shopt -s nullglob
-        # Explicit list, not metrics*.json/metadata*.json: this path's
-        # output_dir is $RUN_DIR itself (see the eidf swe-bench rule in
-        # pipeline/configs/config.yaml), so AgentCAP's own internal
-        # metrics.json (a different schema from the TEAS
-        # metrics_<dataset>_*.json -- see AgentCAP/agent_cap/agents/
-        # teas_output.py) lands in the same directory as the TEAS files
-        # instead of being isolated in a separate agentic/ subdir the way
-        # pipeline/templates/agentic.yaml and pipeline/vast/
-        # run_agentic_benchmarks.sh keep it. A loose glob here would let
-        # downstream consumers pick up metrics.json and compute degraded
-        # numbers from it -- metrics_*.json (with the underscore) is what
-        # actually excludes it. detailed-results_*.jsonl/output-data*.jsonl
-        # are added because they never used to be published at all, so the
-        # results repo's task-completeness audit had nothing to verify a run
-        # against. completeness.json is this branch's own evidence for exactly
-        # the failure mode it exists to catch (see the completeness gate).
-        #
-        # NO_PUBLISH is then applied to the basename of every candidate. It
-        # keeps the engine's stdout, the port-forward chatter and AgentCAP's
-        # internal per-task rows out of the results repo: those are
-        # operational telemetry rather than results, and they stay in
-        # $RUN_DIR either way. Filtering by name rather than narrowing the
-        # globs keeps client.log -- and any *.log a later step adds --
-        # published, and leaves one place to change.
+        # Keep operational/runtime-only files local. The strict stager owns all
+        # three raw evidence families below.
         NO_PUBLISH=(engine.log engine-portforward.log
                     portforward-events.jsonl
-                    results.jsonl
+                    runtime-observation.json
                     stack-health.json)
         _publish() {
             local src base deny
@@ -817,11 +862,7 @@ if [ $PUSH -eq 1 ]; then
         # Re-publishing over an earlier push of the same run would otherwise
         # leave a denied file sitting in the clone, which `git add -A` keeps.
         for _stale in "${NO_PUBLISH[@]}"; do rm -f "$DEST/$_stale"; done
-        _publish "$RUN_DIR"/metrics_*.json "$RUN_DIR"/metadata_*.json \
-                 "$RUN_DIR"/detailed-results_*.jsonl "$RUN_DIR"/output-data*.jsonl \
-                 "$RUN_DIR"/results.jsonl \
-                 "$RUN_DIR"/completeness.json "$RUN_DIR"/portforward-events.jsonl \
-                 "$RUN_DIR"/*.log
+        _publish "$RUN_DIR"/metrics_*.json "$RUN_DIR"/metadata_*.json "$RUN_DIR"/completeness.json "$RUN_DIR"/*.log
         # Both are already in $RUN_DIR from the start of the run; this is
         # the copy that publishes them.
         cp "$ENGINE_MANIFEST" "$DEST/" 2>/dev/null
@@ -833,6 +874,14 @@ if [ $PUSH -eq 1 ]; then
         # The clone's run dir contains only the files copied above, so -A
         # stages exactly the intended subset.
         git -C "$REPO_CLONE" add -A -- "$RESULTS_SUBDIR"
+
+        # Fail closed unless all three evidence families become exact GitLab
+        # LFS pointers matching the immutable source bytes.
+        if ! python "$TEASBENCH_ROOT/pipeline/scripts/stage_agentic_evidence.py" --source-run-dir "$RUN_DIR" --repo "$REPO_CLONE" --destination-relative "$RESULTS_SUBDIR" --expected-tasks "@num_tasks@" --sweagent-call-limit "$SWEAGENT_CALL_LIMIT" --sweagent-task-timeout-s "$SWEAGENT_TASK_TIMEOUT" --expected-engine "@inference_engine@" --expected-engine-version "@agentic_engine_version@" --expected-model-name "@hf_model_path@" --expected-gpu-type "@teas_gpu_name@" --expected-num-gpus "@num_gpu@" --concurrency "@concurrency@"; then
+            echo "  ERROR: mandatory evidence validation/staging failed; results are still in $RUN_DIR" >&2
+            rm -rf "$REPO_CLONE"
+            exit 1
+        fi
 
         if git -C "$REPO_CLONE" diff --cached --quiet; then
             # Distinct from a push failure, and worth saying so: it means the
@@ -852,12 +901,12 @@ if [ $PUSH -eq 1 ]; then
             # become LFS-tracked.
             PUSHED=0
             for attempt in 1 2 3 4 5 6; do
-                if git -C "$REPO_CLONE" -c lfs.locksverify=false \
+                if _git_github -C "$REPO_CLONE" -c lfs.locksverify=false \
                        push -q "$REPO_URL" HEAD:main 2>/dev/null; then
                     PUSHED=1; break
                 fi
                 echo "  push attempt $attempt rejected; rebasing onto origin/main"
-                git -C "$REPO_CLONE" pull --rebase -q "$REPO_URL" main 2>/dev/null || break
+                _git_github -C "$REPO_CLONE" pull --rebase -q "$REPO_URL" main 2>/dev/null || break
                 sleep $(( (RANDOM % 20) + 5 ))
             done
             if [ $PUSHED -eq 1 ]; then
