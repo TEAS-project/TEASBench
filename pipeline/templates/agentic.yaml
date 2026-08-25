@@ -16,8 +16,6 @@ spec:
     spec:
       restartPolicy: Never
       @service_account@
-      securityContext:
-        fsGroup: 2000
       containers:
       @sidecar_containers@
       - name: @inference_engine@-agentic
