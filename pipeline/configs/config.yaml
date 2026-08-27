@@ -1239,7 +1239,7 @@ rules:
           /opt/AgentCAP/third_party/mcp-atlas \
           "arxiv,brave-search,calculator,cli-mcp-server,clinicaltrialsgov-mcp-server,context7,ddg-search,desktop-commander,fetch,filesystem,git,github,mcp-code-executor,mcp-server-code-runner,memory,met-museum,open-library,osm-mcp-server,pubmed,weather,whois,wikipedia"
 
-        MCP_DATA_DIR=/dev/shm/mcp_data
+        MCP_DATA_DIR=/opt/mcp_data
         mkdir -p "$MCP_DATA_DIR"
         MCP_DATA_DIR="$MCP_DATA_DIR" MCP_PORT=1984 MCP_SKIP_PREINSTALL=1 \
           bash /opt/AgentCAP/mcp-server/start.sh > "$RUN_DIR/mcp_server.log" 2>&1 &
