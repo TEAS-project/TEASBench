@@ -1147,6 +1147,10 @@ rules:
 
                   bash mcp-server/start.sh
 
+                  sed -i "s/BRAVE_API_KEY=/BRAVE_API_KEY=$BRAVE_API_KEY/g" /agent-environment/AgentCAP/third_party/mcp-atlas/.env
+
+                  sed -i "s/GITHUB_TOKEN=/GITHUB_TOKEN=$GITHUB_TOKEN/g" /agent-environment/AgentCAP/third_party/mcp-atlas/.env
+
                   bash mcp-server/start.sh
                   
                   ### old
