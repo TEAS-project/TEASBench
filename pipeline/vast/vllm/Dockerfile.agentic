@@ -23,7 +23,7 @@ ENV TEASBENCH_COMMIT=${TEASBENCH_COMMIT}
 ENV ALLOWED_ENGINE=vllm
 
 RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" update && \
-    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" install -y --no-install-recommends git curl jq ca-certificates && \
+    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout="30" install -y --no-install-recommends git curl jq ca-certificates python-is-python3 && \
     rm -rf /var/lib/apt/lists/*
 
 # AgentCAP owns benchmark semantics (agent strategy, call limits, streaming
