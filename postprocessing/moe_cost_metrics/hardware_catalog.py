@@ -366,6 +366,13 @@ CPU_SPECS: dict[str, dict] = {
         "tdp_w": 225,
         "tdp_source": "https://www.amd.com/en/products/processors/server/epyc/7003-series/amd-epyc-7713p.html",
     },
+    "ryzen-9700x": {
+        "model": "AMD Ryzen 7 9700X",
+        "price_per_unit_usd": 359.0,
+        "price_source": "https://shop-us-en.amd.com/amd-ryzen-7-9700x-processor/",
+        "tdp_w": 65,
+        "tdp_source": "https://www.amd.com/en/products/processors/desktops/ryzen/9000-series/amd-ryzen-7-9700x.html",
+    },
     "xeon-8468": {
         "model": "Intel Xeon Platinum 8468",
         "price_per_unit_usd": 7214.0,
@@ -390,7 +397,7 @@ GPU_HOST_CPU: dict[str, tuple[int, str]] = {
     "b300": (2, "xeon-8558"),
     "gb10": (1, "gb10-soc"),
     "mi355x": (2, "epyc-7713p"),
-    "blackhole-p150b": (1, "xeon-8468"),  # PCIe dev card in a single-CPU workstation host
+    "blackhole-p150b": (1, "ryzen-9700x"),  # PCIe dev cards in a workstation host; the CPU class Tenstorrent ships in its own Blackhole workstation (TT-QuietBox 2)
     "cs3": (1, "cs3-integrated-host"),
 }
 
