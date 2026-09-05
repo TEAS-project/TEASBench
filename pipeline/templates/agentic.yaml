@@ -16,8 +16,8 @@ spec:
     spec:
       restartPolicy: Never
       @service_account@
-      containers:
       @sidecar_containers@
+      containers:
       - name: @inference_engine@-agentic
         image: @image_name@
         imagePullPolicy: IfNotPresent
