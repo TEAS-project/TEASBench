@@ -1,0 +1,17 @@
+# Version bounds applied to pip in the agentic images via the PIP_CONSTRAINT
+#environment variable.
+
+# Applies during both the Dockerfile and in the live environment within a
+# a running container, the latter important for the runtime installation of
+# Agent-CAP.
+
+# FastAPI 0.137.0 refactored include_router() to store _IncludedRouter wrappers in
+# app.routes instead of flattened APIRoutes. Our versions of vLLM and SGLang don't
+# include these, so pin to < 0.137.0 to prevent runtime errors.
+# No starlette entry needed: fastapi's own dependency range pulls it back.
+fastapi<0.137
+
+# SWE-agent pulls in versions of these that are too new for the base bundled
+# transformers. Re-pin to what transformers expects.
+huggingface-hub>=0.34.0,<1.0
+tokenizers>=0.22.0,<=0.23.0

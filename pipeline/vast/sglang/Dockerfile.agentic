@@ -56,6 +56,14 @@ COPY vast/uv-wrapper.sh /root/.local/bin/uv
 COPY vast/uvx-wrapper.sh /root/.local/bin/uvx
 RUN chmod +x /root/.local/bin/uv /root/.local/bin/uvx
 
+# Same with pip: constrain versions to make sure we don't accidentally install
+# newer versions than the base image's software can work with. Note that as a
+# container ENV it also reaches the runtime pip install in entrypoint-agentic.sh,
+# which would otherwise have the potential to break it all over again live in a
+# new run.
+COPY vast/pip-constraints.txt /opt/teasbench/pipeline/vast/pip-constraints.txt
+ENV PIP_CONSTRAINT=/opt/teasbench/pipeline/vast/pip-constraints.txt
+
 # Agentic runtime deps. Only swe-bench-lite rows exercise SWE-agent/swebench/
 # modal, but installing at build time keeps startup cost off the rented GPU clock.
 # On Vast.ai the SWE-bench sandbox substrate is Modal, which swe-rex supports
@@ -72,12 +80,6 @@ COPY vast/swebench_modal_fs.patch /opt/teasbench/pipeline/vast/swebench_modal_fs
 RUN patch -p1 \
     -d /usr/local/lib/python3.12/dist-packages \
     < /opt/teasbench/pipeline/vast/swebench_modal_fs.patch
-
-# SWE-agent has just pulled in versions of huggingface-hub and tokenizers that
-# are too new for the sglang image's bundled transformers/engine. Re-pin them
-# to the versions transformers expects.
-RUN python3 -m pip install --no-cache-dir \
-        'huggingface-hub>=0.34.0,<1.0' 'tokenizers>=0.22.0,<=0.23.0'
 
 # agent_cap drives a Jupyter kernel so we also need this and ipykernel.
 # math-verify and sympy needed for IMO-Answerbench.
