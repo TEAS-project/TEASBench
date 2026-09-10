@@ -6,8 +6,7 @@ agents:
   agent:
     name: gpt-oss
     # The openai protocol posts to <base_url>/chat/completions, so /v1 must be
-    # part of base_url here (the harmony protocol's native /completions
-    # endpoint was the opposite: rooted at the server root, no /v1).
+    # part of base_url here.
     base_url: http://127.0.0.1:8000/v1
     api_key: EMPTY
     protocol: openai
